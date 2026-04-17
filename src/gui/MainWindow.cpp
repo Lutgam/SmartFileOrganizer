@@ -1,600 +1,1364 @@
 #include "MainWindow.h"
-#include "../core/FileScanner.h"
 #include "../core/DocumentParser.h"
 
-#include <QFileDialog>
-#include <QMessageBox>
-#include <QInputDialog> // Added
+#include <QAbstractItemView>
+#include <QAction>
 #include <QApplication>
-#include <fstream>
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QDesktopServices>
+#include <QDir>
+#include <QDirIterator>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QMenu>
+#include <QMessageBox>
+#include <QMetaObject>
+#include <QMimeDatabase>
+#include <QPixmap>
+#include <QRegularExpression>
+#include <QSet>
+#include <QTimer>
+#include <QUrl>
+#include <QVBoxLayout>
+#include <QWidget>
+#include <QMutexLocker>
+#include <QSizePolicy>
+
 #include <algorithm>
-#include <set>
+#include <fstream>
+#include <map>
 
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent)
-{
-    centralWidget = new QWidget(this);
-    setCentralWidget(centralWidget);
-    mainLayout = new QVBoxLayout(centralWidget);
-    mainLayout->setContentsMargins(0, 0, 0, 0);
+namespace {
 
+static const QString kTagImage = QStringLiteral("🖼️ 圖片");
+static const QString kTagVideo = QStringLiteral("🎬 影片");
+static const QString kTagDoc = QStringLiteral("📄 文件");
+static const QString kTagAudio = QStringLiteral("🎵 音檔");
+
+static QString normalizeDisplayTag(const QString &t) {
+    const QString s = t.trimmed();
+    if (s == QStringLiteral("🖼️圖片") || s == kTagImage) return kTagImage;
+    if (s == QStringLiteral("🎬影片") || s == kTagVideo) return kTagVideo;
+    if (s == QStringLiteral("📄文件") || s == kTagDoc) return kTagDoc;
+    if (s == QStringLiteral("🎧音訊") || s == QStringLiteral("🎵音檔") || s == kTagAudio) return kTagAudio;
+    return s;
+}
+
+static QString emojiForMime(const QMimeType &mt) {
+    const QString name = mt.name();
+    if (name.startsWith("image/")) return QStringLiteral("🖼️");
+    if (name.startsWith("video/")) return QStringLiteral("🎬");
+    if (name.startsWith("audio/")) return QStringLiteral("🎧");
+    if (name == QStringLiteral("application/pdf")) return QStringLiteral("📄");
+    if (name.startsWith("text/")) return QStringLiteral("📝");
+    if (name.contains(QStringLiteral("zip")) || name.contains(QStringLiteral("rar")) || name.contains(QStringLiteral("7z")) || name.contains(QStringLiteral("tar")))
+        return QStringLiteral("📦");
+    if (name.contains(QStringLiteral("json")) || name.contains(QStringLiteral("xml")) || name.contains(QStringLiteral("yaml")))
+        return QStringLiteral("🧩");
+    return QStringLiteral("📎");
+}
+
+static QString mimeDisplay(const QMimeType &mt) {
+    const QString comment = mt.comment();
+    if (!comment.isEmpty()) return comment;
+    return mt.name();
+}
+
+static QString baseName(const QString &absPath) {
+    return QFileInfo(absPath).fileName();
+}
+
+static QString parentDirDisplay(const QString &absPath) {
+    return QFileInfo(absPath).absolutePath();
+}
+
+static QString resolveModelPath() {
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString candidates[] = {
+        QDir(appDir).filePath(QStringLiteral("assets/models/chat_model.gguf")),
+        QDir(appDir).filePath(QStringLiteral("../assets/models/chat_model.gguf")),
+    };
+    for (const QString &p : candidates) {
+        const QString clean = QDir::cleanPath(p);
+        if (QFile::exists(clean)) return clean;
+    }
+    return QDir::cleanPath(QDir(appDir).filePath(QStringLiteral("assets/models/chat_model.gguf")));
+}
+
+} // namespace
+
+MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setupToolbar();
-    setupLayout();
+    setupFourColumnLayout();
+    setupContextMenus();
 
-    // Initialize watcher
     watcher = new QFutureWatcher<std::string>(this);
     connect(watcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onAnalysisFinished);
 
-    resize(1200, 800);
-    setWindowTitle("Smart File Organizer");
-}
-
-MainWindow::~MainWindow()
-{
-}
-
-void MainWindow::setupToolbar()
-{
-    toolbar = addToolBar("Main Toolbar");
-    toolbar->setMovable(false);
-
-    QAction *actOpen = toolbar->addAction("開啟資料夾 (Open Folder)");
-    connect(actOpen, &QAction::triggered, this, &MainWindow::openFolder);
-
-    toolbar->addSeparator();
-
-    QAction *actLoadModel = toolbar->addAction("載入模型 (Load Model)");
-    actLoadModel->setToolTip("請選擇 ggml-model-*.gguf 檔案");
-    connect(actLoadModel, &QAction::triggered, this, &MainWindow::loadModel);
-
-    toolbar->addSeparator();
-    
-    // Add Checkbox to Toolbar
-    chkRecursive = new QCheckBox("包含子資料夾 (Recursive)", this);
-    chkRecursive->setChecked(false); // Default to false as per request
-    // Connect toggling to re-scan immediately if a folder is already open
-    connect(chkRecursive, &QCheckBox::toggled, [this](bool){
-        if (!currentPath.isEmpty()) scanFiles();
+    modelLoadWatcher = new QFutureWatcher<bool>(this);
+    connect(modelLoadWatcher, &QFutureWatcher<bool>::finished, this, [this]() {
+        const bool ok = modelLoadWatcher->result();
+        lblStatus->setText(ok ? QStringLiteral("模型已自動載入 (Model auto-loaded)")
+                              : QStringLiteral("模型自動載入失敗 (Auto-load failed)"));
     });
-    toolbar->addWidget(chkRecursive);
+
+    initialScanWatcher = new QFutureWatcher<void>(this);
+    connect(initialScanWatcher, &QFutureWatcher<void>::finished, this, &MainWindow::onBackgroundScanFinished);
+
+    llamaEngine.setCancelFlag(&cancelFlag);
+
+    mapsHomeFixAndSetRoot(QDir::homePath());
+    navHistory.clear();
+    navIndex = -1;
+    pushHistory(currentPath);
+    fileListMode = FileListMode::PhysicalFolder;
+    activeVirtualTag.clear();
+    scanFiles();
+
+    const QString modelPath = resolveModelPath();
+    if (!QFile::exists(modelPath)) {
+        lblStatus->setText(QStringLiteral("❌ 找不到模型: %1（請確認 assets/models/chat_model.gguf）").arg(modelPath));
+    } else {
+        lblStatus->setText(QStringLiteral("正在自動載入模型… %1").arg(modelPath));
+        modelLoadWatcher->setFuture(QtConcurrent::run([this, modelPath]() {
+            return llamaEngine.loadModel(modelPath.toStdString());
+        }));
+    }
+
+    initialScanWatcher->setFuture(QtConcurrent::run([this]() {
+        const QString baseDir = rootPath.isEmpty() ? QDir::homePath() : rootPath;
+        int n = 0;
+        QDirIterator it(baseDir, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString filePath = it.next();
+            const QFileInfo fileInfo(filePath);
+            if (!fileInfo.exists()) continue;
+            if (fileInfo.isDir()) continue;
+            if (fileInfo.isSymLink()) {
+                const QString target = fileInfo.symLinkTarget();
+                if (!target.isEmpty() && QFileInfo(target).isDir()) continue;
+            }
+
+            const QString fileName = fileInfo.fileName();
+            const QStringList fastTags = getFastPathTags(fileName);
+            if (fastTags.isEmpty()) {
+                ++n;
+                if ((n % 2000) == 0) {
+                    QMetaObject::invokeMethod(
+                        this,
+                        [this]() { onBackgroundScanProgress(); },
+                        Qt::QueuedConnection);
+                }
+                continue;
+            }
+
+            {
+                QMutexLocker locker(&tagMutex);
+                const auto existingByPath = tagManager.getTags(filePath);
+                const auto existingByName = tagManager.getTags(fileName);
+                QSet<QString> existingSet;
+                for (const auto &t : existingByPath) existingSet.insert(t);
+                for (const auto &t : existingByName) existingSet.insert(t);
+                for (const QString &t : fastTags) {
+                    if (existingSet.contains(t)) continue;
+                    tagManager.addTag(filePath, t, false);
+                    existingSet.insert(t);
+                }
+            }
+            ++n;
+            if ((n % 2000) == 0) {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this]() { onBackgroundScanProgress(); },
+                    Qt::QueuedConnection);
+            }
+        }
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.saveTags();
+        }
+    }));
+
+    resize(1200, 800);
+    setWindowTitle(QStringLiteral("Smart File Organizer"));
 }
 
-void MainWindow::setupLayout()
-{
-    tabWidget = new QTabWidget(this);
-    connect(tabWidget, &QTabWidget::currentChanged, this, &MainWindow::onTabChanged);
-    mainLayout->addWidget(tabWidget);
+MainWindow::~MainWindow() = default;
 
-    // === Tab 1: Explorer ===
-    explorerTab = new QWidget();
-    QVBoxLayout *explorerLayout = new QVBoxLayout(explorerTab);
-    
-    mainSplitter = new QSplitter(Qt::Horizontal, explorerTab);
-    explorerLayout->addWidget(mainSplitter);
+void MainWindow::onBackgroundScanProgress() {
+    updateTagListCountsOnly();
+}
 
-    // --- Left Panel (Tags) ---
-    leftPanel = new QWidget(this);
-    QVBoxLayout *leftLayout = new QVBoxLayout(leftPanel);
-    leftLayout->addWidget(new QLabel("🏷️ 標籤庫 (Tags)"));
-    
+void MainWindow::onBackgroundScanFinished() {
+    updateTagList();
+    lblStatus->setText(lblStatus->text() + QStringLiteral(" | 背景全域掃描完成"));
+}
+
+void MainWindow::setupToolbar() {
+    toolbar = addToolBar(QStringLiteral("Main Toolbar"));
+    toolbar->setMovable(false);
+    QAction *actOpen = toolbar->addAction(QStringLiteral("開啟資料夾"));
+    connect(actOpen, &QAction::triggered, this, &MainWindow::openFolder);
+    toolbar->addSeparator();
+}
+
+void MainWindow::setupFourColumnLayout() {
+    mainSplitter = new QSplitter(Qt::Horizontal, this);
+    setCentralWidget(mainSplitter);
+
+    // --- Column 1: Tags ---
+    tagsPanel = new QWidget(this);
+    auto *tagsLayout = new QVBoxLayout(tagsPanel);
+    auto *tagsHeader = new QHBoxLayout();
+    tagsHeader->addWidget(new QLabel(QStringLiteral("🏷️ 標籤庫"), this));
+    tagsHeader->addStretch(1);
+    chkRecursive = new QCheckBox(QStringLiteral("包含子資料夾"), this);
+    chkRecursive->setChecked(false);
+    connect(chkRecursive, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState) {
+        if (fileListMode == FileListMode::PhysicalFolder) {
+            scanFiles();
+            sortFileList();
+        }
+    });
+    tagsHeader->addWidget(chkRecursive);
+    tagsLayout->addLayout(tagsHeader);
+
     tagListWidget = new QListWidget(this);
+    tagListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tagListWidget, &QListWidget::itemClicked, this, &MainWindow::onTagSelected);
-    leftLayout->addWidget(tagListWidget);
-    
-    // Left Panel Actions
-    QHBoxLayout *leftActionLayout = new QHBoxLayout();
-    btnLeftAddTag = new QPushButton("➕", this);
-    btnLeftAddTag->setToolTip("新增標籤 (Add Tag)");
-    connect(btnLeftAddTag, &QPushButton::clicked, this, &MainWindow::addTag);
-    leftActionLayout->addWidget(btnLeftAddTag);
+    tagsLayout->addWidget(tagListWidget);
 
-    btnLeftRemoveTag = new QPushButton("➖", this);
-    btnLeftRemoveTag->setToolTip("移除標籤 (Global Delete Tag)");
+    auto *tagButtons = new QHBoxLayout();
+    btnLeftAddTag = new QPushButton(QStringLiteral("➕"), this);
+    btnLeftAddTag->setToolTip(QStringLiteral("新增標籤"));
+    connect(btnLeftAddTag, &QPushButton::clicked, this, [this]() {
+        bool ok = false;
+        const QString t = QInputDialog::getText(this, QStringLiteral("Add Tag"), QStringLiteral("New tag:"), QLineEdit::Normal, QString(), &ok).trimmed();
+        if (!ok || t.isEmpty()) return;
+        const QString fp = currentFilePath();
+        if (!fp.isEmpty()) {
+            QMutexLocker locker(&tagMutex);
+            tagManager.addTag(fp, t, true);
+            tagManager.saveTags();
+        }
+        updateTagList();
+        if (fileListMode == FileListMode::PhysicalFolder) scanFiles();
+        else populateVirtualTagFiles(activeVirtualTag);
+    });
+    tagButtons->addWidget(btnLeftAddTag);
+
+    btnLeftRemoveTag = new QPushButton(QStringLiteral("➖"), this);
+    btnLeftRemoveTag->setToolTip(QStringLiteral("刪除標籤（全域）"));
     connect(btnLeftRemoveTag, &QPushButton::clicked, this, &MainWindow::removeGlobalTag);
-    leftActionLayout->addWidget(btnLeftRemoveTag);
-    
-    leftLayout->addLayout(leftActionLayout);
-    
-    mainSplitter->addWidget(leftPanel);
+    tagButtons->addWidget(btnLeftRemoveTag);
+    tagsLayout->addLayout(tagButtons);
 
-    // --- Middle Panel (Files) ---
-    middlePanel = new QWidget(this);
-    QVBoxLayout *midLayout = new QVBoxLayout(middlePanel);
-    midLayout->addWidget(new QLabel("📂 檔案列表 (Files)"));
+    mainSplitter->addWidget(tagsPanel);
+
+    // --- Column 2: Folders + nav under title ---
+    foldersPanel = new QWidget(this);
+    auto *foldersLayout = new QVBoxLayout(foldersPanel);
+    foldersLayout->addWidget(new QLabel(QStringLiteral("🗂️ 資料夾樹"), this));
+
+    auto *navRow = new QHBoxLayout();
+    btnBack = new QPushButton(QStringLiteral("⬅️"), this);
+    btnBack->setToolTip(QStringLiteral("上一頁"));
+    connect(btnBack, &QPushButton::clicked, this, &MainWindow::goBack);
+    navRow->addWidget(btnBack);
+
+    btnForward = new QPushButton(QStringLiteral("➡️"), this);
+    btnForward->setToolTip(QStringLiteral("下一頁"));
+    connect(btnForward, &QPushButton::clicked, this, &MainWindow::goForward);
+    navRow->addWidget(btnForward);
+
+    btnHome = new QPushButton(QStringLiteral("🏠"), this);
+    btnHome->setToolTip(QStringLiteral("回首頁（家目錄）"));
+    connect(btnHome, &QPushButton::clicked, this, &MainWindow::goHome);
+    navRow->addWidget(btnHome);
+
+    navRow->addStretch(1);
+    foldersLayout->addLayout(navRow);
+
+    folderTree = new QTreeView(this);
+    folderTree->setMinimumWidth(250);
+    folderTree->setHeaderHidden(true);
+    folderTree->setAnimated(true);
+    folderTree->setIndentation(18);
+    folderTree->setExpandsOnDoubleClick(true);
+    folderTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    folderModel = new QFileSystemModel(this);
+    folderModel->setFilter(QDir::AllDirs | QDir::NoDotAndDotDot);
+    folderModel->setRootPath(QDir::homePath());
+    folderTree->setModel(folderModel);
+    for (int col = 1; col < folderModel->columnCount(); ++col) folderTree->hideColumn(col);
+
+    foldersLayout->addWidget(folderTree);
+    connect(folderTree, &QTreeView::clicked, this, [this](const QModelIndex &idx) {
+        if (!idx.isValid()) return;
+        const QString selectedDir = folderModel->filePath(idx);
+        if (selectedDir.isEmpty()) return;
+        QFileInfo fi(selectedDir);
+        if (!fi.exists() || !fi.isDir()) return;
+        fileListMode = FileListMode::PhysicalFolder;
+        activeVirtualTag.clear();
+        navigateToFolder(fi.absoluteFilePath(), true);
+    });
+
+    mainSplitter->addWidget(foldersPanel);
+
+    // --- Column 3: Files (row1 sort, row2 filter+search) ---
+    filesPanel = new QWidget(this);
+    auto *filesLayout = new QVBoxLayout(filesPanel);
+    filesLayout->addWidget(new QLabel(QStringLiteral("📂 檔案清單"), this));
+
+    auto *controlsCol = new QVBoxLayout();
+
+    auto *rowSort = new QHBoxLayout();
+    cmbSort = new QComboBox(this);
+    cmbSort->addItem(QStringLiteral("依名稱"));
+    cmbSort->addItem(QStringLiteral("依日期"));
+    cmbSort->addItem(QStringLiteral("依大小"));
+    connect(cmbSort, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onSortChanged);
+    rowSort->addWidget(cmbSort);
+    rowSort->addStretch(1);
+    controlsCol->addLayout(rowSort);
+
+    auto *rowFilter = new QHBoxLayout();
+    cmbTagFilter = new QComboBox(this);
+    cmbTagFilter->addItem(QStringLiteral("All Files"));
+    cmbTagFilter->setToolTip(QStringLiteral("🏷️ 標籤篩選"));
+    rowFilter->addWidget(cmbTagFilter, 1);
 
     txtSearch = new QLineEdit(this);
-    txtSearch->setPlaceholderText("搜尋檔案... (Search)");
-    connect(txtSearch, &QLineEdit::textChanged, this, &MainWindow::filterFiles);
-    midLayout->addWidget(txtSearch);
+    txtSearch->setPlaceholderText(QStringLiteral("🔍 搜尋"));
+    rowFilter->addWidget(txtSearch, 2);
+    controlsCol->addLayout(rowFilter);
+
+    filesLayout->addLayout(controlsCol);
 
     fileList = new QListWidget(this);
+    fileList->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(fileList, &QListWidget::itemClicked, this, &MainWindow::onFileSelected);
-    midLayout->addWidget(fileList);
+    filesLayout->addWidget(fileList, 1);
 
-    mainSplitter->addWidget(middlePanel);
-
-    // --- Right Panel (Details & Preview) ---
-    rightPanel = new QWidget(this);
-    QVBoxLayout *rightLayout = new QVBoxLayout(rightPanel);
-    rightLayout->addWidget(new QLabel("👁️ 預覽與資訊 (Preview)"));
-
-    // Preview Area
-    lblPreviewImage = new QLabel("選擇檔案以預覽 (Select file to preview)", this);
-    lblPreviewImage->setAlignment(Qt::AlignCenter);
-    lblPreviewImage->setStyleSheet("border: 1px dashed gray; min-height: 200px;");
-    rightLayout->addWidget(lblPreviewImage);
-    
-    txtPreviewText = new QTextEdit(this);
-    txtPreviewText->setReadOnly(true);
-    txtPreviewText->setVisible(false); // Default hidden
-    rightLayout->addWidget(txtPreviewText);
-
-    // Tags Section
-    lblTags = new QLabel("標籤: --", this);
-    lblTags->setWordWrap(true);
-    lblTags->setStyleSheet("font-weight: bold; margin-top: 10px;");
-    rightLayout->addWidget(lblTags);
-
-    // Actions
-    QHBoxLayout *actionLayout = new QHBoxLayout();
-    btnAnalyzeFile = new QPushButton("✨ 分析檔案 (Analyze)", this);
-    connect(btnAnalyzeFile, &QPushButton::clicked, this, &MainWindow::analyzeFile);
-    actionLayout->addWidget(btnAnalyzeFile);
-
-    btnSaveTags = new QPushButton("💾 儲存標籤 (Save)", this);
-    connect(btnSaveTags, &QPushButton::clicked, this, &MainWindow::saveTags);
-    btnSaveTags->setEnabled(false);
-    actionLayout->addWidget(btnSaveTags);
-
-    // Manual Tag Management
-    btnAddTag = new QPushButton("➕ 新增標籤 (Add)", this);
-    connect(btnAddTag, &QPushButton::clicked, this, &MainWindow::addTag);
-    actionLayout->addWidget(btnAddTag);
-
-    btnRemoveTag = new QPushButton("➖ 移除標籤 (Remove)", this);
-    connect(btnRemoveTag, &QPushButton::clicked, this, &MainWindow::removeTag);
-    actionLayout->addWidget(btnRemoveTag);
-
-    rightLayout->addLayout(actionLayout);
-
-    lblStatus = new QLabel("狀態: 就緒", this);
-    lblStatus->setWordWrap(true);
-    rightLayout->addWidget(lblStatus);
-
-    rightLayout->addStretch();
-    mainSplitter->addWidget(rightPanel);
-
-    // Set initial sizes: 20% | 40% | 40%
-    mainSplitter->setStretchFactor(0, 1);
-    mainSplitter->setStretchFactor(1, 2);
-    mainSplitter->setStretchFactor(2, 2);
-
-    tabWidget->addTab(explorerTab, "📁 資料夾視圖 (Explorer)");
-
-    // === Tab 2: Graph View ===
-    graphWidget = new GraphWidget(&tagManager, this);
-    tabWidget->addTab(graphWidget, "🕸️ 關聯視圖 (Graph)");
-}
-
-void MainWindow::onTabChanged(int index) {
-    if (index == 1) { // Graph Tab
-        graphWidget->buildGraph();
-    }
-}
-
-void MainWindow::openFolder()
-{
-    QString dir = QFileDialog::getExistingDirectory(this, "Select Directory",
-                                                    QString(),
-                                                    QFileDialog::ShowDirsOnly
-                                                    | QFileDialog::DontResolveSymlinks);
-
-    if (!dir.isEmpty()) {
-        currentPath = dir;
-        tagManager.loadTags(currentPath.toStdString());
-        scanFiles();
-    }
-}
-
-void MainWindow::scanFiles()
-{
-    fileList->clear();
-    FileScanner scanner;
-    bool recursive = chkRecursive->isChecked();
-    
-    std::vector<std::string> files = scanner.scanDirectory(currentPath.toStdString(), recursive);
-
-    for (const auto& file : files) {
-        QString qfilePath = QString::fromStdString(file);
-        QFileInfo fileInfo(qfilePath);
-        QString fileName = fileInfo.fileName();
-
-        QListWidgetItem* item = new QListWidgetItem(fileName, fileList);
-        item->setData(Qt::UserRole, qfilePath); 
-
-        QStringList fastTags = getFastPathTags(fileName);
-        if (!fastTags.isEmpty()) {
-            for (const QString& tag : fastTags) {
-                tagManager.addTag(qfilePath, tag, false);
-            }
-        }
-    }
-    
-    updateTagList(); 
-    lblStatus->setText(QString("目前資料夾: %1 (找到 %2 個檔案)").arg(currentPath).arg(files.size()));
-}
-void MainWindow::updateTagList()
-{
-    tagListWidget->clear();
-    std::vector<std::string> tags = tagManager.getAllTags();
-    
-    // Always add an "All Files" option
-    QListWidgetItem* allItem = new QListWidgetItem("All Files");
-    allItem->setData(Qt::UserRole, "ALL");
-    tagListWidget->addItem(allItem);
-
-    for (const auto& tag : tags) {
-        tagListWidget->addItem(QString::fromStdString(tag));
-    }
-}
-
-void MainWindow::onTagSelected(QListWidgetItem *item)
-{
-    QString tag = item->text();
-    QString data = item->data(Qt::UserRole).toString();
-    
-    if (data == "ALL") {
-        // Show all files
-        for(int i=0; i<fileList->count(); ++i) {
-            fileList->item(i)->setHidden(false);
-        }
-    } else {
-        // Filter by tag
-        std::vector<std::string> filesWithTag = tagManager.getFilesByTag(tag.toStdString());
-        std::set<std::string> fileSet(filesWithTag.begin(), filesWithTag.end());
-        
-        for(int i=0; i<fileList->count(); ++i) {
-            QListWidgetItem *fItem = fileList->item(i);
-            QString fname = fItem->text(); 
-            
-            // Check if this file is in the tag set
-            std::filesystem::path p(fname.toStdString());
-            std::string filenameOnly = p.filename().string();
-            
-            fItem->setHidden(fileSet.find(filenameOnly) == fileSet.end());
-        }
-    }
-}
-
-void MainWindow::loadModel()
-{
-    QString fileName = QFileDialog::getOpenFileName(this, "載入模型 (Load Model)",
-                                                    QString(),
-                                                    "GGUF Models (*.gguf);;All Files (*)");
-
-    if (!fileName.isEmpty()) {
-        lblStatus->setText("正在載入模型... (Loading Model...)");
-        QApplication::processEvents(); // Force update UI
-
-        if (llamaEngine.loadModel(fileName.toStdString())) {
-            lblStatus->setText("模型載入成功! (Model loaded!)");
-            QMessageBox::information(this, "Success", "模型載入成功！");
-        } else {
-            lblStatus->setText("模型載入失敗 (Failed to load model)");
-            QMessageBox::critical(this, "Error", "模型載入失敗 (Failed to load model)");
-        }
-    }
-}
-
-void MainWindow::analyzeFile()
-{
-    QList<QListWidgetItem*> selectedItems = fileList->selectedItems();
-    if (selectedItems.isEmpty()) {
-        QMessageBox::warning(this, "Warning", "Please select a file first.");
-        return;
-    }
-
-    QString filename = selectedItems.first()->text();
-    std::filesystem::path path(currentPath.toStdString());
-    path /= filename.toStdString();
-    QString filePath = QString::fromStdString(path.string());
-    
-    std::string content = "";
-    std::string ext = path.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    
-    static const std::set<std::string> textExts = {
-        ".txt", ".md", ".log", ".tex", ".rtf",
-        ".cpp", ".h", ".c", ".hpp", ".cs", ".java", ".py", ".js", ".ts", 
-        ".html", ".css", ".json", ".xml", ".yaml", ".yml", ".ini", ".conf", ".env",
-        ".bat", ".sh", ".ps1", ".go", ".rs", ".lua", ".sql", ".php"
-    };
-
-    if (textExts.count(ext)) {
-        try {
-            std::ifstream f(filePath.toStdString());
-            if (f.is_open()) {
-                char buffer[1025];
-                f.read(buffer, 1024);
-                buffer[f.gcount()] = '\0';
-                content = std::string(buffer);
-                lblStatus->setText("正在分析檔案內容... (這可能需要幾秒鐘)");
-            }
-        } catch (...) {}
-    } 
-    else if (ext == ".docx" || ext == ".xlsx" || ext == ".pdf") {
-        lblStatus->setText(QString("正在解析文件內容: %1").arg(filename));
-        content = DocumentParser::extractText(filePath.toStdString());
-        if (content.length() > 2000) content = content.substr(0, 2000) + "...";
-    }
-    else {
-        lblStatus->setText("正在分析檔名...");
-    }
-
-    btnAnalyzeFile->setEnabled(false);
-    btnSaveTags->setEnabled(false);
-    fileList->setEnabled(false);
-    
-    QFuture<std::string> future = QtConcurrent::run([this, filename, content]() {
-        return llamaEngine.suggestTags(filename.toStdString(), content);
+    connect(txtSearch, &QLineEdit::textChanged, this, &MainWindow::filterFiles);
+    connect(cmbTagFilter, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        syncTagListFromTagFilter();
+        filterFiles();
     });
 
-    watcher->setFuture(future);
+    mainSplitter->addWidget(filesPanel);
+
+    // --- Column 4: Preview ---
+    previewPanel = new QWidget(this);
+    auto *previewLayout = new QVBoxLayout(previewPanel);
+    previewLayout->addWidget(new QLabel(QStringLiteral("👁️ 預覽與控制"), this));
+
+    lblPreviewImage = new QLabel(QStringLiteral("選擇檔案以預覽"), this);
+    lblPreviewImage->setAlignment(Qt::AlignCenter);
+    lblPreviewImage->setStyleSheet(QStringLiteral("border: 1px dashed gray; min-height: 200px;"));
+    previewLayout->addWidget(lblPreviewImage);
+
+    txtPreviewText = new QTextEdit(this);
+    txtPreviewText->setReadOnly(true);
+    txtPreviewText->setVisible(false);
+    previewLayout->addWidget(txtPreviewText);
+
+    lblTags = new QLabel(QStringLiteral("標籤: --"), this);
+    lblTags->setWordWrap(true);
+    lblTags->setStyleSheet(QStringLiteral("font-weight: bold; margin-top: 8px;"));
+    previewLayout->addWidget(lblTags);
+
+    lblStatus = new QLabel(QStringLiteral("狀態: 就緒"), this);
+    lblStatus->setWordWrap(true);
+    previewLayout->addWidget(lblStatus);
+
+    auto *btnRow1 = new QHBoxLayout();
+    btnAnalyzeFile = new QPushButton(QStringLiteral("✨ 分析"), this);
+    connect(btnAnalyzeFile, &QPushButton::clicked, this, &MainWindow::analyzeFile);
+    btnRow1->addWidget(btnAnalyzeFile);
+
+    btnCancelAnalysis = new QPushButton(QStringLiteral("⛔ 取消"), this);
+    connect(btnCancelAnalysis, &QPushButton::clicked, this, &MainWindow::cancelAnalysis);
+    btnCancelAnalysis->setEnabled(false);
+    btnRow1->addWidget(btnCancelAnalysis);
+
+    btnSaveTags = new QPushButton(QStringLiteral("💾 儲存"), this);
+    connect(btnSaveTags, &QPushButton::clicked, this, &MainWindow::saveTags);
+    btnSaveTags->setEnabled(false);
+    btnRow1->addWidget(btnSaveTags);
+    previewLayout->addLayout(btnRow1);
+
+    auto *btnRow2 = new QHBoxLayout();
+    btnAddTag = new QPushButton(QStringLiteral("➕ 新增"), this);
+    connect(btnAddTag, &QPushButton::clicked, this, &MainWindow::addTag);
+    btnRow2->addWidget(btnAddTag);
+
+    btnRemoveTag = new QPushButton(QStringLiteral("➖ 移除"), this);
+    connect(btnRemoveTag, &QPushButton::clicked, this, &MainWindow::removeTag);
+    btnRow2->addWidget(btnRemoveTag);
+
+    btnOpenDefault = new QPushButton(QStringLiteral("👁️ 開啟"), this);
+    connect(btnOpenDefault, &QPushButton::clicked, this, [this]() {
+        const QString fp = currentFilePath();
+        if (fp.isEmpty()) return;
+        QDesktopServices::openUrl(QUrl::fromLocalFile(fp));
+    });
+    btnRow2->addWidget(btnOpenDefault);
+    previewLayout->addLayout(btnRow2);
+
+    btnAddExistingTag = new QPushButton(QStringLiteral("🏷️ 加入現有標籤"), this);
+    previewLayout->addWidget(btnAddExistingTag);
+    rebuildAddExistingTagMenu();
+
+    previewLayout->addStretch(1);
+    mainSplitter->addWidget(previewPanel);
+
+    mainSplitter->setStretchFactor(0, 1);
+    mainSplitter->setStretchFactor(1, 2);
+    mainSplitter->setStretchFactor(2, 4);
+    mainSplitter->setStretchFactor(3, 3);
+
+    syncNavigationButtons();
 }
 
-void MainWindow::onAnalysisFinished()
-{
-    std::string result = watcher->result();
-    
-    // Re-enable UI
-    btnAnalyzeFile->setEnabled(true);
-    fileList->setEnabled(true);
+void MainWindow::setupContextMenus() {
+    connect(tagListWidget, &QListWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        QListWidgetItem *it = tagListWidget->itemAt(pos);
+        if (!it) return;
+        if (it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) return;
 
-    if (result.rfind("Error:", 0) == 0) { // Starts with "Error:"
-        lblStatus->setText("分析失敗 (Analysis Failed)");
-        QMessageBox::critical(this, "Analysis Error", QString::fromStdString(result));
+        const QString rawTag = it->data(Qt::UserRole).toString();
+        if (rawTag.isEmpty()) return;
+
+        QMenu menu(this);
+        QAction *actRename = menu.addAction(QStringLiteral("重新命名"));
+        QAction *actDelete = menu.addAction(QStringLiteral("刪除（全域）"));
+        QAction *chosen = menu.exec(tagListWidget->mapToGlobal(pos));
+        if (!chosen) return;
+
+        if (chosen == actRename) {
+            bool ok = false;
+            const QString newTag = QInputDialog::getText(this, QStringLiteral("Rename"), QStringLiteral("New name:"), QLineEdit::Normal, rawTag, &ok).trimmed();
+            if (!ok || newTag.isEmpty() || newTag == rawTag) return;
+            QMutexLocker locker(&tagMutex);
+            tagManager.renameTag(rawTag, newTag);
+            tagManager.saveTags();
+        } else if (chosen == actDelete) {
+            QMutexLocker locker(&tagMutex);
+            tagManager.deleteTag(rawTag);
+            tagManager.saveTags();
+        }
+        fileListMode = FileListMode::PhysicalFolder;
+        activeVirtualTag.clear();
+        updateTagList();
+        scanFiles();
+    });
+
+    connect(fileList, &QListWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        QListWidgetItem *it = fileList->itemAt(pos);
+        if (!it) return;
+        const QString fp = it->data(Qt::UserRole).toString();
+        if (fp.isEmpty()) return;
+
+        std::vector<QString> allTags;
+        {
+            QMutexLocker locker(&tagMutex);
+            allTags = tagManager.getAllTags();
+        }
+
+        QMenu menu(this);
+        QMenu *sub = menu.addMenu(QStringLiteral("指定標籤"));
+        for (const auto &t : allTags) {
+            QAction *a = sub->addAction(t);
+            connect(a, &QAction::triggered, this, [this, fp, t]() {
+                QMutexLocker locker(&tagMutex);
+                tagManager.addTag(fp, t, true);
+                tagManager.saveTags();
+                updateTagDisplayForFile(fp);
+                updateTagList();
+                if (fileListMode == FileListMode::PhysicalFolder) scanFiles();
+                else populateVirtualTagFiles(activeVirtualTag);
+            });
+        }
+        menu.exec(fileList->mapToGlobal(pos));
+    });
+}
+
+void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
+    QFileInfo fi(dir);
+    const QString abs = fi.exists() ? fi.absoluteFilePath() : QDir::homePath();
+    rootPath = abs;
+    currentPath = abs;
+
+    folderModel->setRootPath(rootPath);
+    setFolderTreeCurrentPath(rootPath);
+
+    tagManager.loadTags(rootPath.toStdString());
+}
+
+void MainWindow::setFolderTreeCurrentPath(const QString &absDir) {
+    const QModelIndex idx = folderModel->index(absDir);
+    if (idx.isValid()) {
+        folderTree->setCurrentIndex(idx);
+        folderTree->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+        folderTree->expand(idx);
+    }
+}
+
+void MainWindow::pushHistory(const QString &path) {
+    if (path.isEmpty()) return;
+    if (navIndex >= 0 && navIndex < navHistory.size() && navHistory[navIndex] == path) {
+        syncNavigationButtons();
+        return;
+    }
+    while (navHistory.size() > navIndex + 1) navHistory.removeLast();
+    navHistory.push_back(path);
+    navIndex = navHistory.size() - 1;
+    syncNavigationButtons();
+}
+
+void MainWindow::syncNavigationButtons() {
+    btnBack->setEnabled(navIndex > 0);
+    btnForward->setEnabled(navIndex >= 0 && navIndex + 1 < navHistory.size());
+}
+
+void MainWindow::navigateToFolder(const QString &path, bool pushToHistory) {
+    if (path.isEmpty()) return;
+    QFileInfo fi(path);
+    if (!fi.exists() || !fi.isDir()) return;
+    currentPath = fi.absoluteFilePath();
+    if (pushToHistory) pushHistory(currentPath);
+    setFolderTreeCurrentPath(currentPath);
+    scanFiles();
+    sortFileList();
+}
+
+void MainWindow::goBack() {
+    if (navIndex <= 0) return;
+    --navIndex;
+    const QString path = navHistory[navIndex];
+    currentPath = path;
+    fileListMode = FileListMode::PhysicalFolder;
+    activeVirtualTag.clear();
+    setFolderTreeCurrentPath(currentPath);
+    syncNavigationButtons();
+    scanFiles();
+    sortFileList();
+}
+
+void MainWindow::goForward() {
+    if (navIndex + 1 >= navHistory.size()) return;
+    ++navIndex;
+    const QString path = navHistory[navIndex];
+    currentPath = path;
+    fileListMode = FileListMode::PhysicalFolder;
+    activeVirtualTag.clear();
+    setFolderTreeCurrentPath(currentPath);
+    syncNavigationButtons();
+    scanFiles();
+    sortFileList();
+}
+
+void MainWindow::goHome() {
+    const QString home = QDir::homePath();
+    rootPath = home;
+    currentPath = home;
+    folderModel->setRootPath(rootPath);
+    fileListMode = FileListMode::PhysicalFolder;
+    activeVirtualTag.clear();
+    navHistory.clear();
+    navIndex = -1;
+    pushHistory(currentPath);
+    setFolderTreeCurrentPath(currentPath);
+    scanFiles();
+    sortFileList();
+}
+
+void MainWindow::onSortChanged(int) {
+    sortFileList();
+}
+
+void MainWindow::sortFileList() {
+    if (!fileList) return;
+    const int mode = cmbSort ? cmbSort->currentIndex() : 0;
+    if (mode == 0) {
+        fileList->sortItems(Qt::AscendingOrder);
         return;
     }
 
-    lblStatus->setText("分析完成 (Analysis complete)");
-    
-    // Auto-save tags
-    btnSaveTags->setProperty("pendingTags", QString::fromStdString(result));
-    saveTags(); // Automatically save
-    
-    // Update UI to show success
-    lblTags->setText("標籤: " + QString::fromStdString(result));
-    QMessageBox::information(this, "Analysis Finished", "分析完成並已自動儲存標籤！\n(Analysis complete and tags saved!)");
-}
+    QList<QListWidgetItem *> items;
+    for (int i = 0; i < fileList->count(); ++i) items.push_back(fileList->takeItem(0));
 
-void MainWindow::onFileSelected(QListWidgetItem *item)
-{
-    QString filePathStr = item->text();
-    // Resolve full path if item text is relative
-    std::filesystem::path p(currentPath.toStdString());
-    p /= filePathStr.toStdString();
-    
-    updateTagDisplay(QString::fromStdString(p.filename().string()));
-    updateFilePreview(QString::fromStdString(p.string()));
-    btnSaveTags->setEnabled(false);
-}
-
-void MainWindow::updateFilePreview(const QString& filePath)
-{
-    std::filesystem::path p(filePath.toStdString());
-    std::string ext = p.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    
-    // Hide all first
-    lblPreviewImage->setVisible(false);
-    txtPreviewText->setVisible(false);
-
-    if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp") {
-        QPixmap pixmap(filePath);
-        if (!pixmap.isNull()) {
-            lblPreviewImage->setPixmap(pixmap.scaled(lblPreviewImage->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-            lblPreviewImage->setVisible(true);
-        } else {
-            lblPreviewImage->setText("無法載入圖片 (Image Load Failed)");
-            lblPreviewImage->setVisible(true);
+    std::sort(items.begin(), items.end(), [mode](QListWidgetItem *a, QListWidgetItem *b) {
+        const QString pa = a->data(Qt::UserRole).toString();
+        const QString pb = b->data(Qt::UserRole).toString();
+        const QFileInfo fa(pa);
+        const QFileInfo fb(pb);
+        if (mode == 1) {
+            const auto ta = fa.lastModified();
+            const auto tb = fb.lastModified();
+            if (ta == tb) return baseName(pa).localeAwareCompare(baseName(pb)) < 0;
+            return ta > tb;
         }
-    } else if (ext == ".docx" || ext == ".xlsx" || ext == ".pdf") {
-        txtPreviewText->setVisible(true);
-        std::string content = DocumentParser::extractText(filePath.toStdString());
-        if (content.empty()) content = "(No searchable text found or encrypted)";
-        txtPreviewText->setText(QString::fromStdString(content));
-    } else {
-        // Text preview
-        txtPreviewText->setVisible(true);
-        std::ifstream f(filePath.toStdString());
-        if (f.is_open()) {
-             char buffer[2048];
-             f.read(buffer, 2047);
-             buffer[f.gcount()] = '\0';
-             txtPreviewText->setText(QString::fromUtf8(buffer));
-        } else {
-             txtPreviewText->setText("(無法讀取檔案內容)");
+        const qint64 sa = fa.size();
+        const qint64 sb = fb.size();
+        if (sa == sb) return baseName(pa).localeAwareCompare(baseName(pb)) < 0;
+        return sa > sb;
+    });
+
+    for (auto *it : items) fileList->addItem(it);
+}
+
+void MainWindow::openFolder() {
+    const QString dir = QFileDialog::getExistingDirectory(
+        this,
+        QStringLiteral("選擇資料夾"),
+        rootPath.isEmpty() ? QDir::homePath() : rootPath,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (dir.isEmpty()) return;
+    mapsHomeFixAndSetRoot(dir);
+    navHistory.clear();
+    navIndex = -1;
+    pushHistory(currentPath);
+    fileListMode = FileListMode::PhysicalFolder;
+    activeVirtualTag.clear();
+    scanFiles();
+    sortFileList();
+}
+
+QString MainWindow::currentFilePath() const {
+    const auto selected = fileList->selectedItems();
+    if (selected.isEmpty()) return {};
+    return selected.first()->data(Qt::UserRole).toString();
+}
+
+bool MainWindow::isAnalyzableFile(const QFileInfo &fi) const {
+    if (!fi.exists()) return false;
+    if (fi.isDir()) return false;
+    if (fi.isSymLink()) {
+        const QString target = fi.symLinkTarget();
+        if (!target.isEmpty() && QFileInfo(target).isDir()) return false;
+    }
+    return true;
+}
+
+void MainWindow::scanFiles() {
+    if (fileListMode == FileListMode::VirtualTag) {
+        populateVirtualTagFiles(activeVirtualTag);
+        return;
+    }
+    scanPhysicalFolder();
+}
+
+void MainWindow::scanPhysicalFolder() {
+    fileList->clear();
+
+    const bool recursive = chkRecursive && chkRecursive->isChecked();
+    int count = 0;
+
+    const QDirIterator::IteratorFlags flags =
+        recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags;
+
+    QDirIterator it(currentPath, QDir::Files | QDir::NoDotAndDotDot, flags);
+    while (it.hasNext()) {
+        const QString filePath = it.next();
+        const QFileInfo fileInfo(filePath);
+        if (!fileInfo.exists()) continue;
+        if (fileInfo.isDir()) continue;
+        if (fileInfo.isSymLink()) {
+            const QString target = fileInfo.symLinkTarget();
+            if (!target.isEmpty() && QFileInfo(target).isDir()) continue;
+        }
+        const QString fileName = fileInfo.fileName();
+
+        auto *item = new QListWidgetItem(fileName, fileList);
+        item->setData(Qt::UserRole, filePath);
+
+        const QStringList fastTags = getFastPathTags(fileName);
+        if (!fastTags.isEmpty()) {
+            QMutexLocker locker(&tagMutex);
+            const auto existingByPath = tagManager.getTags(filePath);
+            const auto existingByName = tagManager.getTags(fileName);
+            QSet<QString> existingSet;
+            for (const auto &t : existingByPath) existingSet.insert(t);
+            for (const auto &t : existingByName) existingSet.insert(t);
+            for (const QString &t : fastTags) {
+                if (existingSet.contains(t)) continue;
+                tagManager.addTag(filePath, t, false);
+                existingSet.insert(t);
+            }
+        }
+        ++count;
+    }
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.saveTags();
+    }
+    updateTagList();
+
+    lblStatus->setText(QStringLiteral("資料夾: %1 | 檔案數: %2 %3")
+                           .arg(currentPath)
+                           .arg(count)
+                           .arg(recursive ? QStringLiteral("[遞迴]") : QStringLiteral("[僅此層]")));
+
+    filterFiles();
+}
+
+void MainWindow::populateVirtualTagFiles(const QString &tag) {
+    fileList->clear();
+    if (tag.isEmpty()) return;
+
+    std::vector<QString> paths;
+    {
+        QMutexLocker locker(&tagMutex);
+        paths = tagManager.getFilesByTag(tag);
+    }
+
+    int count = 0;
+    for (const QString &filePath : paths) {
+        const QFileInfo fi(filePath);
+        if (!fi.exists()) continue;
+        if (fi.isDir()) continue;
+        if (fi.isSymLink()) {
+            const QString target = fi.symLinkTarget();
+            if (!target.isEmpty() && QFileInfo(target).isDir()) continue;
+        }
+
+        const QString name = fi.fileName();
+        const QString parent = parentDirDisplay(filePath);
+
+        auto *row = new QWidget(fileList);
+        auto *hl = new QHBoxLayout(row);
+        hl->setContentsMargins(4, 2, 4, 2);
+        hl->setSpacing(8);
+
+        auto *lblName = new QLabel(name, row);
+        lblName->setStyleSheet(QStringLiteral("font-weight: normal;"));
+        hl->addWidget(lblName);
+
+        auto *lblPath = new QLabel(parent, row);
+        lblPath->setStyleSheet(QStringLiteral("color: #888888; font-size: 11px;"));
+        lblPath->setWordWrap(false);
+        lblPath->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        hl->addWidget(lblPath, 1);
+
+        auto *item = new QListWidgetItem(fileList);
+        item->setSizeHint(row->sizeHint());
+        item->setData(Qt::UserRole, filePath);
+        fileList->addItem(item);
+        fileList->setItemWidget(item, row);
+        ++count;
+    }
+
+    lblStatus->setText(QStringLiteral("虛擬標籤檢視: %1 | 檔案數: %2").arg(tag).arg(count));
+    filterFiles();
+    sortFileList();
+}
+
+void MainWindow::updateTagListCountsOnly() {
+    for (int i = 0; i < tagListWidget->count(); ++i) {
+        QListWidgetItem *it = tagListWidget->item(i);
+        if (!it) continue;
+        const QString role = it->data(Qt::UserRole).toString();
+        if (role == QStringLiteral("ALL")) continue;
+        const QString canon = normalizeDisplayTag(role);
+        int n = 0;
+        {
+            QMutexLocker locker(&tagMutex);
+            n = static_cast<int>(tagManager.getFilesByTag(canon).size());
+        }
+        it->setText(QStringLiteral("%1 (%2)").arg(canon).arg(n));
+        it->setData(Qt::UserRole, canon);
+    }
+    syncTagFilterFromTagList();
+}
+
+void MainWindow::updateTagList() {
+    tagListWidget->clear();
+
+    auto *allItem = new QListWidgetItem(QStringLiteral("All Files"), tagListWidget);
+    allItem->setData(Qt::UserRole, QStringLiteral("ALL"));
+
+    std::vector<QString> rawTags;
+    {
+        QMutexLocker locker(&tagMutex);
+        rawTags = tagManager.getAllTags();
+    }
+
+    std::map<QString, QSet<QString>> normToFiles;
+    for (const QString &t : rawTags) {
+        const QString canon = normalizeDisplayTag(t);
+        std::vector<QString> files;
+        {
+            QMutexLocker locker(&tagMutex);
+            files = tagManager.getFilesByTag(t);
+        }
+        for (const QString &fp : files) normToFiles[canon].insert(fp);
+    }
+
+    const QStringList defaults = {kTagImage, kTagVideo, kTagDoc, kTagAudio};
+    QSet<QString> keys;
+    for (const auto &kv : normToFiles) keys.insert(kv.first);
+    for (const QString &d : defaults) keys.insert(normalizeDisplayTag(d));
+
+    QList<QString> ordered = keys.values();
+    std::sort(ordered.begin(), ordered.end(), [](const QString &a, const QString &b) {
+        return a.localeAwareCompare(b) < 0;
+    });
+
+    for (const QString &canon : ordered) {
+        int n = 0;
+        if (normToFiles.count(canon)) n = static_cast<int>(normToFiles[canon].size());
+        else {
+            QMutexLocker locker(&tagMutex);
+            n = static_cast<int>(tagManager.getFilesByTag(canon).size());
+        }
+        auto *it = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(canon).arg(n), tagListWidget);
+        it->setData(Qt::UserRole, canon);
+    }
+
+    syncTagFilterFromTagList();
+    rebuildAddExistingTagMenu();
+}
+
+void MainWindow::syncTagFilterFromTagList() {
+    const QString prev = cmbTagFilter->currentText();
+    cmbTagFilter->blockSignals(true);
+    cmbTagFilter->clear();
+    cmbTagFilter->addItem(QStringLiteral("All Files"));
+    for (int i = 0; i < tagListWidget->count(); ++i) {
+        const auto *it = tagListWidget->item(i);
+        if (!it) continue;
+        if (it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) continue;
+        const QString rawTag = it->data(Qt::UserRole).toString();
+        if (rawTag.isEmpty()) continue;
+        cmbTagFilter->addItem(rawTag, rawTag);
+    }
+    const int idx = cmbTagFilter->findText(prev);
+    cmbTagFilter->setCurrentIndex(idx >= 0 ? idx : 0);
+    cmbTagFilter->blockSignals(false);
+}
+
+void MainWindow::syncTagListFromTagFilter() {
+    const QString selected = cmbTagFilter->currentText();
+    if (selected == QStringLiteral("All Files")) {
+        for (int i = 0; i < tagListWidget->count(); ++i) {
+            auto *it = tagListWidget->item(i);
+            if (it && it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) {
+                tagListWidget->setCurrentItem(it);
+                break;
+            }
+        }
+        return;
+    }
+    for (int i = 0; i < tagListWidget->count(); ++i) {
+        auto *it = tagListWidget->item(i);
+        if (it && it->data(Qt::UserRole).toString() == selected) {
+            tagListWidget->setCurrentItem(it);
+            break;
         }
     }
 }
 
-void MainWindow::updateTagDisplay(const QString& filePath)
-{
-    std::filesystem::path path(filePath.toStdString());
-    std::string filename = path.filename().string();
-    std::vector<std::string> tags = tagManager.getTags(filename);
-    
-    QString tagStr = "標籤: ";
-    if (tags.empty()) {
-        tagStr += "(無)";
-    } else {
-        for (size_t i = 0; i < tags.size(); ++i) {
-            tagStr += QString::fromStdString(tags[i]);
-            if (i < tags.size() - 1) tagStr += ", ";
-        }
+void MainWindow::filterFiles() {
+    const QString query = txtSearch->text().trimmed().toLower();
+    const QString tagFilter = cmbTagFilter->currentText();
+
+    std::vector<QString> filesWithTag;
+    if (tagFilter != QStringLiteral("All Files")) {
+        QMutexLocker locker(&tagMutex);
+        filesWithTag = tagManager.getFilesByTag(tagFilter);
     }
-    lblTags->setText(tagStr);
-}
 
-void MainWindow::saveTags()
-{
-    QList<QListWidgetItem*> selectedItems = fileList->selectedItems();
-    if (selectedItems.isEmpty()) return;
-
-    QString filePath = selectedItems.first()->text();
-    std::filesystem::path path(filePath.toStdString());
-    std::string filename = path.filename().string();
-    
-    QString pendingTags = btnSaveTags->property("pendingTags").toString();
-    if (pendingTags.isEmpty()) return;
-    
-    // Simple parsing of comma-separated tags
-    QStringList tagList = pendingTags.split(',', Qt::SkipEmptyParts);
-    std::vector<std::string> newTags;
-    for (const QString& t : tagList) {
-        newTags.push_back(t.trimmed().toStdString());
-    }
-    
-    tagManager.setTags(filename, newTags);
-    updateTagDisplay(filePath);
-    updateTagList(); // Refresh left panel to show new tags immediately
-    
-    lblStatus->setText("標籤已儲存 (Tags saved)");
-    btnSaveTags->setEnabled(false);
-}
-
-void MainWindow::filterFiles(const QString &text)
-{
-    QString query = text.trimmed().toLower();
-    
     for (int i = 0; i < fileList->count(); ++i) {
-        QListWidgetItem *item = fileList->item(i);
-        QString filePath = item->text();
-        std::filesystem::path path(filePath.toStdString());
-        QString filename = QString::fromStdString(path.filename().string()).toLower();
-        
-        bool match = false;
-        
-        // 1. Check filename
-        if (filename.contains(query)) {
-            match = true;
-        } else {
-            // 2. Check tags
-            std::vector<std::string> tags = tagManager.getTags(path.filename().string());
-            for (const auto& tag : tags) {
-                if (QString::fromStdString(tag).toLower().contains(query)) {
-                    match = true;
-                    break;
+        auto *it = fileList->item(i);
+        if (!it) continue;
+
+        const QString absPath = it->data(Qt::UserRole).toString();
+        const QString nameLower = baseName(absPath).toLower();
+
+        bool match = true;
+        if (!query.isEmpty()) {
+            match = nameLower.contains(query) || parentDirDisplay(absPath).toLower().contains(query);
+            if (!match) {
+                std::vector<QString> tags;
+                {
+                    QMutexLocker locker(&tagMutex);
+                    tags = tagManager.getTags(absPath);
+                }
+                for (const auto &t : tags) {
+                    if (t.toLower().contains(query)) {
+                        match = true;
+                        break;
+                    }
                 }
             }
         }
-        
-        item->setHidden(!match);
+
+        if (match && tagFilter != QStringLiteral("All Files")) {
+            bool tagOk = false;
+            for (const auto &fp : filesWithTag) {
+                if (fp == absPath || baseName(fp) == baseName(absPath)) {
+                    tagOk = true;
+                    break;
+                }
+            }
+            match = tagOk;
+        }
+
+        it->setHidden(!match);
     }
 }
 
-void MainWindow::addTag()
-{
-    QList<QListWidgetItem*> selectedItems = fileList->selectedItems();
-    if (selectedItems.isEmpty()) {
-        QMessageBox::warning(this, "Warning", "Please select a file first.");
+void MainWindow::onFileSelected(QListWidgetItem *item) {
+    if (!item) return;
+    const QString absPath = item->data(Qt::UserRole).toString();
+    if (absPath.isEmpty()) return;
+
+    QFileInfo fi(absPath);
+    btnAnalyzeFile->setEnabled(isAnalyzableFile(fi));
+    btnOpenDefault->setEnabled(fi.exists());
+
+    updatePreviewForFile(absPath);
+    updateTagDisplayForFile(absPath);
+    btnSaveTags->setEnabled(false);
+}
+
+void MainWindow::onTagSelected(QListWidgetItem *item) {
+    if (!item) return;
+    const QString data = item->data(Qt::UserRole).toString();
+    if (data == QStringLiteral("ALL")) {
+        fileListMode = FileListMode::PhysicalFolder;
+        activeVirtualTag.clear();
+        cmbTagFilter->setCurrentIndex(0);
+        scanFiles();
+        sortFileList();
         return;
     }
 
-    QString filename = selectedItems.first()->text();
-    std::filesystem::path path(filename.toStdString());
-    std::string fnameOnly = path.filename().string();
+    const QString tag = normalizeDisplayTag(data);
+    fileListMode = FileListMode::VirtualTag;
+    activeVirtualTag = tag;
+    const int idx = cmbTagFilter->findText(tag);
+    if (idx >= 0) cmbTagFilter->setCurrentIndex(idx);
+    populateVirtualTagFiles(tag);
+}
 
-    QInputDialog dialog(this);
-    dialog.setWindowTitle("Add Tag");
-    dialog.setLabelText("New Tag Name:");
-    dialog.setTextValue("");
-    dialog.setInputMode(QInputDialog::TextInput);
-    dialog.resize(300, 150); // Optimize size
+void MainWindow::updatePreviewForFile(const QString &absPath) {
+    QFileInfo fi(absPath);
+    QMimeDatabase db;
+    const QMimeType mt = db.mimeTypeForFile(fi);
+    const QString typeLine = QStringLiteral("[ %1 %2 ]").arg(emojiForMime(mt), mimeDisplay(mt));
 
-    if (dialog.exec() == QDialog::Accepted) {
-        QString text = dialog.textValue();
-        if (!text.isEmpty()) {
-            tagManager.addTag(fnameOnly, text.toStdString());
-            updateTagDisplay(filename);
-            updateTagList(); // Refresh left panel
-            lblStatus->setText(QString("已新增標籤: %1").arg(text));
+    lblPreviewImage->setVisible(false);
+    txtPreviewText->setVisible(false);
+
+    if (!fi.exists()) {
+        txtPreviewText->setVisible(true);
+        txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(檔案不存在)"));
+        return;
+    }
+
+    if (mt.name().startsWith(QStringLiteral("image/"))) {
+        QPixmap pix(absPath);
+        if (!pix.isNull()) {
+            lblPreviewImage->setVisible(true);
+            lblPreviewImage->setPixmap(pix.scaled(lblPreviewImage->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        } else {
+            txtPreviewText->setVisible(true);
+            txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(無法載入圖片)"));
+        }
+        return;
+    }
+
+    const QString suffix = fi.suffix().toLower();
+    if (suffix == QStringLiteral("pdf") || suffix == QStringLiteral("docx") || suffix == QStringLiteral("xlsx")) {
+        txtPreviewText->setVisible(true);
+        std::string content = DocumentParser::extractText(absPath.toStdString());
+        if (content.size() > 2500) content = content.substr(0, 2500) + "...";
+        if (content.empty()) content = "(No searchable text found or encrypted)";
+        txtPreviewText->setPlainText(typeLine + QStringLiteral("\n") + QString::fromStdString(content));
+        return;
+    }
+
+    if (mt.name().startsWith(QStringLiteral("text/")) || suffix == QStringLiteral("md") || suffix == QStringLiteral("txt") || suffix == QStringLiteral("log") || suffix == QStringLiteral("json") || suffix == QStringLiteral("xml") || suffix == QStringLiteral("yaml") || suffix == QStringLiteral("yml") || suffix == QStringLiteral("cpp") || suffix == QStringLiteral("h") || suffix == QStringLiteral("py") || suffix == QStringLiteral("js") || suffix == QStringLiteral("ts")) {
+        txtPreviewText->setVisible(true);
+        std::ifstream f(absPath.toStdString(), std::ios::binary);
+        if (!f.is_open()) {
+            txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(無法讀取)"));
+            return;
+        }
+        std::string buf;
+        buf.resize(4096);
+        f.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+        buf.resize(static_cast<size_t>(f.gcount()));
+        txtPreviewText->setPlainText(typeLine + QStringLiteral("\n") + QString::fromUtf8(buf.data(), static_cast<int>(buf.size())));
+        return;
+    }
+
+    txtPreviewText->setVisible(true);
+    txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(二進位檔：不顯示內容)"));
+}
+
+void MainWindow::updateTagDisplayForFile(const QString &absPath) {
+    std::vector<QString> tags;
+    {
+        QMutexLocker locker(&tagMutex);
+        tags = tagManager.getTags(absPath);
+    }
+    QString s = QStringLiteral("標籤: ");
+    if (tags.empty()) {
+        s += QStringLiteral("(無)");
+    } else {
+        for (int i = 0; i < static_cast<int>(tags.size()); ++i) {
+            s += tags[static_cast<size_t>(i)];
+            if (i + 1 < static_cast<int>(tags.size())) s += QStringLiteral(", ");
         }
     }
+    lblTags->setText(s);
 }
 
-void MainWindow::removeTag()
-{
-    QList<QListWidgetItem*> selectedItems = fileList->selectedItems();
-    if (selectedItems.isEmpty()) {
-        QMessageBox::warning(this, "Warning", "Please select a file first.");
+QString MainWindow::historicalTagsString() const {
+    std::vector<QString> tags;
+    {
+        QMutexLocker locker(&tagMutex);
+        tags = tagManager.getAllTags();
+    }
+    QStringList parts;
+    for (const auto &t : tags) parts << t;
+    return parts.join(QStringLiteral(", "));
+}
+
+std::vector<QString> MainWindow::sanitizeAiTags(const QString &raw) const {
+    QString cleaned = raw;
+    cleaned.replace(QRegularExpression(QStringLiteral("System:|Assistant:|User:|輸出:|標籤:|標签:"), QRegularExpression::CaseInsensitiveOption), QString());
+    cleaned.replace(QStringLiteral("\n"), QStringLiteral(" ")).replace(QStringLiteral("\r"), QStringLiteral(" "));
+
+    QStringList parts = cleaned.split(QRegularExpression(QStringLiteral("[,，、]")), Qt::SkipEmptyParts);
+    QSet<QString> seen;
+    std::vector<QString> out;
+
+    for (const QString &p0 : parts) {
+        QString p = p0.trimmed();
+        p.replace(QRegularExpression(QStringLiteral("[\\s\\.。;；:：\\[\\]\\(\\)<>\"'`~!@#$%^&*+=\\|\\\\/?]+")), QString());
+        if (p.isEmpty()) continue;
+        if (p.size() > 8) continue;
+        if (seen.contains(p)) continue;
+        seen.insert(p);
+        out.push_back(p);
+        if (out.size() >= 5) break;
+    }
+    return out;
+}
+
+void MainWindow::setUiBusy(bool busy) {
+    btnAnalyzeFile->setEnabled(!busy && !currentFilePath().isEmpty());
+    btnCancelAnalysis->setEnabled(busy);
+    btnSaveTags->setEnabled(!busy && btnSaveTags->isEnabled());
+    fileList->setEnabled(!busy);
+    folderTree->setEnabled(!busy);
+    tagListWidget->setEnabled(!busy);
+    cmbTagFilter->setEnabled(!busy);
+    txtSearch->setEnabled(!busy);
+    cmbSort->setEnabled(!busy);
+    btnHome->setEnabled(!busy);
+    if (!busy) syncNavigationButtons();
+    else {
+        btnBack->setEnabled(false);
+        btnForward->setEnabled(false);
+    }
+}
+
+void MainWindow::analyzeFile() {
+    const QString fp = currentFilePath();
+    if (fp.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
         return;
     }
 
-    QString filename = selectedItems.first()->text();
-    std::filesystem::path path(filename.toStdString());
-    std::string fnameOnly = path.filename().string();
+    QFileInfo fi(fp);
+    if (!isAnalyzableFile(fi)) {
+        lblStatus->setText(QStringLiteral("此項目不可分析"));
+        return;
+    }
 
-    std::vector<std::string> tags = tagManager.getTags(fnameOnly);
+    if (!llamaEngine.isModelLoaded()) {
+        QMessageBox::warning(this, QStringLiteral("Model"), QStringLiteral("模型尚未載入"));
+        return;
+    }
+
+    cancelFlag.store(false);
+    setUiBusy(true);
+    lblStatus->setText(QStringLiteral("準備分析…"));
+
+    const QString filename = fi.fileName();
+    const QString existingTags = historicalTagsString();
+
+    std::string content;
+    const QString suffix = fi.suffix().toLower();
+    if (suffix == QStringLiteral("pdf") || suffix == QStringLiteral("docx") || suffix == QStringLiteral("xlsx")) {
+        content = DocumentParser::extractText(fp.toStdString());
+        if (content.size() > 2500) content = content.substr(0, 2500);
+    } else {
+        std::ifstream f(fp.toStdString(), std::ios::binary);
+        if (f.is_open()) {
+            std::string buf;
+            buf.resize(2048);
+            f.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+            buf.resize(static_cast<size_t>(f.gcount()));
+            const QString q = QString::fromUtf8(buf.data(), static_cast<int>(buf.size()));
+            if (!q.isEmpty()) content = q.toStdString();
+        }
+    }
+
+    lblStatus->setText(QStringLiteral("分析中…"));
+
+    QFuture<std::string> future = QtConcurrent::run([this, filename, content, existingTags]() {
+        return llamaEngine.suggestTags(filename.toStdString(), content, existingTags.toStdString());
+    });
+    watcher->setFuture(future);
+}
+
+void MainWindow::cancelAnalysis() {
+    cancelFlag.store(true);
+    lblStatus->setText(QStringLiteral("取消中…"));
+}
+
+void MainWindow::onAnalysisFinished() {
+    setUiBusy(false);
+
+    const QString fp = currentFilePath();
+    const std::string raw = watcher->result();
+    const QString qRaw = QString::fromStdString(raw);
+
+    if (raw.rfind("Error:", 0) == 0) {
+        lblStatus->setText(QStringLiteral("分析失敗"));
+        QMessageBox::critical(this, QStringLiteral("Error"), qRaw);
+        return;
+    }
+
+    if (cancelFlag.load()) {
+        lblStatus->setText(QStringLiteral("已取消"));
+        return;
+    }
+
+    const auto tags = sanitizeAiTags(qRaw);
+    if (fp.isEmpty()) {
+        lblStatus->setText(QStringLiteral("分析完成（無選取檔案）"));
+        return;
+    }
+
+    {
+        QMutexLocker locker(&tagMutex);
+        for (const auto &t : tags) tagManager.addTag(fp, t, false);
+        tagManager.saveTags();
+    }
+
+    updateTagDisplayForFile(fp);
+    updateTagList();
+    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
+    else populateVirtualTagFiles(activeVirtualTag);
+
+    lblStatus->setText(QStringLiteral("分析完成"));
+}
+
+void MainWindow::saveTags() {
+    const QString fp = currentFilePath();
+    if (fp.isEmpty()) return;
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.saveTags();
+    }
+    lblStatus->setText(QStringLiteral("已儲存"));
+    btnSaveTags->setEnabled(false);
+}
+
+void MainWindow::addTag() {
+    const QString fp = currentFilePath();
+    if (fp.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
+        return;
+    }
+    bool ok = false;
+    const QString t = QInputDialog::getText(this, QStringLiteral("Add Tag"), QStringLiteral("標籤:"), QLineEdit::Normal, QString(), &ok).trimmed();
+    if (!ok || t.isEmpty()) return;
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.addTag(fp, t, true);
+        tagManager.saveTags();
+    }
+    updateTagDisplayForFile(fp);
+    updateTagList();
+    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
+    else populateVirtualTagFiles(activeVirtualTag);
+}
+
+void MainWindow::removeTag() {
+    const QString fp = currentFilePath();
+    if (fp.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
+        return;
+    }
+
+    std::vector<QString> tags;
+    {
+        QMutexLocker locker(&tagMutex);
+        tags = tagManager.getTags(fp);
+    }
     if (tags.empty()) {
-        QMessageBox::information(this, "Info", "This file has no tags.");
+        QMessageBox::information(this, QStringLiteral("Info"), QStringLiteral("無標籤"));
         return;
     }
 
     QStringList items;
-    for (const auto& t : tags) items << QString::fromStdString(t);
+    for (const auto &t : tags) items << t;
 
-    QInputDialog dialog(this);
-    dialog.setWindowTitle("Remove Tag");
-    dialog.setLabelText("Select tag to remove:");
-    dialog.setComboBoxItems(items);
-    dialog.setInputMode(QInputDialog::TextInput); // ComboBox uses TextInput mode with items
-    dialog.setComboBoxEditable(false);
-    dialog.resize(300, 150); // Optimize size
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(this, QStringLiteral("Remove"), QStringLiteral("選擇要移除的標籤:"), items, 0, false, &ok);
+    if (!ok || chosen.isEmpty()) return;
 
-    if (dialog.exec() == QDialog::Accepted) {
-        QString item = dialog.textValue();
-        if (!item.isEmpty()) {
-            tagManager.removeTag(fnameOnly, item.toStdString());
-            updateTagDisplay(filename);
-            updateTagList(); // Refresh left panel
-            lblStatus->setText(QString("已移除標籤: %1").arg(item));
-        }
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.removeTag(fp, chosen);
+        tagManager.saveTags();
     }
+    updateTagDisplayForFile(fp);
+    updateTagList();
+    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
+    else populateVirtualTagFiles(activeVirtualTag);
 }
 
-
-void MainWindow::removeGlobalTag()
-{
-    QList<QListWidgetItem*> selectedItems = tagListWidget->selectedItems();
-    if (selectedItems.isEmpty()) {
-        QMessageBox::warning(this, "Warning", "Please select a tag from the left list first.");
+void MainWindow::removeGlobalTag() {
+    const auto selected = tagListWidget->selectedItems();
+    if (selected.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇標籤"));
         return;
     }
 
-    QString tag = selectedItems.first()->text();
-    QString data = selectedItems.first()->data(Qt::UserRole).toString();
-
-    if (data == "ALL") {
-        QMessageBox::warning(this, "Warning", "Cannot delete 'All Files' category.");
+    const QString data = selected.first()->data(Qt::UserRole).toString();
+    if (data == QStringLiteral("ALL")) {
+        QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("無法刪除 All Files"));
         return;
     }
 
-    QMessageBox::StandardButton reply;
-    reply = QMessageBox::question(this, "Delete Tag", 
-                                  QString("Are you sure you want to delete tag '%1' from ALL files?").arg(tag),
-                                  QMessageBox::Yes|QMessageBox::No);
-    
-    if (reply == QMessageBox::Yes) {
-        tagManager.deleteTag(tag.toStdString());
-        updateTagList();
-        
-        // Refresh right panel if a file is selected
-        QList<QListWidgetItem*> selectedFiles = fileList->selectedItems();
-        if (!selectedFiles.isEmpty()) {
-            updateTagDisplay(selectedFiles.first()->text());
+    const QString tag = normalizeDisplayTag(data);
+    const auto reply = QMessageBox::question(this, QStringLiteral("Delete"),
+                                            QStringLiteral("確定刪除標籤「%1」？").arg(tag),
+                                            QMessageBox::Yes | QMessageBox::No);
+    if (reply != QMessageBox::Yes) return;
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.deleteTag(tag);
+        tagManager.saveTags();
+    }
+    fileListMode = FileListMode::PhysicalFolder;
+    activeVirtualTag.clear();
+    updateTagList();
+    scanFiles();
+}
+
+void MainWindow::rebuildAddExistingTagMenu() {
+    auto *menu = new QMenu(this);
+
+    std::vector<QString> allTags;
+    {
+        QMutexLocker locker(&tagMutex);
+        allTags = tagManager.getAllTags();
+    }
+    QStringList history;
+    for (const auto &t : allTags) history << normalizeDisplayTag(t);
+
+    auto addCategory = [&](const QString &name, const QStringList &preset) {
+        QMenu *sub = menu->addMenu(name);
+        for (const QString &t : preset) {
+            QAction *a = sub->addAction(t);
+            connect(a, &QAction::triggered, this, [this, t]() {
+                const QString fp = currentFilePath();
+                if (fp.isEmpty()) return;
+                {
+                    QMutexLocker locker(&tagMutex);
+                    tagManager.addTag(fp, t, true);
+                    tagManager.saveTags();
+                }
+                updateTagDisplayForFile(fp);
+                updateTagList();
+                if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
+                else populateVirtualTagFiles(activeVirtualTag);
+            });
         }
-        
-        lblStatus->setText(QString("已刪除標籤: %1 (Global)").arg(tag));
-    }
+        if (!history.isEmpty()) {
+            sub->addSeparator();
+            for (const QString &t : history) {
+                QAction *a = sub->addAction(t);
+                connect(a, &QAction::triggered, this, [this, t]() {
+                    const QString fp = currentFilePath();
+                    if (fp.isEmpty()) return;
+                    {
+                        QMutexLocker locker(&tagMutex);
+                        tagManager.addTag(fp, t, true);
+                        tagManager.saveTags();
+                    }
+                    updateTagDisplayForFile(fp);
+                    updateTagList();
+                    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
+                    else populateVirtualTagFiles(activeVirtualTag);
+                });
+            }
+        }
+    };
+
+    addCategory(QStringLiteral("🖼️ 圖片"), {QStringLiteral("相片"), QStringLiteral("截圖")});
+    addCategory(QStringLiteral("🎬 影片"), {QStringLiteral("剪輯"), QStringLiteral("錄影")});
+    addCategory(QStringLiteral("🎧 音訊"), {QStringLiteral("音樂"), QStringLiteral("錄音")});
+    addCategory(QStringLiteral("📄 文件"), {QStringLiteral("報告"), QStringLiteral("簡報")});
+    addCategory(QStringLiteral("📦 壓縮檔"), {QStringLiteral("備份"), QStringLiteral("打包")});
+    addCategory(QStringLiteral("🧩 專案"), {QStringLiteral("程式碼"), QStringLiteral("研究")});
+
+    btnAddExistingTag->setMenu(menu);
+}
+
+QStringList MainWindow::getFastPathTags(const QString &filename) {
+    QStringList tags;
+    const QString lower = filename.toLower();
+
+    if (lower.contains(QStringLiteral("hw")) || lower.contains(QStringLiteral("homework")) || lower.contains(QStringLiteral("作業")) || lower.contains(QStringLiteral("報告")))
+        tags << QStringLiteral("🎒學校作業");
+    if (lower.contains(QStringLiteral("receipt")) || lower.contains(QStringLiteral("invoice")) || lower.contains(QStringLiteral("收據")) || lower.contains(QStringLiteral("發票")))
+        tags << QStringLiteral("💰財務");
+    if (lower.contains(QStringLiteral("setup")) || lower.contains(QStringLiteral("install")) || lower.contains(QStringLiteral("installer")) || lower.contains(QStringLiteral("安裝")))
+        tags << QStringLiteral("💻安裝檔");
+    if (lower.contains(QStringLiteral("backup")) || lower.contains(QStringLiteral("備份"))) tags << QStringLiteral("📦備份檔");
+    if (lower.contains(QStringLiteral("meeting")) || lower.contains(QStringLiteral("會議"))) tags << QStringLiteral("🗓️會議");
+    if (lower.contains(QStringLiteral("resume")) || lower.contains(QStringLiteral("cv")) || lower.contains(QStringLiteral("履歷"))) tags << QStringLiteral("🧑‍💼履歷");
+
+    if (lower.endsWith(QStringLiteral(".exe")) || lower.endsWith(QStringLiteral(".dmg")) || lower.endsWith(QStringLiteral(".pkg")) || lower.endsWith(QStringLiteral(".msi")))
+        tags << QStringLiteral("💻應用程式");
+    if (lower.endsWith(QStringLiteral(".cpp")) || lower.endsWith(QStringLiteral(".h")) || lower.endsWith(QStringLiteral(".hpp")) || lower.endsWith(QStringLiteral(".c")) || lower.endsWith(QStringLiteral(".rs")) || lower.endsWith(QStringLiteral(".go")) || lower.endsWith(QStringLiteral(".py")) || lower.endsWith(QStringLiteral(".js")) || lower.endsWith(QStringLiteral(".ts")) || lower.endsWith(QStringLiteral(".java")) || lower.endsWith(QStringLiteral(".cs")))
+        tags << QStringLiteral("⌨️程式碼");
+    if (lower.endsWith(QStringLiteral(".pdf")) || lower.endsWith(QStringLiteral(".docx")) || lower.endsWith(QStringLiteral(".xlsx")) || lower.endsWith(QStringLiteral(".pptx")) || lower.endsWith(QStringLiteral(".txt")) || lower.endsWith(QStringLiteral(".md")) || lower.endsWith(QStringLiteral(".rtf")))
+        tags << kTagDoc;
+    if (lower.endsWith(QStringLiteral(".jpg")) || lower.endsWith(QStringLiteral(".jpeg")) || lower.endsWith(QStringLiteral(".png")) || lower.endsWith(QStringLiteral(".gif")) || lower.endsWith(QStringLiteral(".webp")) || lower.endsWith(QStringLiteral(".heic")) || lower.endsWith(QStringLiteral(".bmp")))
+        tags << kTagImage;
+    if (lower.endsWith(QStringLiteral(".mp4")) || lower.endsWith(QStringLiteral(".mov")) || lower.endsWith(QStringLiteral(".mkv")) || lower.endsWith(QStringLiteral(".avi")) || lower.endsWith(QStringLiteral(".webm")))
+        tags << kTagVideo;
+    if (lower.endsWith(QStringLiteral(".mp3")) || lower.endsWith(QStringLiteral(".wav")) || lower.endsWith(QStringLiteral(".m4a")) || lower.endsWith(QStringLiteral(".flac")) || lower.endsWith(QStringLiteral(".aac")))
+        tags << kTagAudio;
+    if (lower.endsWith(QStringLiteral(".zip")) || lower.endsWith(QStringLiteral(".rar")) || lower.endsWith(QStringLiteral(".7z")) || lower.endsWith(QStringLiteral(".tar")) || lower.endsWith(QStringLiteral(".gz")))
+        tags << QStringLiteral("📦壓縮檔");
+    if (lower.endsWith(QStringLiteral(".json")) || lower.endsWith(QStringLiteral(".xml")) || lower.endsWith(QStringLiteral(".yaml")) || lower.endsWith(QStringLiteral(".yml")) || lower.endsWith(QStringLiteral(".toml")) || lower.endsWith(QStringLiteral(".ini")))
+        tags << QStringLiteral("🧩設定");
+    if (lower.endsWith(QStringLiteral(".blend")) || lower.endsWith(QStringLiteral(".psd")) || lower.endsWith(QStringLiteral(".ai"))) tags << QStringLiteral("🎨設計");
+    if (lower.endsWith(QStringLiteral(".sqlite")) || lower.endsWith(QStringLiteral(".db"))) tags << QStringLiteral("🗄️資料庫");
+
+    tags.removeDuplicates();
+    return tags;
 }

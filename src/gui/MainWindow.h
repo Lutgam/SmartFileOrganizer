@@ -2,95 +2,159 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
-#include <QListWidget>
-#include <QPushButton>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QFutureWatcher>
 #include <QLabel>
 #include <QLineEdit>
-#include <QCheckBox> // Added
+#include <QListWidget>
+#include <QMenu>
+#include <QPushButton>
 #include <QSplitter>
-#include <QScrollArea>
+#include <QTextEdit>
 #include <QToolBar>
-#include <QTabWidget>
-#include <QTextEdit> // Added back
-#include <QFutureWatcher> // Added back
-#include <QtConcurrent> // Added back
-#include "GraphWidget.h"
-#include "../ai/LlamaEngine.h" // Added back
-#include "../core/TagManager.h" // Added back
+#include <QTreeView>
+#include <QtConcurrent>
 
-class MainWindow : public QMainWindow
-{
+#include <QFileSystemModel>
+#include <QStringList>
+#include <QMutex>
+#include <QVector>
+
+#include <atomic>
+#include <string>
+#include <vector>
+
+#include "../ai/LlamaEngine.h"
+#include "../core/TagManager.h"
+
+class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    MainWindow(QWidget *parent = nullptr);
-    ~MainWindow();
+    explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow() override;
 
 private slots:
     void openFolder();
     void scanFiles();
-    void loadModel();
+    void filterFiles();
+    void onFileSelected(QListWidgetItem *item);
+    void onTagSelected(QListWidgetItem *item);
+
+    void goBack();
+    void goForward();
+    void goHome();
+    void onSortChanged(int index);
+
     void analyzeFile();
+    void cancelAnalysis();
     void onAnalysisFinished();
+
     void saveTags();
     void addTag();
     void removeTag();
     void removeGlobalTag();
-    void filterFiles(const QString &text);
-    void onFileSelected(QListWidgetItem *item);
-    void onTagSelected(QListWidgetItem *item);
-    void onTabChanged(int index);
+
+    void onBackgroundScanProgress();
+    void onBackgroundScanFinished();
 
 private:
-    // UI Components
-    QWidget *centralWidget;
-    QVBoxLayout *mainLayout;
-    QToolBar *toolbar;
-    QCheckBox *chkRecursive;
-    QTabWidget *tabWidget;
-    
-    // Tab 1: Explorer
-    QWidget *explorerTab;
-    QSplitter *mainSplitter;
-    
-    // Left Panel (Tags)
-    QWidget *leftPanel;
-    QListWidget *tagListWidget;
-    QPushButton *btnLeftAddTag;
-    QPushButton *btnLeftRemoveTag;
-    
-    // Middle Panel (Files)
-    QWidget *middlePanel;
-    QLineEdit *txtSearch;
-    QListWidget *fileList;
-    
-    // Right Panel (Details)
-    QWidget *rightPanel;
-    QLabel *lblPreviewImage;
-    QTextEdit *txtPreviewText;
-    QLabel *lblTags;
-    QLabel *lblStatus;
-    QPushButton *btnAnalyzeFile;
-    QPushButton *btnSaveTags;
-    QPushButton *btnAddTag;
-    QPushButton *btnRemoveTag;
+    enum class FileListMode { PhysicalFolder, VirtualTag };
 
-    // Tab 2: Graph
-    GraphWidget *graphWidget;
+    // ===== Layout =====
+    QSplitter *mainSplitter = nullptr;
 
-    // Data
+    // Column 1: Tags
+    QWidget *tagsPanel = nullptr;
+    QListWidget *tagListWidget = nullptr;
+    QPushButton *btnLeftAddTag = nullptr;
+    QPushButton *btnLeftRemoveTag = nullptr;
+
+    // Column 2: Folders + navigation under title
+    QWidget *foldersPanel = nullptr;
+    QTreeView *folderTree = nullptr;
+    QFileSystemModel *folderModel = nullptr;
+    QPushButton *btnBack = nullptr;
+    QPushButton *btnForward = nullptr;
+    QPushButton *btnHome = nullptr;
+
+    // Column 3: Files
+    QWidget *filesPanel = nullptr;
+    QComboBox *cmbSort = nullptr;
+    QComboBox *cmbTagFilter = nullptr;
+    QLineEdit *txtSearch = nullptr;
+    QListWidget *fileList = nullptr;
+
+    // Column 4: Preview & Controls
+    QWidget *previewPanel = nullptr;
+    QLabel *lblPreviewImage = nullptr;
+    QTextEdit *txtPreviewText = nullptr;
+    QLabel *lblTags = nullptr;
+    QLabel *lblStatus = nullptr;
+
+    QPushButton *btnAnalyzeFile = nullptr;
+    QPushButton *btnCancelAnalysis = nullptr;
+    QPushButton *btnSaveTags = nullptr;
+    QPushButton *btnAddTag = nullptr;
+    QPushButton *btnRemoveTag = nullptr;
+    QPushButton *btnAddExistingTag = nullptr;
+    QPushButton *btnOpenDefault = nullptr;
+
+    QToolBar *toolbar = nullptr;
+    QCheckBox *chkRecursive = nullptr;
+
+    QString rootPath;
     QString currentPath;
-    LlamaEngine llamaEngine;
+
     TagManager tagManager;
-    QFutureWatcher<std::string> *watcher;
+    LlamaEngine llamaEngine;
+
+    QFutureWatcher<std::string> *watcher = nullptr;
+    QFutureWatcher<bool> *modelLoadWatcher = nullptr;
+    QFutureWatcher<void> *initialScanWatcher = nullptr;
+    std::atomic<bool> cancelFlag{false};
+    std::atomic<int> backgroundScanProgress{0};
+
+    mutable QMutex tagMutex;
+
+    FileListMode fileListMode = FileListMode::PhysicalFolder;
+    QString activeVirtualTag;
+
+    QVector<QString> navHistory;
+    int navIndex = -1;
+
+    QString currentFilePath() const;
 
     void setupToolbar();
-    void setupLayout();
+    void setupFourColumnLayout();
+    void setupContextMenus();
+
+    void mapsHomeFixAndSetRoot(const QString &dir);
+    void setFolderTreeCurrentPath(const QString &absDir);
+    void pushHistory(const QString &path);
+    void navigateToFolder(const QString &path, bool pushToHistory);
+    void syncNavigationButtons();
+
+    void scanPhysicalFolder();
+    void populateVirtualTagFiles(const QString &tag);
+    void sortFileList();
+
     void updateTagList();
-    void updateFilePreview(const QString& filePath);
-    void updateTagDisplay(const QString& filename);
+    void updateTagListCountsOnly();
+    void syncTagFilterFromTagList();
+    void syncTagListFromTagFilter();
+    void setUiBusy(bool busy);
+
+    void updatePreviewForFile(const QString &absPath);
+    void updateTagDisplayForFile(const QString &absPath);
+
+    void rebuildAddExistingTagMenu();
+    QString historicalTagsString() const;
+    std::vector<QString> sanitizeAiTags(const QString &raw) const;
+    QStringList getFastPathTags(const QString &filename);
+
+    bool isAnalyzableFile(const QFileInfo &fi) const;
 };
 
 #endif // MAINWINDOW_H
