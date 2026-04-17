@@ -201,16 +201,28 @@ void MainWindow::scanFiles()
     fileList->clear();
     FileScanner scanner;
     bool recursive = chkRecursive->isChecked();
+    
     std::vector<std::string> files = scanner.scanDirectory(currentPath.toStdString(), recursive);
 
     for (const auto& file : files) {
-        fileList->addItem(QString::fromStdString(file));
+        QString qfilePath = QString::fromStdString(file);
+        QFileInfo fileInfo(qfilePath);
+        QString fileName = fileInfo.fileName();
+
+        QListWidgetItem* item = new QListWidgetItem(fileName, fileList);
+        item->setData(Qt::UserRole, qfilePath); 
+
+        QStringList fastTags = getFastPathTags(fileName);
+        if (!fastTags.isEmpty()) {
+            for (const QString& tag : fastTags) {
+                tagManager.addTag(qfilePath, tag, false);
+            }
+        }
     }
     
-    updateTagList();
+    updateTagList(); 
     lblStatus->setText(QString("目前資料夾: %1 (找到 %2 個檔案)").arg(currentPath).arg(files.size()));
 }
-
 void MainWindow::updateTagList()
 {
     tagListWidget->clear();

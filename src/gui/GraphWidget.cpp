@@ -313,7 +313,7 @@ void GraphWidget::buildGraph() {
 
     if (!tagManager) return;
     
-    std::vector<std::string> allTags = tagManager->getAllTags();
+    std::vector<QString> allTags = tagManager->getAllTags();
     if (allTags.empty()) {
         //scene()->addText("No tags found.", QFont("Arial", 20))->setDefaultTextColor(Qt::white);
         return;
@@ -322,8 +322,7 @@ void GraphWidget::buildGraph() {
     // 1. Create Tag Nodes (Blue)
     int i = 0;
     int count = allTags.size();
-    for (const auto& tagStr : allTags) {
-        QString qTag = QString::fromStdString(tagStr);
+    for (const QString& qTag : allTags) {
         Node* tagNode = new Node(this, Node::Tag, qTag);
         
         // Distribute in a circle
@@ -337,13 +336,12 @@ void GraphWidget::buildGraph() {
     
     // 2. Create File Nodes (Green) for files that have tags
     // This is a bit inefficient (O(Tags * Files)), but fine for MVP
-    for (const auto& tagStr : allTags) {
-        QString qTag = QString::fromStdString(tagStr);
+    for (const auto& qTag : allTags) {
         Node* tagNode = tagNodes[qTag];
         
-        std::vector<std::string> files = tagManager->getFilesByTag(tagStr);
-        for (const auto& f : files) {
-            QString qFile = QString::fromStdString(std::filesystem::path(f).filename().string());
+        std::vector<QString> files = tagManager->getFilesByTag(qTag);
+        for (const auto& qFileFullPath : files) {
+            QString qFile = QString::fromStdString(std::filesystem::path(qFileFullPath.toStdString()).filename().string());
             
             Node* fileNode;
             if (fileNodes.find(qFile) == fileNodes.end()) {

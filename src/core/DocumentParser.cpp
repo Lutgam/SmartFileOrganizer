@@ -164,7 +164,10 @@ std::string DocumentParser::parseXlsx(const std::string& filePath)
 
 std::string DocumentParser::parsePdf(const std::string& filePath)
 {
-    // Qt PDF module is not available in standard generic Qt build environment often.
-    // Without poppler/podofo, we can't extract text robustly.
-    return "[PDF Content: Text extraction not available without external libraries. Please use DOCX or Text files for analysis.]";
+    QFileInfo fileInfo(QString::fromStdString(filePath));
+    QString metadata = QString("檔名: %1, 建立於: %2, 大小: %3 bytes")
+        .arg(fileInfo.fileName())
+        .arg(fileInfo.birthTime().toString("yyyy-MM-dd"))
+        .arg(fileInfo.size());
+    return metadata.toStdString();
 }

@@ -58,6 +58,9 @@ bool FileScanner::isIgnored(const std::filesystem::path& path)
         "Windows", "System32", "AppData"
     };
 
+    // Ignored automatically if hidden on Unix (starts with a dot)
+    if (!filename.empty() && filename[0] == '.') return true;
+
     // Ignored extensions (lowercase)
     static const std::set<std::string> ignoredExts = {
         ".obj", ".o", ".lib", ".a", ".dll", ".exe", ".so", ".dylib",
