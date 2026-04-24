@@ -32,6 +32,8 @@
 #include <fstream>
 #include <map>
 
+#include "DuplicateCleanerDialog.h"
+
 namespace {
 
 static const QString kTagImage = QStringLiteral("🖼️ 圖片");
@@ -203,6 +205,11 @@ void MainWindow::setupToolbar() {
     toolbar->setMovable(false);
     QAction *actOpen = toolbar->addAction(QStringLiteral("開啟資料夾"));
     connect(actOpen, &QAction::triggered, this, &MainWindow::openFolder);
+    QAction *actTwins = toolbar->addAction(QStringLiteral("🧹 尋找同名檔"));
+    connect(actTwins, &QAction::triggered, this, [this]() {
+        DuplicateCleanerDialog dlg(currentPath.isEmpty() ? QDir::homePath() : currentPath, this);
+        dlg.exec();
+    });
     toolbar->addSeparator();
 }
 
