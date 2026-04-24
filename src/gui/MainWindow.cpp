@@ -352,6 +352,22 @@ void MainWindow::setupFourColumnLayout() {
     });
     filesLayout->addWidget(fileList, 1);
 
+    auto *loadRow = new QHBoxLayout();
+    btnLoadMore = new QPushButton(QStringLiteral("載入更多 (%1)").arg(BATCH_SIZE), this);
+    btnLoadAll = new QPushButton(QStringLiteral("載入全部"), this);
+    loadRow->addWidget(btnLoadMore);
+    loadRow->addWidget(btnLoadAll);
+    loadRow->addStretch(1);
+    filesLayout->addLayout(loadRow);
+
+    btnLoadMore->hide();
+    btnLoadAll->hide();
+    connect(btnLoadMore, &QPushButton::clicked, this, [this]() { renderFileListBatch(BATCH_SIZE); });
+    connect(btnLoadAll, &QPushButton::clicked, this, [this]() {
+        const int remaining = static_cast<int>(m_pendingFilesToDisplay.size()) - m_currentLoadedCount;
+        renderFileListBatch(remaining);
+    });
+
     connect(txtSearch, &QLineEdit::textChanged, this, &MainWindow::filterFiles);
     connect(cmbTagFilter, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         syncTagListFromTagFilter();
@@ -408,14 +424,6 @@ void MainWindow::setupFourColumnLayout() {
     btnRemoveTag = new QPushButton(QStringLiteral("➖ 移除"), this);
     connect(btnRemoveTag, &QPushButton::clicked, this, &MainWindow::removeTag);
     btnRow2->addWidget(btnRemoveTag);
-
-    btnOpenDefault = new QPushButton(QStringLiteral("👁️ 開啟"), this);
-    connect(btnOpenDefault, &QPushButton::clicked, this, [this]() {
-        const QString fp = currentFilePath();
-        if (fp.isEmpty()) return;
-        QDesktopServices::openUrl(QUrl::fromLocalFile(fp));
-    });
-    btnRow2->addWidget(btnOpenDefault);
     previewLayout->addLayout(btnRow2);
 
     btnAddExistingTag = new QPushButton(QStringLiteral("🏷️ 加入現有標籤"), this);
@@ -666,6 +674,8 @@ void MainWindow::scanFiles() {
 
 void MainWindow::scanPhysicalFolder() {
     fileList->clear();
+    m_pendingFilesToDisplay.clear();
+    m_currentLoadedCount = 0;
 
     const bool recursive = chkRecursive && chkRecursive->isChecked();
     int count = 0;
@@ -684,9 +694,7 @@ void MainWindow::scanPhysicalFolder() {
             if (!target.isEmpty() && QFileInfo(target).isDir()) continue;
         }
         const QString fileName = fileInfo.fileName();
-
-        auto *item = new QListWidgetItem(fileName, fileList);
-        item->setData(Qt::UserRole, filePath);
+        m_pendingFilesToDisplay.push_back(filePath);
 
         const QStringList fastTags = getFastPathTags(fileName);
         if (!fastTags.isEmpty()) {
@@ -716,21 +724,54 @@ void MainWindow::scanPhysicalFolder() {
                            .arg(count)
                            .arg(recursive ? QStringLiteral("[遞迴]") : QStringLiteral("[僅此層]")));
 
-    filterFiles();
+    fileList->clear();
+    renderFileListBatch(BATCH_SIZE);
 }
 
 void MainWindow::populateVirtualTagFiles(const QString &tag) {
     fileList->clear();
-    if (tag.isEmpty()) return;
-
-    std::vector<QString> paths;
-    {
-        QMutexLocker locker(&tagMutex);
-        paths = tagManager.getFilesByTag(tag);
+    m_pendingFilesToDisplay.clear();
+    m_currentLoadedCount = 0;
+    if (tag.isEmpty()) {
+        if (btnLoadMore) btnLoadMore->hide();
+        if (btnLoadAll) btnLoadAll->hide();
+        return;
     }
 
-    int count = 0;
-    for (const QString &filePath : paths) {
+    {
+        QMutexLocker locker(&tagMutex);
+        m_pendingFilesToDisplay = tagManager.getFilesByTag(tag);
+    }
+
+    lblStatus->setText(QStringLiteral("虛擬標籤檢視: %1 | 檔案數: %2")
+                           .arg(tag)
+                           .arg(static_cast<int>(m_pendingFilesToDisplay.size())));
+
+    renderFileListBatch(BATCH_SIZE);
+}
+
+void MainWindow::renderFileListBatch(int count) {
+    if (!fileList) return;
+    if (count <= 0) {
+        const bool hasMore = m_currentLoadedCount < static_cast<int>(m_pendingFilesToDisplay.size());
+        if (btnLoadMore) btnLoadMore->setVisible(hasMore);
+        if (btnLoadAll) btnLoadAll->setVisible(hasMore);
+        return;
+    }
+
+    const int total = static_cast<int>(m_pendingFilesToDisplay.size());
+    const int remaining = total - m_currentLoadedCount;
+    const int take = std::min(count, remaining);
+    if (take <= 0) {
+        if (btnLoadMore) btnLoadMore->hide();
+        if (btnLoadAll) btnLoadAll->hide();
+        return;
+    }
+
+    const int start = m_currentLoadedCount;
+    const int end = start + take;
+    for (int i = start; i < end; ++i) {
+        const QString filePath = m_pendingFilesToDisplay[static_cast<size_t>(i)];
         const QFileInfo fi(filePath);
         if (!fi.exists()) continue;
         if (fi.isDir()) continue;
@@ -739,33 +780,24 @@ void MainWindow::populateVirtualTagFiles(const QString &tag) {
             if (!target.isEmpty() && QFileInfo(target).isDir()) continue;
         }
 
-        const QString name = fi.fileName();
-        const QString parent = parentDirDisplay(filePath);
-
-        auto *row = new QWidget(fileList);
-        auto *hl = new QHBoxLayout(row);
-        hl->setContentsMargins(4, 2, 4, 2);
-        hl->setSpacing(8);
-
-        auto *lblName = new QLabel(name, row);
-        lblName->setStyleSheet(QStringLiteral("font-weight: normal;"));
-        hl->addWidget(lblName);
-
-        auto *lblPath = new QLabel(parent, row);
-        lblPath->setStyleSheet(QStringLiteral("color: #888888; font-size: 11px;"));
-        lblPath->setWordWrap(false);
-        lblPath->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        hl->addWidget(lblPath, 1);
-
-        auto *item = new QListWidgetItem(fileList);
-        item->setSizeHint(row->sizeHint());
-        item->setData(Qt::UserRole, filePath);
-        fileList->addItem(item);
-        fileList->setItemWidget(item, row);
-        ++count;
+        if (fileListMode == FileListMode::VirtualTag) {
+            const QString name = fi.fileName();
+            const QString parent = parentDirDisplay(filePath);
+            auto *item = new QListWidgetItem(QStringLiteral("%1   [%2]").arg(name, parent), fileList);
+            item->setData(Qt::UserRole, filePath);
+        } else {
+            const QString fileName = fi.fileName();
+            auto *item = new QListWidgetItem(fileName, fileList);
+            item->setData(Qt::UserRole, filePath);
+        }
     }
 
-    lblStatus->setText(QStringLiteral("虛擬標籤檢視: %1 | 檔案數: %2").arg(tag).arg(count));
+    m_currentLoadedCount = end;
+
+    const bool hasMore = m_currentLoadedCount < total;
+    if (btnLoadMore) btnLoadMore->setVisible(hasMore);
+    if (btnLoadAll) btnLoadAll->setVisible(hasMore);
+
     filterFiles();
     sortFileList();
 }
@@ -932,7 +964,6 @@ void MainWindow::onFileSelected(QListWidgetItem *item) {
 
     QFileInfo fi(absPath);
     btnAnalyzeFile->setEnabled(isAnalyzableFile(fi));
-    btnOpenDefault->setEnabled(fi.exists());
 
     updatePreviewForFile(absPath);
     updateTagDisplayForFile(absPath);

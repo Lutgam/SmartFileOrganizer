@@ -85,6 +85,8 @@ private:
     QComboBox *cmbTagFilter = nullptr;
     QLineEdit *txtSearch = nullptr;
     QListWidget *fileList = nullptr;
+    QPushButton *btnLoadMore = nullptr;
+    QPushButton *btnLoadAll = nullptr;
 
     // Column 4: Preview & Controls
     QWidget *previewPanel = nullptr;
@@ -99,7 +101,6 @@ private:
     QPushButton *btnAddTag = nullptr;
     QPushButton *btnRemoveTag = nullptr;
     QPushButton *btnAddExistingTag = nullptr;
-    QPushButton *btnOpenDefault = nullptr;
 
     QToolBar *toolbar = nullptr;
     QCheckBox *chkRecursive = nullptr;
@@ -121,6 +122,10 @@ private:
     FileListMode fileListMode = FileListMode::PhysicalFolder;
     QString activeVirtualTag;
 
+    std::vector<QString> m_pendingFilesToDisplay;
+    int m_currentLoadedCount = 0;
+    static constexpr int BATCH_SIZE = 200;
+
     QVector<QString> navHistory;
     int navIndex = -1;
 
@@ -138,6 +143,7 @@ private:
 
     void scanPhysicalFolder();
     void populateVirtualTagFiles(const QString &tag);
+    void renderFileListBatch(int count);
     void sortFileList();
 
     void updateTagList();
