@@ -603,7 +603,14 @@ void MainWindow::sortFileList() {
     if (!fileList) return;
     const int mode = cmbSort ? cmbSort->currentIndex() : 0;
     if (mode == 0) {
-        fileList->sortItems(Qt::AscendingOrder);
+        QList<QListWidgetItem *> items;
+        for (int i = 0; i < fileList->count(); ++i) items.push_back(fileList->takeItem(0));
+        std::sort(items.begin(), items.end(), [](QListWidgetItem *a, QListWidgetItem *b) {
+            const QString pa = a->data(Qt::UserRole).toString();
+            const QString pb = b->data(Qt::UserRole).toString();
+            return baseName(pa).localeAwareCompare(baseName(pb)) < 0;
+        });
+        for (auto *it : items) fileList->addItem(it);
         return;
     }
 
@@ -783,8 +790,26 @@ void MainWindow::renderFileListBatch(int count) {
         if (fileListMode == FileListMode::VirtualTag) {
             const QString name = fi.fileName();
             const QString parent = parentDirDisplay(filePath);
-            auto *item = new QListWidgetItem(QStringLiteral("%1   [%2]").arg(name, parent), fileList);
+            auto *item = new QListWidgetItem();
             item->setData(Qt::UserRole, filePath);
+
+            auto *widget = new QWidget(fileList);
+            auto *layout = new QHBoxLayout(widget);
+            layout->setContentsMargins(5, 2, 5, 2);
+            layout->setSpacing(8);
+
+            auto *nameLabel = new QLabel(name, widget);
+            layout->addWidget(nameLabel);
+
+            auto *pathLabel = new QLabel(QStringLiteral("[%1]").arg(parent), widget);
+            pathLabel->setStyleSheet(QStringLiteral("color: gray;"));
+            layout->addWidget(pathLabel);
+
+            layout->addStretch();
+
+            item->setSizeHint(widget->sizeHint());
+            fileList->addItem(item);
+            fileList->setItemWidget(item, widget);
         } else {
             const QString fileName = fi.fileName();
             auto *item = new QListWidgetItem(fileName, fileList);
