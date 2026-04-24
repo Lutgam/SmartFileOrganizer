@@ -886,12 +886,17 @@ void MainWindow::renderFileListBatch(int count) {
         }
 
         if (fileListMode == FileListMode::VirtualTag) {
-            const QString name = fi.fileName();
-            const QString parent = parentDirDisplay(filePath);
+            QString parentPath = fi.absolutePath();
+            QDir workspaceDir(rootPath);
+            QString relativePath = workspaceDir.relativeFilePath(parentPath);
+            if (relativePath == QStringLiteral(".")) {
+                relativePath = QStringLiteral("根目錄");
+            }
+
             auto *item = new QListWidgetItem();
-            item->setText(name);                     // 檔名（DisplayRole）
-            item->setData(Qt::UserRole, filePath);    // 絕對路徑（雙擊用）
-            item->setData(Qt::UserRole + 1, parent);  // 灰色路徑（Delegate 繪製用）
+            item->setText(fi.fileName());                     // 檔名（DisplayRole）
+            item->setData(Qt::UserRole, filePath);            // 絕對路徑（雙擊用）
+            item->setData(Qt::UserRole + 1, relativePath);    // 相對工作區路徑（Delegate 用）
             fileList->addItem(item);
         } else {
             const QString fileName = fi.fileName();
