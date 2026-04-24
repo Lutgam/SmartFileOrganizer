@@ -344,6 +344,12 @@ void MainWindow::setupFourColumnLayout() {
     fileList = new QListWidget(this);
     fileList->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(fileList, &QListWidget::itemClicked, this, &MainWindow::onFileSelected);
+    connect(fileList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+        if (!item) return;
+        const QString absPath = item->data(Qt::UserRole).toString();
+        if (absPath.isEmpty()) return;
+        QDesktopServices::openUrl(QUrl::fromLocalFile(absPath));
+    });
     filesLayout->addWidget(fileList, 1);
 
     connect(txtSearch, &QLineEdit::textChanged, this, &MainWindow::filterFiles);
@@ -570,6 +576,7 @@ void MainWindow::goHome() {
     rootPath = home;
     currentPath = home;
     folderModel->setRootPath(rootPath);
+    folderTree->setRootIndex(folderModel->index(home));
     fileListMode = FileListMode::PhysicalFolder;
     activeVirtualTag.clear();
     navHistory.clear();
@@ -623,6 +630,7 @@ void MainWindow::openFolder() {
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (dir.isEmpty()) return;
     mapsHomeFixAndSetRoot(dir);
+    folderTree->setRootIndex(folderModel->index(dir));
     navHistory.clear();
     navIndex = -1;
     pushHistory(currentPath);
