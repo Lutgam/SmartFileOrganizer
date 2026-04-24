@@ -17,6 +17,9 @@
 #include <QtConcurrent>
 
 #include <QFileSystemModel>
+#include <QSortFilterProxyModel>
+#include <QFileInfo>
+#include <QDir>
 #include <QStringList>
 #include <QMutex>
 #include <QVector>
@@ -27,6 +30,37 @@
 
 #include "../ai/LlamaEngine.h"
 #include "../core/TagManager.h"
+
+class WorkspaceFilterProxyModel : public QSortFilterProxyModel {
+    Q_OBJECT
+public:
+    QString m_workspaceRoot;
+    QString m_workspaceParent;
+
+    explicit WorkspaceFilterProxyModel(QObject *parent = nullptr) : QSortFilterProxyModel(parent) {}
+
+    void setWorkspace(const QString &path) {
+        m_workspaceRoot = QDir::cleanPath(path);
+        m_workspaceParent = QFileInfo(m_workspaceRoot).path();
+        invalidateFilter();
+    }
+
+protected:
+    bool filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const override {
+        QFileSystemModel *fsModel = qobject_cast<QFileSystemModel *>(sourceModel());
+        if (!fsModel || m_workspaceRoot.isEmpty()) return true;
+
+        const QString parentPath = QDir::cleanPath(fsModel->filePath(sourceParent));
+
+        // If listing is under the workspace parent, only allow the workspace itself.
+        if (parentPath == m_workspaceParent) {
+            const QModelIndex index = fsModel->index(sourceRow, 0, sourceParent);
+            const QString itemPath = QDir::cleanPath(fsModel->filePath(index));
+            return itemPath == m_workspaceRoot;
+        }
+        return true;
+    }
+};
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -74,7 +108,9 @@ private:
     // Column 2: Folders + navigation under title
     QWidget *foldersPanel = nullptr;
     QTreeView *folderTree = nullptr;
+    QLabel *workspaceTitleLabel = nullptr;
     QFileSystemModel *folderModel = nullptr;
+    WorkspaceFilterProxyModel *proxyModel = nullptr;
     QPushButton *btnBack = nullptr;
     QPushButton *btnForward = nullptr;
     QPushButton *btnHome = nullptr;

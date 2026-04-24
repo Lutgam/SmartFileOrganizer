@@ -27,12 +27,76 @@
 #include <QWidget>
 #include <QMutexLocker>
 #include <QSizePolicy>
+#include <QStyledItemDelegate>
+#include <QPainter>
+#include <QStyleOptionViewItem>
+#include <QStyle>
 
 #include <algorithm>
 #include <fstream>
 #include <map>
 
 #include "DuplicateCleanerDialog.h"
+
+class FileItemDelegate : public QStyledItemDelegate {
+public:
+    explicit FileItemDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+
+        // 【關鍵修復】：清空原本要交給系統預設畫筆的文字，徹底防止雙重渲染！
+        opt.text = QString();
+
+        // 1. 畫背景與選取狀態 (Highlight)
+        QStyle *style = opt.widget ? opt.widget->style() : QApplication::style();
+        style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
+
+        // 2. 取得資料
+        QString name = index.data(Qt::DisplayRole).toString();
+        QString path = index.data(Qt::UserRole + 1).toString();
+
+        // 3. 準備畫筆設定
+        QRect rect = opt.rect;
+        rect.adjust(5, 0, -5, 0); // 左右邊距
+        painter->save();
+
+        // 4. 繪製檔名 (粗體，適應深淺色與選取狀態)
+        QFont nameFont = opt.font;
+        nameFont.setBold(true);
+        painter->setFont(nameFont);
+
+        if (opt.state & QStyle::State_Selected) {
+            painter->setPen(opt.palette.highlightedText().color());
+        } else {
+            painter->setPen(opt.palette.text().color());
+        }
+
+        QFontMetrics fm(nameFont);
+        QRect nameRect = fm.boundingRect(name);
+        painter->drawText(rect, Qt::AlignLeft | Qt::AlignVCenter, name);
+
+        // 5. 繪製灰色路徑 (在檔名後方)
+        int pathX = rect.left() + nameRect.width() + 10; // 檔名後空 10px
+        QRect pathRect = rect;
+        pathRect.setLeft(pathX);
+
+        painter->setFont(opt.font); // 恢復正常粗細
+        if (!(opt.state & QStyle::State_Selected)) {
+            painter->setPen(Qt::gray); // 未選取時維持灰色，選取時保持高亮色
+        }
+        painter->drawText(pathRect, Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("[%1]").arg(path));
+
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        Q_UNUSED(option);
+        Q_UNUSED(index);
+        return QSize(200, 30);
+    }
+};
 
 namespace {
 
@@ -290,6 +354,11 @@ void MainWindow::setupFourColumnLayout() {
     navRow->addStretch(1);
     foldersLayout->addLayout(navRow);
 
+    workspaceTitleLabel = new QLabel(QStringLiteral("📁 本機磁碟 (Home)"), this);
+    workspaceTitleLabel->setStyleSheet(QStringLiteral(
+        "font-weight: bold; font-size: 14px; padding-bottom: 5px; color: palette(windowText);"));
+    foldersLayout->addWidget(workspaceTitleLabel);
+
     folderTree = new QTreeView(this);
     folderTree->setMinimumWidth(250);
     folderTree->setHeaderHidden(true);
@@ -301,13 +370,17 @@ void MainWindow::setupFourColumnLayout() {
     folderModel = new QFileSystemModel(this);
     folderModel->setFilter(QDir::AllDirs | QDir::NoDotAndDotDot);
     folderModel->setRootPath(QDir::homePath());
-    folderTree->setModel(folderModel);
+    proxyModel = new WorkspaceFilterProxyModel(this);
+    proxyModel->setSourceModel(folderModel);
+    proxyModel->setWorkspace(QDir::homePath());
+    folderTree->setModel(proxyModel);
     for (int col = 1; col < folderModel->columnCount(); ++col) folderTree->hideColumn(col);
 
     foldersLayout->addWidget(folderTree);
     connect(folderTree, &QTreeView::clicked, this, [this](const QModelIndex &idx) {
         if (!idx.isValid()) return;
-        const QString selectedDir = folderModel->filePath(idx);
+        const QModelIndex srcIdx = proxyModel ? proxyModel->mapToSource(idx) : idx;
+        const QString selectedDir = folderModel->filePath(srcIdx);
         if (selectedDir.isEmpty()) return;
         QFileInfo fi(selectedDir);
         if (!fi.exists() || !fi.isDir()) return;
@@ -350,6 +423,7 @@ void MainWindow::setupFourColumnLayout() {
 
     fileList = new QListWidget(this);
     fileList->setContextMenuPolicy(Qt::CustomContextMenu);
+    fileList->setItemDelegate(new FileItemDelegate(fileList));
     connect(fileList, &QListWidget::itemClicked, this, &MainWindow::onFileSelected);
     connect(fileList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
         if (!item) return;
@@ -518,13 +592,19 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     currentPath = abs;
 
     folderModel->setRootPath(rootPath);
+    if (proxyModel) {
+        proxyModel->setWorkspace(rootPath);
+        const QString parentDir = QFileInfo(rootPath).path();
+        folderTree->setRootIndex(proxyModel->mapFromSource(folderModel->index(parentDir)));
+    }
     setFolderTreeCurrentPath(rootPath);
 
     tagManager.loadTags(rootPath.toStdString());
 }
 
 void MainWindow::setFolderTreeCurrentPath(const QString &absDir) {
-    const QModelIndex idx = folderModel->index(absDir);
+    const QModelIndex srcIdx = folderModel->index(absDir);
+    const QModelIndex idx = proxyModel ? proxyModel->mapFromSource(srcIdx) : srcIdx;
     if (idx.isValid()) {
         folderTree->setCurrentIndex(idx);
         folderTree->scrollTo(idx, QAbstractItemView::PositionAtCenter);
@@ -591,7 +671,12 @@ void MainWindow::goHome() {
     rootPath = home;
     currentPath = home;
     folderModel->setRootPath(rootPath);
-    folderTree->setRootIndex(folderModel->index(home));
+    if (workspaceTitleLabel) workspaceTitleLabel->setText(QStringLiteral("📁 本機磁碟 (Home)"));
+    if (proxyModel) {
+        const QString homeParent = QFileInfo(home).path();
+        proxyModel->setWorkspace(home);
+        folderTree->setRootIndex(proxyModel->mapFromSource(folderModel->index(homeParent)));
+    }
     fileListMode = FileListMode::PhysicalFolder;
     activeVirtualTag.clear();
     navHistory.clear();
@@ -652,7 +737,13 @@ void MainWindow::openFolder() {
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (dir.isEmpty()) return;
     mapsHomeFixAndSetRoot(dir);
-    folderTree->setRootIndex(folderModel->index(dir));
+    const QString folderName = QFileInfo(dir).fileName().isEmpty() ? dir : QFileInfo(dir).fileName();
+    if (workspaceTitleLabel) workspaceTitleLabel->setText(QStringLiteral("📁 %1").arg(folderName));
+    if (proxyModel) {
+        proxyModel->setWorkspace(dir);
+        const QString parentDir = QFileInfo(dir).path();
+        folderTree->setRootIndex(proxyModel->mapFromSource(folderModel->index(parentDir)));
+    }
     navHistory.clear();
     navIndex = -1;
     pushHistory(currentPath);
@@ -798,25 +889,10 @@ void MainWindow::renderFileListBatch(int count) {
             const QString name = fi.fileName();
             const QString parent = parentDirDisplay(filePath);
             auto *item = new QListWidgetItem();
-            item->setData(Qt::UserRole, filePath);
-
-            auto *widget = new QWidget(fileList);
-            auto *layout = new QHBoxLayout(widget);
-            layout->setContentsMargins(5, 2, 5, 2);
-            layout->setSpacing(8);
-
-            auto *nameLabel = new QLabel(name, widget);
-            layout->addWidget(nameLabel);
-
-            auto *pathLabel = new QLabel(QStringLiteral("[%1]").arg(parent), widget);
-            pathLabel->setStyleSheet(QStringLiteral("color: gray;"));
-            layout->addWidget(pathLabel);
-
-            layout->addStretch();
-
-            item->setSizeHint(widget->sizeHint());
+            item->setText(name);                     // 檔名（DisplayRole）
+            item->setData(Qt::UserRole, filePath);    // 絕對路徑（雙擊用）
+            item->setData(Qt::UserRole + 1, parent);  // 灰色路徑（Delegate 繪製用）
             fileList->addItem(item);
-            fileList->setItemWidget(item, widget);
         } else {
             const QString fileName = fi.fileName();
             auto *item = new QListWidgetItem(fileName, fileList);
