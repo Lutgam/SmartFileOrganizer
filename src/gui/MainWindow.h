@@ -73,8 +73,13 @@ private slots:
     void openFolder();
     void scanFiles();
     void filterFiles();
+    void showFileContextMenu(const QPoint &pos);
     void onFileSelected(QListWidgetItem *item);
     void onTagSelected(QListWidgetItem *item);
+
+    void renameCurrentFile();
+    void deleteCurrentFile();
+    void revealCurrentFile();
 
     void goBack();
     void goForward();

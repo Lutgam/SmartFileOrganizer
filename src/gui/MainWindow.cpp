@@ -6,9 +6,12 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
 #include <QDirIterator>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -432,6 +435,7 @@ void MainWindow::setupFourColumnLayout() {
     fileList->setContextMenuPolicy(Qt::CustomContextMenu);
     fileList->setItemDelegate(new FileItemDelegate(fileList));
     connect(fileList, &QListWidget::itemClicked, this, &MainWindow::onFileSelected);
+    connect(fileList, &QListWidget::customContextMenuRequested, this, &MainWindow::showFileContextMenu);
     connect(fileList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
         if (!item) return;
         const QString absPath = item->data(Qt::UserRole).toString();
@@ -514,6 +518,19 @@ void MainWindow::setupFourColumnLayout() {
     btnRow2->addWidget(btnRemoveTag);
     previewLayout->addLayout(btnRow2);
 
+    auto *fileOpsRow = new QHBoxLayout();
+    auto *btnRename = new QPushButton(QStringLiteral("重新命名"), this);
+    auto *btnDelete = new QPushButton(QStringLiteral("刪除"), this);
+    auto *btnReveal = new QPushButton(QStringLiteral("開啟位置"), this);
+    connect(btnRename, &QPushButton::clicked, this, &MainWindow::renameCurrentFile);
+    connect(btnDelete, &QPushButton::clicked, this, &MainWindow::deleteCurrentFile);
+    connect(btnReveal, &QPushButton::clicked, this, &MainWindow::revealCurrentFile);
+    fileOpsRow->addWidget(btnRename);
+    fileOpsRow->addWidget(btnDelete);
+    fileOpsRow->addWidget(btnReveal);
+    fileOpsRow->addStretch(1);
+    previewLayout->addLayout(fileOpsRow);
+
     btnAddExistingTag = new QPushButton(QStringLiteral("🏷️ 加入現有標籤"), this);
     previewLayout->addWidget(btnAddExistingTag);
     rebuildAddExistingTagMenu();
@@ -562,34 +579,271 @@ void MainWindow::setupContextMenus() {
         scanFiles();
     });
 
-    connect(fileList, &QListWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
-        QListWidgetItem *it = fileList->itemAt(pos);
-        if (!it) return;
-        const QString fp = it->data(Qt::UserRole).toString();
-        if (fp.isEmpty()) return;
+}
 
-        std::vector<QString> allTags;
-        {
-            QMutexLocker locker(&tagMutex);
-            allTags = tagManager.getAllTags();
+void MainWindow::showFileContextMenu(const QPoint &pos) {
+    // 1. 確認事件迴圈是否成功捕捉到訊號
+    qDebug() << "[Debug] 觸發右鍵選單，接收到 Viewport 座標：" << pos;
+
+    if (!fileList) {
+        qDebug() << "[Error] fileList 元件不存在或未初始化。";
+        return;
+    }
+
+    // 2. 執行 Hit-Testing
+    QListWidgetItem *item = fileList->itemAt(pos);
+    if (!item) {
+        // 如果點到空白處，給予明確提示，而不是安靜地 return
+        qDebug() << "[Debug] 點擊到空白區域，沒有選中任何具體檔案項目。";
+        return;
+    }
+
+    // 3. 【關鍵修正】強制將右鍵點擊的項目設為「當前選取」狀態
+    fileList->setCurrentItem(item);
+
+    const QString filePath = item->data(Qt::UserRole).toString();
+    if (filePath.isEmpty()) {
+        qDebug() << "[Error] 選中項目未綁定有效的文件路徑資料。";
+        return;
+    }
+
+    qDebug() << "[Debug] 成功鎖定檔案，準備彈出選單：" << filePath;
+
+    // 4. 建立並配置右鍵選單
+    QMenu menu(this);
+    QAction *actRename = menu.addAction(QStringLiteral("重新命名"));
+    QAction *actDelete = menu.addAction(QStringLiteral("刪除"));
+    menu.addSeparator();
+    QAction *actReveal = menu.addAction(QStringLiteral("在資料夾中顯示"));
+
+    // 5. 將 Viewport 座標轉換為全域螢幕座標並阻塞執行
+    QAction *chosen = menu.exec(fileList->viewport()->mapToGlobal(pos));
+    if (!chosen) {
+        qDebug() << "[Debug] 使用者取消了選單。";
+        return;
+    }
+
+    // 6. 處理對應的 Action 邏輯
+    if (chosen == actRename) {
+        const QFileInfo oldInfo(filePath);
+        const QString oldName = oldInfo.fileName();
+        bool ok = false;
+
+        const QString newName = QInputDialog::getText(
+                                    this,
+                                    QStringLiteral("重新命名"),
+                                    QStringLiteral("新的檔名："),
+                                    QLineEdit::Normal,
+                                    oldName,
+                                    &ok)
+                                    .trimmed();
+
+        if (!ok || newName.isEmpty() || newName == oldName) return;
+
+        const QString newPath = oldInfo.dir().filePath(newName);
+
+        if (QFileInfo::exists(newPath)) {
+            QMessageBox::warning(this, QStringLiteral("重新命名失敗"), QStringLiteral("目標檔名已存在。"));
+            return;
         }
 
-        QMenu menu(this);
-        QMenu *sub = menu.addMenu(QStringLiteral("指定標籤"));
-        for (const auto &t : allTags) {
-            QAction *a = sub->addAction(t);
-            connect(a, &QAction::triggered, this, [this, fp, t]() {
-                QMutexLocker locker(&tagMutex);
-                tagManager.addTag(fp, t, true);
-                tagManager.saveTags();
-                updateTagDisplayForFile(fp);
-                updateTagList();
-                if (fileListMode == FileListMode::PhysicalFolder) scanFiles();
-                else populateVirtualTagFiles(activeVirtualTag);
-            });
+        if (!QFile::rename(filePath, newPath)) {
+            QMessageBox::warning(this, QStringLiteral("重新命名失敗"), QStringLiteral("檔案可能被占用或沒有權限。"));
+            return;
         }
-        menu.exec(fileList->mapToGlobal(pos));
+
+        const QFileInfo newInfo(newPath);
+        item->setText(newInfo.fileName());
+        item->setData(Qt::UserRole, newPath);
+
+        if (fileListMode == FileListMode::VirtualTag) {
+            QString relativePath = QDir(rootPath).relativeFilePath(newInfo.absolutePath());
+            if (relativePath == QStringLiteral(".")) relativePath = QStringLiteral("根目錄");
+            item->setData(Qt::UserRole + 1, relativePath);
+        }
+        onFileSelected(item);
+        qDebug() << "[Debug] 重新命名成功：" << newName;
+        return;
+    }
+
+    if (chosen == actDelete) {
+        const int ret = QMessageBox::question(
+            this,
+            QStringLiteral("刪除確認"),
+            QStringLiteral("確定要刪除「%1」嗎？").arg(QFileInfo(filePath).fileName()),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+
+        if (ret != QMessageBox::Yes) return;
+
+        QFile file(filePath);
+        bool removed = file.moveToTrash();
+        if (!removed) removed = file.remove();
+
+        if (!removed) {
+            QMessageBox::warning(this, QStringLiteral("刪除失敗"), QStringLiteral("檔案可能被鎖定或沒有權限。"));
+            return;
+        }
+
+        delete fileList->takeItem(fileList->row(item));
+        qDebug() << "[Debug] 檔案刪除成功：" << filePath;
+        return;
+    }
+
+    if (chosen == actReveal) {
+        const QFileInfo fi(filePath);
+        QDesktopServices::openUrl(QUrl::fromLocalFile(fi.absolutePath()));
+        qDebug() << "[Debug] 開啟檔案位置：" << fi.absolutePath();
+    }
+}
+
+void MainWindow::renameCurrentFile() {
+    const QString filePath = currentFilePath();
+    if (filePath.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("重新命名"), QStringLiteral("請先選取要重新命名的檔案。"));
+        return;
+    }
+
+    const QFileInfo oldInfo(filePath);
+    const QString oldName = oldInfo.fileName();
+    const QString oldBaseName = oldInfo.completeBaseName();
+    const QString oldSuffix = oldInfo.suffix();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("重新命名"));
+
+    auto *root = new QVBoxLayout(&dialog);
+
+    auto *inputRow = new QHBoxLayout();
+    auto *nameEdit = new QLineEdit(&dialog);
+    auto *suffixLabel = new QLabel(&dialog);
+
+    nameEdit->setText(oldBaseName);
+    suffixLabel->setText(oldSuffix.isEmpty() ? QString() : QStringLiteral(".%1").arg(oldSuffix));
+    suffixLabel->setVisible(!oldSuffix.isEmpty());
+
+    inputRow->addWidget(nameEdit, 1);
+    inputRow->addWidget(suffixLabel);
+    root->addLayout(inputRow);
+
+    auto *chkEditSuffix = new QCheckBox(QStringLiteral("修改副檔名"), &dialog);
+    chkEditSuffix->setChecked(false);
+    root->addWidget(chkEditSuffix);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    root->addWidget(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    QObject::connect(chkEditSuffix, &QCheckBox::toggled, &dialog, [=](bool checked) {
+        if (checked) {
+            nameEdit->setText(oldName);
+            suffixLabel->setVisible(false);
+        } else {
+            const QString current = nameEdit->text().trimmed();
+            QString base = current;
+            if (!oldSuffix.isEmpty()) {
+                const QString dotExt = QStringLiteral(".%1").arg(oldSuffix);
+                if (base.endsWith(dotExt, Qt::CaseInsensitive)) {
+                    base.chop(dotExt.size());
+                } else {
+                    const int lastDot = base.lastIndexOf('.');
+                    if (lastDot > 0) base = base.left(lastDot);
+                }
+            } else {
+                const int lastDot = base.lastIndexOf('.');
+                if (lastDot > 0) base = base.left(lastDot);
+            }
+
+            nameEdit->setText(base);
+            suffixLabel->setText(oldSuffix.isEmpty() ? QString() : QStringLiteral(".%1").arg(oldSuffix));
+            suffixLabel->setVisible(!oldSuffix.isEmpty());
+        }
     });
+
+    nameEdit->selectAll();
+    nameEdit->setFocus();
+
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const bool editSuffix = chkEditSuffix->isChecked();
+    const QString userText = nameEdit->text().trimmed();
+    if (userText.isEmpty()) return;
+
+    QString finalName;
+    if (!editSuffix && !oldSuffix.isEmpty()) {
+        finalName = userText + QStringLiteral(".") + oldSuffix;
+    } else {
+        finalName = userText;
+    }
+
+    if (finalName.isEmpty() || finalName == oldName) return;
+
+    const QString newPath = oldInfo.dir().filePath(finalName);
+    if (QFileInfo::exists(newPath)) {
+        QMessageBox::warning(this, QStringLiteral("重新命名失敗"), QStringLiteral("目標檔名已存在。"));
+        return;
+    }
+
+    if (!QFile::rename(filePath, newPath)) {
+        QMessageBox::warning(this, QStringLiteral("重新命名失敗"), QStringLiteral("檔案可能被占用或沒有權限。"));
+        return;
+    }
+
+    // 更新目前選取項目的顯示與資料綁定
+    if (auto *item = fileList ? fileList->currentItem() : nullptr) {
+        const QFileInfo newInfo(newPath);
+        item->setText(newInfo.fileName());
+        item->setData(Qt::UserRole, newPath);
+        if (fileListMode == FileListMode::VirtualTag) {
+            QString relativePath = QDir(rootPath).relativeFilePath(newInfo.absolutePath());
+            if (relativePath == QStringLiteral(".")) relativePath = QStringLiteral("根目錄");
+            item->setData(Qt::UserRole + 1, relativePath);
+        }
+        onFileSelected(item);
+    } else {
+        scanFiles();
+        sortFileList();
+    }
+}
+
+void MainWindow::deleteCurrentFile() {
+    const QString filePath = currentFilePath();
+    if (filePath.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("刪除"), QStringLiteral("請先選取要刪除的檔案。"));
+        return;
+    }
+
+    const int ret = QMessageBox::question(
+        this,
+        QStringLiteral("刪除確認"),
+        QStringLiteral("確定要刪除「%1」嗎？").arg(QFileInfo(filePath).fileName()),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (ret != QMessageBox::Yes) return;
+
+    QFile file(filePath);
+    bool removed = file.moveToTrash();
+    if (!removed) removed = file.remove();
+    if (!removed) {
+        QMessageBox::warning(this, QStringLiteral("刪除失敗"), QStringLiteral("檔案可能被鎖定或沒有權限。"));
+        return;
+    }
+
+    if (fileList) {
+        if (auto *item = fileList->currentItem()) {
+            delete fileList->takeItem(fileList->row(item));
+        }
+    }
+}
+
+void MainWindow::revealCurrentFile() {
+    const QString filePath = currentFilePath();
+    if (filePath.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("開啟位置"), QStringLiteral("請先選取檔案。"));
+        return;
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(filePath).absolutePath()));
 }
 
 void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
