@@ -31,6 +31,8 @@
 #include <QPainter>
 #include <QStyleOptionViewItem>
 #include <QStyle>
+#include <QThreadPool>
+#include <QThread>
 
 #include <algorithm>
 #include <fstream>
@@ -161,6 +163,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setupToolbar();
     setupFourColumnLayout();
     setupContextMenus();
+
+    // 保留至少一個核心給 UI 執行緒
+    int idealThreads = QThread::idealThreadCount();
+    int maxThreads = qMax(1, idealThreads - 1); // 如果單核就維持 1，多核則減 1
+    QThreadPool::globalInstance()->setMaxThreadCount(maxThreads);
 
     watcher = new QFutureWatcher<std::string>(this);
     connect(watcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onAnalysisFinished);
