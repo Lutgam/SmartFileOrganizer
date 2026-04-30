@@ -23,6 +23,7 @@
 #include <QFileInfo>
 #include <QDir>
 #include <QFileSystemWatcher>
+#include <QTabWidget>
 #include <QStringList>
 #include <QMutex>
 #include <QTimer>
@@ -67,6 +68,7 @@ protected:
 };
 
 class GraphWidget;
+class DuplicateCleanerWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -90,6 +92,8 @@ private slots:
     void undoLastPhysicalArchive();
     void onDirectoryChanged(const QString &path);
     void showGraphWindow();
+    void showDuplicateCleanerTab();
+    void onDuplicateCleanupCompleted(const QList<QPair<QString, QString>> &movedHistory);
 
     void goBack();
     void goForward();
@@ -113,6 +117,10 @@ private:
 
     // ===== Layout =====
     QSplitter *mainSplitter = nullptr;
+    QTabWidget *m_mainTabWidget = nullptr;
+    QWidget *m_workspaceTab = nullptr;
+    QWidget *m_duplicateCleanerTab = nullptr;
+    DuplicateCleanerWidget *m_duplicateCleanerWidget = nullptr;
 
     // Column 1: Tags
     QWidget *tagsPanel = nullptr;

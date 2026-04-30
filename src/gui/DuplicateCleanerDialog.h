@@ -1,18 +1,19 @@
 #ifndef DUPLICATECLEANERDIALOG_H
 #define DUPLICATECLEANERDIALOG_H
 
-#include <QDialog>
 #include <QList>
 #include <QPair>
 #include <QString>
+#include <QWidget>
 #include <atomic>
 
+class QLabel;
+class QProgressBar;
 class QTreeWidget;
 class QPushButton;
 template <typename T> class QFutureWatcher;
-class QProgressDialog;
 
-class DuplicateCleanerDialog : public QDialog {
+class DuplicateCleanerWidget : public QWidget {
     Q_OBJECT
 
 public:
@@ -22,24 +23,29 @@ public:
         QStringList files;
     };
 
-    explicit DuplicateCleanerDialog(const QString &targetPath, QWidget *parent = nullptr);
-    ~DuplicateCleanerDialog() override;
+    explicit DuplicateCleanerWidget(QWidget *parent = nullptr);
+    ~DuplicateCleanerWidget() override;
 
+    void startScanForPath(const QString &targetPath);
+
+signals:
     // [oldPath, newPath] moved into staging area
-    QList<QPair<QString, QString>> movedHistory() const;
+    void cleanupCompleted(const QList<QPair<QString, QString>> &movedHistory);
 
 private:
     void startScan();
     void populateTree(const QList<DuplicateGroup> &groups);
     void applyDefaultChecks();
     void moveCheckedToStaging();
+    void requestStop();
 
     QString m_targetPath;
+    QLabel *m_pathLabel = nullptr;
+    QLabel *m_statusLabel = nullptr;
+    QProgressBar *m_progressBar = nullptr;
     QTreeWidget *tree = nullptr;
     QPushButton *btnMoveToStaging = nullptr;
-    QPushButton *btnCancel = nullptr;
-
-    QProgressDialog *progress = nullptr;
+    QPushButton *btnStopScan = nullptr;
     QFutureWatcher<QList<DuplicateGroup>> *watcher = nullptr;
 
     QList<QPair<QString, QString>> m_movedHistory;
