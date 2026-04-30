@@ -1513,6 +1513,10 @@ void MainWindow::analyzeFile() {
 
     const QString filename = fi.fileName();
     const QString existingTags = historicalTagsString();
+    const QString rejectedTagsCsv = [this]() {
+        QMutexLocker locker(&tagMutex);
+        return tagManager.getRejectedTags().join(QStringLiteral(", "));
+    }();
 
     std::string content;
     const QString suffix = fi.suffix().toLower();
@@ -1533,8 +1537,9 @@ void MainWindow::analyzeFile() {
 
     lblStatus->setText(QStringLiteral("分析中…"));
 
-    QFuture<std::string> future = QtConcurrent::run([this, filename, content, existingTags]() {
-        return llamaEngine.suggestTags(filename.toStdString(), content, existingTags.toStdString());
+    QFuture<std::string> future = QtConcurrent::run([this, filename, content, existingTags, rejectedTagsCsv]() {
+        // existingTags param is used for "historical tags"; rejectedTagsCsv used to constrain outputs
+        return llamaEngine.suggestTags(filename.toStdString(), content, rejectedTagsCsv.toStdString(), existingTags.toStdString());
     });
     watcher->setFuture(future);
 }
@@ -1641,6 +1646,7 @@ void MainWindow::removeTag() {
     {
         QMutexLocker locker(&tagMutex);
         tagManager.removeTag(fp, chosen);
+        tagManager.addRejectedTag(chosen);
         tagManager.saveTags();
     }
     updateTagDisplayForFile(fp);
@@ -1671,6 +1677,7 @@ void MainWindow::removeGlobalTag() {
     {
         QMutexLocker locker(&tagMutex);
         tagManager.deleteTag(tag);
+        tagManager.addRejectedTag(tag);
         tagManager.saveTags();
     }
     fileListMode = FileListMode::PhysicalFolder;

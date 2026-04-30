@@ -19,7 +19,10 @@ public:
     bool loadModel(const std::string& modelPath);
     bool isModelLoaded() const { return model != nullptr; }
     std::string generateResponse(const std::string& prompt);
-    std::string suggestTags(const std::string& filename, const std::string& content, const std::string& existingTags = "");
+    std::string suggestTags(const std::string& filename,
+                            const std::string& content,
+                            const std::string& rejectedTagsCsv = "",
+                            const std::string& existingTags = "");
     void setCancelFlag(std::atomic<bool>* flag) { m_cancelFlag = flag; } // Link to UI cancel flag
 
 private:

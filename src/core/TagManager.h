@@ -6,6 +6,8 @@
 #include <map>
 #include <set>
 #include <QString>
+#include <QStringList>
+#include <QRecursiveMutex>
 #include <nlohmann/json.hpp>
 
 class TagManager {
@@ -26,14 +28,23 @@ public:
     std::vector<QString> getAllTags() const;
     std::vector<QString> getFilesByTag(const QString& tag) const;
 
+    void addRejectedTag(const QString& tag);
+    QStringList getRejectedTags() const;
+
 private:
     std::string currentDirectory;
     std::string metadataFile;
     
     std::map<QString, std::set<QString>> m_tagToFilePaths;
     std::map<QString, std::set<QString>> m_fileToTags;
+
+    std::set<QString> m_rejectedTags;
+    mutable QRecursiveMutex m_mutex;
     
     std::string getMetadataPath() const;
+    std::string getRejectedTagsPath() const;
+    void loadRejectedTags();
+    void saveRejectedTags() const;
 };
 
 #endif // TAGMANAGER_H

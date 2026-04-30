@@ -243,6 +243,7 @@ std::string LlamaEngine::generateResponse(const std::string &prompt) {
 
 std::string LlamaEngine::suggestTags(const std::string &filename,
                                      const std::string &content,
+                                     const std::string &rejectedTagsCsv,
                                      const std::string &existingTags) {
   InferenceGuard guard(this);
   if (!ensureModelLoaded()) return "Error: Model not loaded";
@@ -258,6 +259,10 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
     std::string safeContent = content.substr(0, 600);
     prompt = instruction + "\n檔名: " + filename +
              "\n內容片段: " + safeContent + "\n輸出:";
+  }
+
+  if (!rejectedTagsCsv.empty()) {
+    prompt += "\n【嚴格限制】：請絕對不要使用以下標籤進行分類：" + rejectedTagsCsv + "\n";
   }
 
   std::string rawResponse = generateResponse(prompt);
