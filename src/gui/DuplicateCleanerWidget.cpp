@@ -2,12 +2,14 @@
 
 #include <QByteArrayView>
 #include <QCoreApplication>
+#include <QEventLoop>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHash>
 #include <QHeaderView>
@@ -20,7 +22,6 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QtConcurrent>
-#include <QFileDialog>
 
 namespace {
 
@@ -130,6 +131,8 @@ DuplicateCleanerWidget::DuplicateCleanerWidget(QWidget *parent) : QWidget(parent
     m_progressBar->setRange(0, 1);
     m_progressBar->setValue(0);
     m_progressBar->setFormat(QStringLiteral("已處理: %v / 總數: %m (%p%)"));
+    m_progressBar->setTextVisible(true);
+    m_progressBar->setMinimumHeight(25);
     root->addWidget(m_progressBar);
 
     tree = new QTreeWidget(this);
@@ -232,7 +235,6 @@ void DuplicateCleanerWidget::startScan() {
     }
 
     if (watcher) {
-        // In case a previous run exists (shouldn't), wait and dispose.
         watcher->future().waitForFinished();
         watcher->deleteLater();
         watcher = nullptr;
@@ -323,13 +325,16 @@ void DuplicateCleanerWidget::startScan() {
 
                 const QByteArray h = hashFileSha256(p, &self->m_cancelRequested);
                 ++done;
-                QMetaObject::invokeMethod(
-                    self,
-                    [self, done]() {
-                        if (!self || !self->m_progressBar) return;
-                        self->m_progressBar->setValue(done);
-                    },
-                    Qt::QueuedConnection);
+                if ((done % 10) == 0 || done == totalToHash) {
+                    QMetaObject::invokeMethod(
+                        self,
+                        [self, done]() {
+                            if (!self || !self->m_progressBar) return;
+                            self->m_progressBar->setValue(done);
+                            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+                        },
+                        Qt::QueuedConnection);
+                }
 
                 if (h.isEmpty()) continue; // unreadable or cancelled -> skip
                 byHash[h].push_back(p);
@@ -354,6 +359,18 @@ void DuplicateCleanerWidget::startScan() {
             if (a.size != b.size) return a.size > b.size;
             return a.hashHex.localeAwareCompare(b.hashHex) < 0;
         });
+
+        // Ensure final value pushed if total not multiple of 10
+        if (totalToHash > 0 && (done != totalToHash)) {
+            QMetaObject::invokeMethod(
+                self,
+                [self, totalToHash]() {
+                    if (!self || !self->m_progressBar) return;
+                    self->m_progressBar->setValue(totalToHash);
+                    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+                },
+                Qt::QueuedConnection);
+        }
 
         return out;
     }));
