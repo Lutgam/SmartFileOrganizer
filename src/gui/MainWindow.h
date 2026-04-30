@@ -22,8 +22,10 @@
 #include <QSortFilterProxyModel>
 #include <QFileInfo>
 #include <QDir>
+#include <QFileSystemWatcher>
 #include <QStringList>
 #include <QMutex>
+#include <QTimer>
 #include <QVector>
 
 #include <atomic>
@@ -84,6 +86,7 @@ private slots:
     void revealCurrentFile();
     void physicalArchiveFiles();
     void undoLastPhysicalArchive();
+    void onDirectoryChanged(const QString &path);
 
     void goBack();
     void goForward();
@@ -179,6 +182,10 @@ private:
 
     // [newPath, oldPath] for last physicalArchiveFiles() run
     QList<QPair<QString, QString>> m_lastMoveHistory;
+
+    QFileSystemWatcher *m_dirWatcher = nullptr;
+    QTimer *m_dirDebounceTimer = nullptr;
+    QString m_lastDirChangePath;
 
     QString currentFilePath() const;
 

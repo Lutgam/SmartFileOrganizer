@@ -168,6 +168,31 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setupFourColumnLayout();
     setupContextMenus();
 
+    m_dirWatcher = new QFileSystemWatcher(this);
+    connect(m_dirWatcher, &QFileSystemWatcher::directoryChanged, this, &MainWindow::onDirectoryChanged);
+    m_dirDebounceTimer = new QTimer(this);
+    m_dirDebounceTimer->setSingleShot(true);
+    m_dirDebounceTimer->setInterval(1000);
+    connect(m_dirDebounceTimer, &QTimer::timeout, this, [this]() {
+        // If AI/background scan is running, skip notification to avoid disruption.
+        const bool busy = (watcher && watcher->isRunning())
+                          || (initialScanWatcher && initialScanWatcher->isRunning())
+                          || (modelLoadWatcher && modelLoadWatcher->isRunning());
+        if (busy) return;
+        if (rootPath.trimmed().isEmpty()) return;
+
+        const int answer = QMessageBox::question(
+            this,
+            QStringLiteral("工作區變更"),
+            QStringLiteral("監測到工作區檔案發生變更，是否重新掃描並整理？"),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::Yes);
+        if (answer == QMessageBox::Yes) {
+            scanFiles();
+            updateTagList();
+        }
+    });
+
     // 保留至少一個核心給 UI 執行緒
     int idealThreads = QThread::idealThreadCount();
     int maxThreads = qMax(1, idealThreads - 1); // 如果單核就維持 1，多核則減 1
@@ -262,6 +287,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     resize(1200, 800);
     setWindowTitle(QStringLiteral("Smart File Organizer"));
+}
+
+void MainWindow::onDirectoryChanged(const QString &path) {
+    m_lastDirChangePath = path;
+    if (m_dirDebounceTimer) {
+        m_dirDebounceTimer->start();
+    } else {
+        QTimer::singleShot(1000, this, [this]() {
+            if (rootPath.trimmed().isEmpty()) return;
+            scanFiles();
+            updateTagList();
+        });
+    }
 }
 
 MainWindow::~MainWindow() = default;
@@ -1120,6 +1158,16 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     rootPath = abs;
     currentPath = abs;
 
+    if (m_dirWatcher) {
+        const QStringList oldDirs = m_dirWatcher->directories();
+        if (!oldDirs.isEmpty()) m_dirWatcher->removePaths(oldDirs);
+        if (!rootPath.isEmpty()) {
+            if (!m_dirWatcher->addPath(rootPath)) {
+                qDebug() << "QFileSystemWatcher addPath failed:" << rootPath;
+            }
+        }
+    }
+
     folderModel->setRootPath(rootPath);
     if (proxyModel) {
         proxyModel->setWorkspace(rootPath);
@@ -1199,6 +1247,17 @@ void MainWindow::goHome() {
     const QString home = QDir::homePath();
     rootPath = home;
     currentPath = home;
+
+    if (m_dirWatcher) {
+        const QStringList oldDirs = m_dirWatcher->directories();
+        if (!oldDirs.isEmpty()) m_dirWatcher->removePaths(oldDirs);
+        if (!rootPath.isEmpty()) {
+            if (!m_dirWatcher->addPath(rootPath)) {
+                qDebug() << "QFileSystemWatcher addPath failed:" << rootPath;
+            }
+        }
+    }
+
     folderModel->setRootPath(rootPath);
     if (workspaceTitleLabel) workspaceTitleLabel->setText(QStringLiteral("📁 本機磁碟 (Home)"));
     if (proxyModel) {
