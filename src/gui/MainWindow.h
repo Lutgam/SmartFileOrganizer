@@ -148,6 +148,7 @@ private:
     QPushButton *btnAddExistingTag = nullptr;
     QPushButton *btnPhysicalArchive = nullptr;
     QPushButton *btnUndoPhysicalArchive = nullptr;
+    QPushButton *btnDuplicateCleaner = nullptr;
 
     QToolBar *toolbar = nullptr;
     QCheckBox *chkRecursive = nullptr;

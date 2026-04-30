@@ -280,10 +280,23 @@ void MainWindow::setupToolbar() {
     toolbar->setMovable(false);
     QAction *actOpen = toolbar->addAction(QStringLiteral("開啟資料夾"));
     connect(actOpen, &QAction::triggered, this, &MainWindow::openFolder);
-    QAction *actTwins = toolbar->addAction(QStringLiteral("🧹 尋找同名檔"));
+    QAction *actTwins = toolbar->addAction(QStringLiteral("🧹 尋找冗餘檔案"));
     connect(actTwins, &QAction::triggered, this, [this]() {
-        DuplicateCleanerDialog dlg(currentPath.isEmpty() ? QDir::homePath() : currentPath, this);
-        dlg.exec();
+        if (rootPath.trimmed().isEmpty()) return;
+        DuplicateCleanerDialog dlg(rootPath, this);
+        const int code = dlg.exec();
+        if (code == QDialog::Accepted) {
+            const auto moved = dlg.movedHistory(); // [old, new]
+            if (!moved.isEmpty()) {
+                QMutexLocker locker(&tagMutex);
+                for (const auto &p : moved) {
+                    tagManager.relocateFilePath(p.first, p.second, false);
+                }
+                tagManager.saveTags();
+            }
+            scanFiles();
+            updateTagList();
+        }
     });
     toolbar->addSeparator();
 }
@@ -473,6 +486,30 @@ void MainWindow::setupFourColumnLayout() {
     previewPanel = new QWidget(this);
     auto *previewLayout = new QVBoxLayout(previewPanel);
     previewLayout->addWidget(new QLabel(QStringLiteral("👁️ 預覽與控制"), this));
+
+    btnDuplicateCleaner = new QPushButton(QStringLiteral("尋找冗餘檔案"), this);
+    btnDuplicateCleaner->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700; padding: 10px;"));
+    connect(btnDuplicateCleaner, &QPushButton::clicked, this, [this]() {
+        if (rootPath.trimmed().isEmpty()) {
+            QMessageBox::information(this, QStringLiteral("尋找冗餘檔案"), QStringLiteral("請先開啟工作區資料夾。"));
+            return;
+        }
+        DuplicateCleanerDialog dlg(rootPath, this);
+        const int code = dlg.exec();
+        if (code == QDialog::Accepted) {
+            const auto moved = dlg.movedHistory(); // [old, new]
+            if (!moved.isEmpty()) {
+                QMutexLocker locker(&tagMutex);
+                for (const auto &p : moved) {
+                    tagManager.relocateFilePath(p.first, p.second, false);
+                }
+                tagManager.saveTags();
+            }
+            scanFiles();
+            updateTagList();
+        }
+    });
+    previewLayout->addWidget(btnDuplicateCleaner);
 
     lblPreviewImage = new QLabel(QStringLiteral("選擇檔案以預覽"), this);
     lblPreviewImage->setAlignment(Qt::AlignCenter);
