@@ -107,6 +107,43 @@ void TagManager::deleteTag(const QString& tag) {
     }
 }
 
+std::vector<std::pair<QString, QString>> TagManager::taggedFilesWithPrimaryTag() const {
+    QMutexLocker locker(&m_mutex);
+    std::vector<std::pair<QString, QString>> out;
+    out.reserve(m_fileToTags.size());
+    for (const auto& entry : m_fileToTags) {
+        if (entry.second.empty()) {
+            continue;
+        }
+        const QString primary = *entry.second.begin();
+        out.emplace_back(entry.first, primary);
+    }
+    return out;
+}
+
+void TagManager::relocateFilePath(const QString& oldPath, const QString& newPath, bool saveMetadata) {
+    QMutexLocker locker(&m_mutex);
+    if (oldPath == newPath) {
+        return;
+    }
+    auto it = m_fileToTags.find(oldPath);
+    if (it == m_fileToTags.end()) {
+        return;
+    }
+    std::set<QString> tags = std::move(it->second);
+    m_fileToTags.erase(it);
+    m_fileToTags[newPath] = std::move(tags);
+
+    for (const QString& t : m_fileToTags[newPath]) {
+        m_tagToFilePaths[t].erase(oldPath);
+        m_tagToFilePaths[t].insert(newPath);
+    }
+
+    if (saveMetadata) {
+        saveTags();
+    }
+}
+
 std::vector<QString> TagManager::getTags(const QString& filename) const {
     QMutexLocker locker(&m_mutex);
     std::vector<QString> res;

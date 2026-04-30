@@ -15,6 +15,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QMenu>
@@ -492,35 +493,54 @@ void MainWindow::setupFourColumnLayout() {
     lblStatus->setWordWrap(true);
     previewLayout->addWidget(lblStatus);
 
-    auto *btnRow1 = new QHBoxLayout();
+    // ===== Group 1: Tag management =====
+    auto *tagGroup = new QGroupBox(QStringLiteral("標籤管理"), this);
+    auto *tagGroupLayout = new QVBoxLayout(tagGroup);
+
+    auto *tagRow1 = new QHBoxLayout();
+    btnSaveTags = new QPushButton(QStringLiteral("💾 儲存"), this);
+    connect(btnSaveTags, &QPushButton::clicked, this, &MainWindow::saveTags);
+    btnSaveTags->setEnabled(false);
+    tagRow1->addWidget(btnSaveTags);
+    tagRow1->addStretch(1);
+    tagGroupLayout->addLayout(tagRow1);
+
+    auto *tagRow2 = new QHBoxLayout();
+    btnAddTag = new QPushButton(QStringLiteral("➕ 加入標籤"), this);
+    connect(btnAddTag, &QPushButton::clicked, this, &MainWindow::addTag);
+    tagRow2->addWidget(btnAddTag);
+
+    btnRemoveTag = new QPushButton(QStringLiteral("➖ 移除標籤"), this);
+    connect(btnRemoveTag, &QPushButton::clicked, this, &MainWindow::removeTag);
+    tagRow2->addWidget(btnRemoveTag);
+    tagRow2->addStretch(1);
+    tagGroupLayout->addLayout(tagRow2);
+
+    btnAddExistingTag = new QPushButton(QStringLiteral("🏷️ 加入現有標籤"), this);
+    tagGroupLayout->addWidget(btnAddExistingTag);
+    rebuildAddExistingTagMenu();
+
+    previewLayout->addWidget(tagGroup);
+
+    // ===== Group 2: File operations =====
+    auto *fileGroup = new QGroupBox(QStringLiteral("檔案操作"), this);
+    auto *fileGroupLayout = new QVBoxLayout(fileGroup);
+
+    auto *analysisRow = new QHBoxLayout();
     btnAnalyzeFile = new QPushButton(QStringLiteral("✨ 分析"), this);
     connect(btnAnalyzeFile, &QPushButton::clicked, this, &MainWindow::analyzeFile);
-    btnRow1->addWidget(btnAnalyzeFile);
+    analysisRow->addWidget(btnAnalyzeFile);
 
     btnCancelAnalysis = new QPushButton(QStringLiteral("⛔ 取消"), this);
     connect(btnCancelAnalysis, &QPushButton::clicked, this, &MainWindow::cancelAnalysis);
     btnCancelAnalysis->setEnabled(false);
-    btnRow1->addWidget(btnCancelAnalysis);
-
-    btnSaveTags = new QPushButton(QStringLiteral("💾 儲存"), this);
-    connect(btnSaveTags, &QPushButton::clicked, this, &MainWindow::saveTags);
-    btnSaveTags->setEnabled(false);
-    btnRow1->addWidget(btnSaveTags);
-    previewLayout->addLayout(btnRow1);
-
-    auto *btnRow2 = new QHBoxLayout();
-    btnAddTag = new QPushButton(QStringLiteral("➕ 新增"), this);
-    connect(btnAddTag, &QPushButton::clicked, this, &MainWindow::addTag);
-    btnRow2->addWidget(btnAddTag);
-
-    btnRemoveTag = new QPushButton(QStringLiteral("➖ 移除"), this);
-    connect(btnRemoveTag, &QPushButton::clicked, this, &MainWindow::removeTag);
-    btnRow2->addWidget(btnRemoveTag);
-    previewLayout->addLayout(btnRow2);
+    analysisRow->addWidget(btnCancelAnalysis);
+    analysisRow->addStretch(1);
+    fileGroupLayout->addLayout(analysisRow);
 
     auto *fileOpsRow = new QHBoxLayout();
     auto *btnRename = new QPushButton(QStringLiteral("重新命名"), this);
-    auto *btnDelete = new QPushButton(QStringLiteral("刪除"), this);
+    auto *btnDelete = new QPushButton(QStringLiteral("刪除檔案"), this);
     auto *btnReveal = new QPushButton(QStringLiteral("開啟位置"), this);
     connect(btnRename, &QPushButton::clicked, this, &MainWindow::renameCurrentFile);
     connect(btnDelete, &QPushButton::clicked, this, &MainWindow::deleteCurrentFile);
@@ -529,11 +549,21 @@ void MainWindow::setupFourColumnLayout() {
     fileOpsRow->addWidget(btnDelete);
     fileOpsRow->addWidget(btnReveal);
     fileOpsRow->addStretch(1);
-    previewLayout->addLayout(fileOpsRow);
+    fileGroupLayout->addLayout(fileOpsRow);
 
-    btnAddExistingTag = new QPushButton(QStringLiteral("🏷️ 加入現有標籤"), this);
-    previewLayout->addWidget(btnAddExistingTag);
-    rebuildAddExistingTagMenu();
+    auto *archiveRow = new QHBoxLayout();
+    btnPhysicalArchive = new QPushButton(QStringLiteral("實體歸檔 (依標籤)"), this);
+    connect(btnPhysicalArchive, &QPushButton::clicked, this, &MainWindow::physicalArchiveFiles);
+    archiveRow->addWidget(btnPhysicalArchive);
+
+    btnUndoPhysicalArchive = new QPushButton(QStringLiteral("回上一步 (復原歸檔)"), this);
+    connect(btnUndoPhysicalArchive, &QPushButton::clicked, this, &MainWindow::undoLastPhysicalArchive);
+    btnUndoPhysicalArchive->setEnabled(false);
+    archiveRow->addWidget(btnUndoPhysicalArchive);
+    archiveRow->addStretch(1);
+    fileGroupLayout->addLayout(archiveRow);
+
+    previewLayout->addWidget(fileGroup);
 
     previewLayout->addStretch(1);
     mainSplitter->addWidget(previewPanel);
@@ -844,6 +874,207 @@ void MainWindow::revealCurrentFile() {
         return;
     }
     QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(filePath).absolutePath()));
+}
+
+namespace {
+QString sanitizeTagFolderName(const QString &tag) {
+    QString s = tag.trimmed();
+    if (s.isEmpty()) {
+        return QStringLiteral("_未命名標籤");
+    }
+    const QString invalid = QStringLiteral("<>:\"/\\|?*\r\n");
+    for (QChar c : invalid) {
+        s.replace(c, QLatin1Char('_'));
+    }
+    if (s == QLatin1String(".") || s == QLatin1String("..")) {
+        s = QLatin1Char('_') + s;
+    }
+    return s;
+}
+} // namespace
+
+void MainWindow::physicalArchiveFiles() {
+    if (rootPath.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("實體歸檔 (依標籤)"),
+                                 QStringLiteral("請先開啟工作區資料夾。"));
+        return;
+    }
+
+    const QString rootClean = QDir::cleanPath(rootPath);
+    const QString homeClean = QDir::cleanPath(QDir::homePath());
+    const QString desktopClean = QDir::cleanPath(QDir(homeClean).filePath(QStringLiteral("Desktop")));
+
+    const bool isRootDir = QDir(rootClean).isRoot()
+#ifdef Q_OS_WIN
+                           || QRegularExpression(QStringLiteral("^[A-Za-z]:/$")).match(rootClean + QLatin1Char('/')).hasMatch()
+#endif
+        ;
+    const bool isHighRisk = isRootDir || rootClean == homeClean || rootClean == desktopClean;
+    if (isHighRisk) {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("實體歸檔 (依標籤)"),
+            QStringLiteral("為保護系統安全，禁止對系統核心或使用者根目錄執行全域實體歸檔！請指定特定工作資料夾。"));
+        return;
+    }
+
+    const int answer = QMessageBox::question(
+        this,
+        QStringLiteral("實體歸檔 (依標籤)"),
+        QStringLiteral("此操作將根據目前的標籤，在根目錄建立實體資料夾並移動檔案。檔案路徑將會改變，是否繼續？"),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+
+    m_lastMoveHistory.clear();
+    if (btnUndoPhysicalArchive) {
+        btnUndoPhysicalArchive->setEnabled(false);
+    }
+
+    std::vector<std::pair<QString, QString>> pairs;
+    {
+        QMutexLocker locker(&tagMutex);
+        pairs = tagManager.taggedFilesWithPrimaryTag();
+    }
+
+    for (const auto &entry : pairs) {
+        const QString srcPath = QDir::cleanPath(entry.first);
+        const QString &rawTag = entry.second;
+
+        const QFileInfo fiSrc(srcPath);
+        if (!fiSrc.exists() || !fiSrc.isFile()) {
+            qDebug() << "physicalArchiveFiles: skip (missing or not a file):" << srcPath;
+            continue;
+        }
+
+        const QString rel = QDir(rootClean).relativeFilePath(fiSrc.absoluteFilePath());
+        if (rel.startsWith(QStringLiteral(".."))) {
+            qDebug() << "physicalArchiveFiles: skip (outside root):" << srcPath;
+            continue;
+        }
+        if (rel == QStringLiteral(".smartfile") || rel.startsWith(QStringLiteral(".smartfile/"))) {
+            qDebug() << "physicalArchiveFiles: skip (.smartfile):" << srcPath;
+            continue;
+        }
+
+        const QString folderName = sanitizeTagFolderName(rawTag);
+        const QString destDir = QDir(rootClean).absoluteFilePath(folderName);
+        const QString destPath = QDir(destDir).absoluteFilePath(fiSrc.fileName());
+
+        if (QDir::cleanPath(fiSrc.absolutePath()) == QDir::cleanPath(destDir)) {
+            continue;
+        }
+
+        if (QFile::exists(destPath)) {
+            qDebug() << "physicalArchiveFiles: skip (target exists):" << destPath;
+            continue;
+        }
+
+        if (!QDir().mkpath(destDir)) {
+            qDebug() << "physicalArchiveFiles: mkpath failed:" << destDir;
+            continue;
+        }
+
+        QFile f(srcPath);
+        if (!f.rename(destPath)) {
+            qDebug() << "physicalArchiveFiles: rename failed" << srcPath << "->" << destPath << f.errorString();
+            continue;
+        }
+
+        m_lastMoveHistory.push_back(qMakePair(destPath, srcPath));
+
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.relocateFilePath(srcPath, destPath, false);
+        }
+    }
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.saveTags();
+    }
+
+    if (btnUndoPhysicalArchive) {
+        btnUndoPhysicalArchive->setEnabled(!m_lastMoveHistory.isEmpty());
+    }
+
+    scanFiles();
+    updateTagList();
+    const QString fp = currentFilePath();
+    if (!fp.isEmpty()) {
+        updateTagDisplayForFile(fp);
+    }
+}
+
+void MainWindow::undoLastPhysicalArchive() {
+    if (m_lastMoveHistory.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("回上一步 (復原歸檔)"), QStringLiteral("沒有可復原的歸檔紀錄。"));
+        return;
+    }
+
+    const int answer = QMessageBox::question(
+        this,
+        QStringLiteral("回上一步 (復原歸檔)"),
+        QStringLiteral("將會把上一輪實體歸檔移動的檔案全部搬回原路徑。是否繼續？"),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+
+    bool movedAny = false;
+    for (const auto &p : m_lastMoveHistory) {
+        const QString newPath = QDir::cleanPath(p.first);
+        const QString oldPath = QDir::cleanPath(p.second);
+
+        const QFileInfo fiNew(newPath);
+        if (!fiNew.exists() || !fiNew.isFile()) {
+            qDebug() << "undoLastPhysicalArchive: skip (missing):" << newPath;
+            continue;
+        }
+
+        if (QFile::exists(oldPath)) {
+            qDebug() << "undoLastPhysicalArchive: skip (old path exists):" << oldPath;
+            continue;
+        }
+
+        const QString oldDir = QFileInfo(oldPath).absolutePath();
+        if (!QDir().mkpath(oldDir)) {
+            qDebug() << "undoLastPhysicalArchive: mkpath failed:" << oldDir;
+            continue;
+        }
+
+        QFile f(newPath);
+        if (!f.rename(oldPath)) {
+            qDebug() << "undoLastPhysicalArchive: rename failed" << newPath << "->" << oldPath << f.errorString();
+            continue;
+        }
+
+        movedAny = true;
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.relocateFilePath(newPath, oldPath, false);
+        }
+    }
+
+    if (movedAny) {
+        QMutexLocker locker(&tagMutex);
+        tagManager.saveTags();
+    }
+
+    m_lastMoveHistory.clear();
+    if (btnUndoPhysicalArchive) {
+        btnUndoPhysicalArchive->setEnabled(false);
+    }
+
+    scanFiles();
+    updateTagList();
+    const QString fp = currentFilePath();
+    if (!fp.isEmpty()) {
+        updateTagDisplayForFile(fp);
+    }
 }
 
 void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {

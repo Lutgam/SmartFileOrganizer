@@ -8,7 +8,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QList>
 #include <QMenu>
+#include <QPair>
 #include <QPushButton>
 #include <QSplitter>
 #include <QTextEdit>
@@ -80,6 +82,8 @@ private slots:
     void renameCurrentFile();
     void deleteCurrentFile();
     void revealCurrentFile();
+    void physicalArchiveFiles();
+    void undoLastPhysicalArchive();
 
     void goBack();
     void goForward();
@@ -142,6 +146,8 @@ private:
     QPushButton *btnAddTag = nullptr;
     QPushButton *btnRemoveTag = nullptr;
     QPushButton *btnAddExistingTag = nullptr;
+    QPushButton *btnPhysicalArchive = nullptr;
+    QPushButton *btnUndoPhysicalArchive = nullptr;
 
     QToolBar *toolbar = nullptr;
     QCheckBox *chkRecursive = nullptr;
@@ -169,6 +175,9 @@ private:
 
     QVector<QString> navHistory;
     int navIndex = -1;
+
+    // [newPath, oldPath] for last physicalArchiveFiles() run
+    QList<QPair<QString, QString>> m_lastMoveHistory;
 
     QString currentFilePath() const;
 

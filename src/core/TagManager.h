@@ -5,6 +5,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <utility>
 #include <QString>
 #include <QStringList>
 #include <QRecursiveMutex>
@@ -24,6 +25,11 @@ public:
     std::vector<QString> getTags(const QString& filename) const;
     
     void setTags(const QString& filename, const std::vector<QString>& tags);
+
+    /// Each tagged file once; primary tag = lexicographically first in std::set (stable, no extra structure).
+    std::vector<std::pair<QString, QString>> taggedFilesWithPrimaryTag() const;
+    /// Move all tag associations from oldPath to newPath (after QFile::rename).
+    void relocateFilePath(const QString& oldPath, const QString& newPath, bool saveMetadata = true);
 
     std::vector<QString> getAllTags() const;
     std::vector<QString> getFilesByTag(const QString& tag) const;
