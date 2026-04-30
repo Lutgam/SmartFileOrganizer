@@ -1,6 +1,9 @@
 #include "LlamaEngine.h"
 #include <QDebug>
 #include <QFileInfo>
+#include <QMetaObject>
+#include <QMutexLocker>
+#include <QThread>
 #include <QRegularExpression>
 #include <QString>
 #include <QStringList>
@@ -25,39 +28,107 @@ static void batch_add(llama_batch &batch, llama_token id, llama_pos pos,
   batch.n_tokens++;
 }
 
-LlamaEngine::LlamaEngine() { llama_backend_init(); }
+struct InferenceGuard {
+  LlamaEngine *e = nullptr;
+  explicit InferenceGuard(LlamaEngine *engine) : e(engine) {
+    if (!e) return;
+    e->stopIdleTimerAsync();
+    QMutexLocker locker(&e->m_mutex);
+    ++e->m_activeInferences;
+  }
+  ~InferenceGuard() {
+    if (!e) return;
+    {
+      QMutexLocker locker(&e->m_mutex);
+      --e->m_activeInferences;
+    }
+    e->startIdleTimerAsync();
+  }
+};
+
+LlamaEngine::LlamaEngine(QObject *parent) : QObject(parent) {
+  llama_backend_init();
+
+  idleTimer = new QTimer(this);
+  idleTimer->setInterval(3 * 60 * 1000); // 3 minutes
+  idleTimer->setSingleShot(true);
+  connect(idleTimer, &QTimer::timeout, this, [this]() { unloadModel(); });
+}
 
 LlamaEngine::~LlamaEngine() {
-  if (ctx)
-    llama_free(ctx);
-  if (model)
-    llama_model_free(model);
+  if (idleTimer) idleTimer->stop();
+  unloadModel();
   llama_backend_free();
 }
 
-bool LlamaEngine::loadModel(const std::string &modelPath) {
-  if (model) {
-    llama_model_free(model);
-    model = nullptr;
+void LlamaEngine::stopIdleTimerAsync() {
+  if (!idleTimer) return;
+  if (QThread::currentThread() == thread()) {
+    idleTimer->stop();
+    return;
   }
+  QMetaObject::invokeMethod(this, [this]() {
+    if (idleTimer) idleTimer->stop();
+  }, Qt::QueuedConnection);
+}
+
+void LlamaEngine::startIdleTimerAsync() {
+  if (!idleTimer) return;
+  if (QThread::currentThread() == thread()) {
+    idleTimer->start();
+    return;
+  }
+  QMetaObject::invokeMethod(this, [this]() {
+    if (idleTimer) idleTimer->start();
+  }, Qt::QueuedConnection);
+}
+
+void LlamaEngine::unloadModel() {
+  QMutexLocker locker(&m_mutex);
+  if (m_activeInferences > 0) {
+    // Still in use; postpone unload.
+    if (idleTimer) idleTimer->start();
+    return;
+  }
+
   if (ctx) {
     llama_free(ctx);
     ctx = nullptr;
   }
+  if (model) {
+    llama_model_free(model);
+    model = nullptr;
+  }
+  qDebug() << "[系統] AI 模型閒置超時，已釋放記憶體";
+}
 
-  QFileInfo fileInfo(QString::fromStdString(modelPath));
+bool LlamaEngine::ensureModelLoaded() {
+  // Avoid holding the mutex while calling into Qt file APIs too long? We'll keep it simple and safe.
+  QMutexLocker locker(&m_mutex);
+  if (model && ctx) return true;
+  if (m_modelPath.empty()) return false;
+
+  // Free any partial state
+  if (ctx) {
+    llama_free(ctx);
+    ctx = nullptr;
+  }
+  if (model) {
+    llama_model_free(model);
+    model = nullptr;
+  }
+
+  QFileInfo fileInfo(QString::fromStdString(m_modelPath));
   QString absPath = fileInfo.absoluteFilePath();
   qDebug() << "嘗試載入模型，路徑：" << absPath;
 
   llama_model_params model_params = llama_model_default_params();
   model_params.n_gpu_layers = 100; // Try to use GPU
-  model =
-      llama_model_load_from_file(absPath.toStdString().c_str(), model_params);
+  model = llama_model_load_from_file(absPath.toStdString().c_str(), model_params);
 
   if (!model) {
     qDebug() << "模型載入失敗";
-    std::cerr << "Failed to load model from " << absPath.toStdString()
-              << std::endl;
+    std::cerr << "Failed to load model from " << absPath.toStdString() << std::endl;
     return false;
   }
 
@@ -68,6 +139,8 @@ bool LlamaEngine::loadModel(const std::string &modelPath) {
   if (!ctx) {
     qDebug() << "模型載入失敗 (Context Error)";
     std::cerr << "Failed to create context" << std::endl;
+    llama_model_free(model);
+    model = nullptr;
     return false;
   }
 
@@ -75,9 +148,21 @@ bool LlamaEngine::loadModel(const std::string &modelPath) {
   return true;
 }
 
+bool LlamaEngine::loadModel(const std::string &modelPath) {
+  {
+    QMutexLocker locker(&m_mutex);
+    m_modelPath = modelPath;
+  }
+
+  stopIdleTimerAsync();
+  const bool ok = ensureModelLoaded();
+  if (ok) startIdleTimerAsync();
+  return ok;
+}
+
 std::string LlamaEngine::generateResponse(const std::string &prompt) {
-  if (!ctx || !model)
-    return "Error: Model not loaded";
+  InferenceGuard guard(this);
+  if (!ensureModelLoaded()) return "Error: Model not loaded";
 
   // Clear KV cache
   llama_memory_t mem = llama_get_memory(ctx);
@@ -159,6 +244,9 @@ std::string LlamaEngine::generateResponse(const std::string &prompt) {
 std::string LlamaEngine::suggestTags(const std::string &filename,
                                      const std::string &content,
                                      const std::string &existingTags) {
+  InferenceGuard guard(this);
+  if (!ensureModelLoaded()) return "Error: Model not loaded";
+
   // Minimal, non-threatening prompt — avoids parroting
   std::string instruction =
       "請輸出兩個描述此檔案主題的詞彙，用逗號分隔，不要有任何其他文字。";
