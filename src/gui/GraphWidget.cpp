@@ -8,6 +8,14 @@
 #include <QWheelEvent>
 #include <QStyleOptionGraphicsItem>
 #include <QRandomGenerator>
+#include <QFileInfo>
+#include <QComboBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QMessageBox>
+#include <QResizeEvent>
+#include <QSet>
+#include <algorithm>
 
 // --- Edge Implementation ---
 Edge::Edge(Node *sourceNode, Node *destNode)
@@ -238,6 +246,9 @@ GraphWidget::GraphWidget(TagManager* tagMgr, QWidget *parent)
 
     // Initial build
     // buildGraph(); 
+
+    ensureToolbar();
+    rebuildTagFilterOptions();
 }
 
 void GraphWidget::itemMoved()
@@ -296,6 +307,73 @@ void GraphWidget::scaleView(qreal scaleFactor)
     scale(scaleFactor, scaleFactor);
 }
 
+void GraphWidget::resizeEvent(QResizeEvent *event) {
+    QGraphicsView::resizeEvent(event);
+    if (!m_toolbar) return;
+    const int margin = 10;
+    const QSize s = m_toolbar->sizeHint();
+    m_toolbar->setGeometry(width() - s.width() - margin, margin, s.width(), s.height());
+}
+
+void GraphWidget::ensureToolbar() {
+    if (m_toolbar) return;
+
+    m_toolbar = new QWidget(this);
+    m_toolbar->setObjectName(QStringLiteral("graphToolbar"));
+    m_toolbar->setStyleSheet(QStringLiteral(
+        "QWidget#graphToolbar { background: rgba(30,30,30,200); border: 1px solid rgba(255,255,255,40); border-radius: 8px; }"
+        "QLabel { color: white; }"
+        "QComboBox { padding: 2px 6px; }"));
+
+    auto *row = new QHBoxLayout(m_toolbar);
+    row->setContentsMargins(10, 8, 10, 8);
+    row->setSpacing(8);
+
+    auto *lbl = new QLabel(QStringLiteral("標籤過濾"), m_toolbar);
+    row->addWidget(lbl);
+
+    m_tagFilter = new QComboBox(m_toolbar);
+    row->addWidget(m_tagFilter, 1);
+
+    connect(m_tagFilter, &QComboBox::currentIndexChanged, this, [this](int) { buildGraph(); });
+
+    m_toolbar->show();
+}
+
+QString GraphWidget::selectedFilterTag() const {
+    if (!m_tagFilter) return {};
+    const QString raw = m_tagFilter->currentData().toString();
+    if (raw == QStringLiteral("__ALL__")) return {};
+    return raw;
+}
+
+void GraphWidget::rebuildTagFilterOptions() {
+    ensureToolbar();
+    if (!m_tagFilter) return;
+
+    const QString prev = selectedFilterTag();
+
+    m_tagFilter->blockSignals(true);
+    m_tagFilter->clear();
+    m_tagFilter->addItem(QStringLiteral("顯示全部"), QStringLiteral("__ALL__"));
+    if (tagManager) {
+        auto tags = tagManager->getAllTags();
+        std::sort(tags.begin(), tags.end(), [](const QString &a, const QString &b) {
+            return a.localeAwareCompare(b) < 0;
+        });
+        for (const auto &t : tags) {
+            if (t.trimmed().isEmpty()) continue;
+            m_tagFilter->addItem(t, t);
+        }
+    }
+    // restore selection if possible
+    if (!prev.isEmpty()) {
+        const int idx = m_tagFilter->findData(prev);
+        if (idx >= 0) m_tagFilter->setCurrentIndex(idx);
+    }
+    m_tagFilter->blockSignals(false);
+}
+
 void GraphWidget::zoomIn()
 {
     scaleView(1.2);
@@ -312,52 +390,113 @@ void GraphWidget::buildGraph() {
     tagNodes.clear();
 
     if (!tagManager) return;
+
+    rebuildTagFilterOptions();
+
+    const QString filterTag = selectedFilterTag();
+    QStringList candidateFiles;
+    if (!filterTag.isEmpty()) {
+        const std::vector<QString> files = tagManager->getFilesByTag(filterTag);
+        for (const auto &p : files) candidateFiles.push_back(p);
+    } else {
+        const auto pairs = tagManager->taggedFilesWithPrimaryTag();
+        candidateFiles.reserve(static_cast<int>(pairs.size()));
+        for (const auto &p : pairs) candidateFiles.push_back(p.first);
+    }
+    candidateFiles.removeDuplicates();
+    std::sort(candidateFiles.begin(), candidateFiles.end(), [](const QString &a, const QString &b) {
+        return a.localeAwareCompare(b) < 0;
+    });
+
+    const int totalFiles = candidateFiles.size();
+    bool limitNodes = false;
+    if (totalFiles > MAX_NODES_RENDER) {
+        const int answer = QMessageBox::question(
+            this,
+            QStringLiteral("關聯圖譜"),
+            QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？")
+                .arg(totalFiles),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::Yes);
+        limitNodes = (answer == QMessageBox::Yes);
+    }
+    if (limitNodes && candidateFiles.size() > MAX_NODES_RENDER) {
+        candidateFiles = candidateFiles.mid(0, MAX_NODES_RENDER);
+    }
     
-    std::vector<QString> allTags = tagManager->getAllTags();
-    if (allTags.empty()) {
-        //scene()->addText("No tags found.", QFont("Arial", 20))->setDefaultTextColor(Qt::white);
+    // Decide which tag nodes should exist
+    QSet<QString> tagsToRender;
+    if (!filterTag.isEmpty()) {
+        tagsToRender.insert(filterTag);
+    } else {
+        for (const QString &fp : candidateFiles) {
+            const auto tags = tagManager->getTags(fp);
+            for (const auto &t : tags) {
+                if (!t.trimmed().isEmpty()) tagsToRender.insert(t);
+            }
+        }
+    }
+    if (tagsToRender.isEmpty() || candidateFiles.isEmpty()) {
         return;
     }
 
-    // 1. Create Tag Nodes (Blue)
-    int i = 0;
-    int count = allTags.size();
-    for (const QString& qTag : allTags) {
-        Node* tagNode = new Node(this, Node::Tag, qTag);
-        
-        // Distribute in a circle
-        double angle = 2.0 * M_PI * i / count;
-        tagNode->setPos(200 * cos(angle), 200 * sin(angle));
-        
+    QStringList tagList = tagsToRender.values();
+    std::sort(tagList.begin(), tagList.end(), [](const QString &a, const QString &b) {
+        return a.localeAwareCompare(b) < 0;
+    });
+
+    // 1) Create Tag Nodes (Blue)
+    const int tagCount = tagList.size();
+    for (int i = 0; i < tagCount; ++i) {
+        const QString &qTag = tagList[i];
+        Node *tagNode = new Node(this, Node::Tag, qTag);
+        const double angle = 2.0 * M_PI * i / std::max(1, tagCount);
+        tagNode->setPos(220 * cos(angle), 220 * sin(angle));
         scene()->addItem(tagNode);
         tagNodes[qTag] = tagNode;
-        i++;
     }
-    
-    // 2. Create File Nodes (Green) for files that have tags
-    // This is a bit inefficient (O(Tags * Files)), but fine for MVP
-    for (const auto& qTag : allTags) {
-        Node* tagNode = tagNodes[qTag];
-        
-        std::vector<QString> files = tagManager->getFilesByTag(qTag);
-        for (const auto& qFileFullPath : files) {
-            QString qFile = QString::fromStdString(std::filesystem::path(qFileFullPath.toStdString()).filename().string());
-            
-            Node* fileNode;
-            if (fileNodes.find(qFile) == fileNodes.end()) {
-                fileNode = new Node(this, Node::File, qFile);
-                fileNode->setPos(
-                    QRandomGenerator::global()->bounded(400) - 200, 
-                    QRandomGenerator::global()->bounded(400) - 200
-                ); // Random pos near center
-                scene()->addItem(fileNode);
-                fileNodes[qFile] = fileNode;
-            } else {
-                fileNode = fileNodes[qFile];
+
+    // 2) Create File Nodes (Green) + Edges
+    for (const QString &fp : candidateFiles) {
+        const QFileInfo fi(fp);
+        if (!fi.exists() || !fi.isFile()) continue;
+
+        // Filter logic: if a tag is selected, only include files that have that tag.
+        if (!filterTag.isEmpty()) {
+            const auto tags = tagManager->getTags(fp);
+            bool ok = false;
+            for (const auto &t : tags) {
+                if (t == filterTag) {
+                    ok = true;
+                    break;
+                }
             }
-            
-            // Create Edge
-            scene()->addItem(new Edge(tagNode, fileNode));
+            if (!ok) continue;
+        }
+
+        Node *fileNode = nullptr;
+        if (fileNodes.find(fp) == fileNodes.end()) {
+            fileNode = new Node(this, Node::File, fi.fileName());
+            fileNode->setPos(
+                QRandomGenerator::global()->bounded(400) - 200,
+                QRandomGenerator::global()->bounded(400) - 200);
+            scene()->addItem(fileNode);
+            fileNodes[fp] = fileNode;
+        } else {
+            fileNode = fileNodes[fp];
+        }
+
+        if (!filterTag.isEmpty()) {
+            Node *tagNode = tagNodes[filterTag];
+            if (tagNode) scene()->addItem(new Edge(tagNode, fileNode));
+            continue;
+        }
+
+        const auto tags = tagManager->getTags(fp);
+        for (const auto &t : tags) {
+            auto it = tagNodes.find(t);
+            if (it == tagNodes.end()) continue;
+            scene()->addItem(new Edge(it->second, fileNode));
         }
     }
 }

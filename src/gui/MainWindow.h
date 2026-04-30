@@ -66,6 +66,8 @@ protected:
     }
 };
 
+class GraphWidget;
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -87,6 +89,7 @@ private slots:
     void physicalArchiveFiles();
     void undoLastPhysicalArchive();
     void onDirectoryChanged(const QString &path);
+    void showGraphWindow();
 
     void goBack();
     void goForward();
@@ -152,6 +155,7 @@ private:
     QPushButton *btnPhysicalArchive = nullptr;
     QPushButton *btnUndoPhysicalArchive = nullptr;
     QPushButton *btnDuplicateCleaner = nullptr;
+    QPushButton *btnShowGraph = nullptr;
 
     QToolBar *toolbar = nullptr;
     QCheckBox *chkRecursive = nullptr;
@@ -186,6 +190,8 @@ private:
     QFileSystemWatcher *m_dirWatcher = nullptr;
     QTimer *m_dirDebounceTimer = nullptr;
     QString m_lastDirChangePath;
+
+    GraphWidget *m_graphWindow = nullptr;
 
     QString currentFilePath() const;
 

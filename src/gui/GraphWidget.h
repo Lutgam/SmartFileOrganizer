@@ -10,6 +10,8 @@ class Node;
 class Edge;
 class TagManager;
 class GraphWidget; // Forward declaration
+class QComboBox;
+class QWidget;
 
 // --- Edge Class ---
 class Edge : public QGraphicsItem
@@ -92,14 +94,24 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
     void drawBackground(QPainter *painter, const QRectF &rect) override;
     void scaleView(qreal scaleFactor);
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
+    static constexpr int MAX_NODES_RENDER = 50;
+
+    void ensureToolbar();
+    void rebuildTagFilterOptions();
+    QString selectedFilterTag() const;
+
     int timerId;
     TagManager* tagManager;
     Node *centerNode;
     
     std::map<QString, Node*> fileNodes;
     std::map<QString, Node*> tagNodes;
+
+    QWidget *m_toolbar = nullptr;
+    QComboBox *m_tagFilter = nullptr;
 };
 
 #endif // GRAPHWIDGET_H

@@ -43,6 +43,7 @@
 #include <map>
 
 #include "DuplicateCleanerDialog.h"
+#include "GraphWidget.h"
 
 class FileItemDelegate : public QStyledItemDelegate {
 public:
@@ -302,6 +303,22 @@ void MainWindow::onDirectoryChanged(const QString &path) {
     }
 }
 
+void MainWindow::showGraphWindow() {
+    if (!m_graphWindow) {
+        m_graphWindow = new GraphWidget(&tagManager, nullptr);
+        m_graphWindow->setWindowFlag(Qt::Window, true);
+        m_graphWindow->setAttribute(Qt::WA_DeleteOnClose, true);
+        m_graphWindow->setWindowTitle(QStringLiteral("🕸️ 視覺化圖譜"));
+        m_graphWindow->resize(980, 720);
+        connect(m_graphWindow, &QObject::destroyed, this, [this]() { m_graphWindow = nullptr; });
+    }
+
+    m_graphWindow->buildGraph();
+    m_graphWindow->show();
+    m_graphWindow->raise();
+    m_graphWindow->activateWindow();
+}
+
 MainWindow::~MainWindow() = default;
 
 void MainWindow::onBackgroundScanProgress() {
@@ -548,6 +565,11 @@ void MainWindow::setupFourColumnLayout() {
         }
     });
     previewLayout->addWidget(btnDuplicateCleaner);
+
+    btnShowGraph = new QPushButton(QStringLiteral("🕸️ 開啟視覺化圖譜"), this);
+    btnShowGraph->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 700; padding: 8px;"));
+    connect(btnShowGraph, &QPushButton::clicked, this, &MainWindow::showGraphWindow);
+    previewLayout->addWidget(btnShowGraph);
 
     lblPreviewImage = new QLabel(QStringLiteral("選擇檔案以預覽"), this);
     lblPreviewImage->setAlignment(Qt::AlignCenter);
@@ -1360,9 +1382,13 @@ bool MainWindow::isAnalyzableFile(const QFileInfo &fi) const {
 void MainWindow::scanFiles() {
     if (fileListMode == FileListMode::VirtualTag) {
         populateVirtualTagFiles(activeVirtualTag);
-        return;
+    } else {
+        scanPhysicalFolder();
     }
-    scanPhysicalFolder();
+
+    if (m_graphWindow && m_graphWindow->isVisible()) {
+        m_graphWindow->buildGraph();
+    }
 }
 
 void MainWindow::scanPhysicalFolder() {
