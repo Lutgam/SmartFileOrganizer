@@ -91,7 +91,6 @@ private slots:
     void physicalArchiveFiles();
     void undoLastPhysicalArchive();
     void onDirectoryChanged(const QString &path);
-    void showGraphWindow();
     void showDuplicateCleanerTab();
     void onDuplicateCleanupCompleted(const QList<QPair<QString, QString>> &movedHistory);
 
@@ -120,7 +119,9 @@ private:
     QTabWidget *m_mainTabWidget = nullptr;
     QWidget *m_workspaceTab = nullptr;
     QWidget *m_duplicateCleanerTab = nullptr;
+    QWidget *m_graphTab = nullptr;
     DuplicateCleanerWidget *m_duplicateCleanerWidget = nullptr;
+    GraphWidget *m_graphWidget = nullptr;
 
     // Column 1: Tags
     QWidget *tagsPanel = nullptr;
@@ -162,8 +163,7 @@ private:
     QPushButton *btnAddExistingTag = nullptr;
     QPushButton *btnPhysicalArchive = nullptr;
     QPushButton *btnUndoPhysicalArchive = nullptr;
-    QPushButton *btnDuplicateCleaner = nullptr;
-    QPushButton *btnShowGraph = nullptr;
+    // Tabbed UI: no duplicate/graph buttons in Tab 1 preview panel
 
     QToolBar *toolbar = nullptr;
     QCheckBox *chkRecursive = nullptr;
@@ -199,7 +199,7 @@ private:
     QTimer *m_dirDebounceTimer = nullptr;
     QString m_lastDirChangePath;
 
-    GraphWidget *m_graphWindow = nullptr;
+    // Graph is embedded as Tab 3 (no standalone window)
 
     QString currentFilePath() const;
 

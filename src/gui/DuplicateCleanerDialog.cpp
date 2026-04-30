@@ -13,12 +13,14 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QtConcurrent>
+#include <QFileDialog>
 
 namespace {
 
@@ -99,10 +101,24 @@ static QString pickKeeper(const QStringList &files) {
 DuplicateCleanerWidget::DuplicateCleanerWidget(QWidget *parent) : QWidget(parent) {
     auto *root = new QVBoxLayout(this);
 
-    m_pathLabel = new QLabel(QStringLiteral("掃描目錄：--"), this);
-    m_pathLabel->setWordWrap(true);
-    m_pathLabel->setStyleSheet(QStringLiteral("font-weight: 700;"));
-    root->addWidget(m_pathLabel);
+    auto *pathRow = new QHBoxLayout();
+    auto *lbl = new QLabel(QStringLiteral("目標目錄："), this);
+    lbl->setStyleSheet(QStringLiteral("font-weight: 700;"));
+    pathRow->addWidget(lbl);
+
+    m_pathLineEdit = new QLineEdit(this);
+    m_pathLineEdit->setReadOnly(true);
+    m_pathLineEdit->setPlaceholderText(QStringLiteral("請選擇要掃描的資料夾"));
+    pathRow->addWidget(m_pathLineEdit, 1);
+
+    m_btnBrowse = new QPushButton(QStringLiteral("瀏覽..."), this);
+    pathRow->addWidget(m_btnBrowse);
+
+    m_btnStartScan = new QPushButton(QStringLiteral("▶ 開始分析"), this);
+    m_btnStartScan->setStyleSheet(QStringLiteral("font-weight: 800; padding: 6px 10px;"));
+    pathRow->addWidget(m_btnStartScan);
+
+    root->addLayout(pathRow);
 
     auto *statusRow = new QHBoxLayout();
     m_statusLabel = new QLabel(QStringLiteral("狀態：就緒"), this);
@@ -113,7 +129,7 @@ DuplicateCleanerWidget::DuplicateCleanerWidget(QWidget *parent) : QWidget(parent
     m_progressBar = new QProgressBar(this);
     m_progressBar->setRange(0, 1);
     m_progressBar->setValue(0);
-    m_progressBar->setFormat(QStringLiteral("%p%"));
+    m_progressBar->setFormat(QStringLiteral("已處理: %v / 總數: %m (%p%)"));
     root->addWidget(m_progressBar);
 
     tree = new QTreeWidget(this);
@@ -138,6 +154,8 @@ DuplicateCleanerWidget::DuplicateCleanerWidget(QWidget *parent) : QWidget(parent
 
     connect(btnStopScan, &QPushButton::clicked, this, &DuplicateCleanerWidget::requestStop);
     connect(btnMoveToStaging, &QPushButton::clicked, this, &DuplicateCleanerWidget::moveCheckedToStaging);
+    connect(m_btnBrowse, &QPushButton::clicked, this, &DuplicateCleanerWidget::onBrowseClicked);
+    connect(m_btnStartScan, &QPushButton::clicked, this, &DuplicateCleanerWidget::onStartClicked);
 }
 
 DuplicateCleanerWidget::~DuplicateCleanerWidget() {
@@ -147,11 +165,39 @@ DuplicateCleanerWidget::~DuplicateCleanerWidget() {
     }
 }
 
-void DuplicateCleanerWidget::startScanForPath(const QString &targetPath) {
-    m_targetPath = targetPath;
-    if (m_pathLabel) {
-        m_pathLabel->setText(QStringLiteral("掃描目錄：%1").arg(QDir::cleanPath(m_targetPath)));
+void DuplicateCleanerWidget::setSuggestedPath(const QString &targetPath) {
+    const QString clean = QDir::cleanPath(targetPath);
+    if (m_pathLineEdit) {
+        m_pathLineEdit->setText(clean);
     }
+    if (m_statusLabel) {
+        m_statusLabel->setText(QStringLiteral("狀態：就緒（尚未開始分析）"));
+    }
+    if (m_progressBar) {
+        m_progressBar->setRange(0, 1);
+        m_progressBar->setValue(0);
+    }
+    if (btnMoveToStaging) btnMoveToStaging->setEnabled(false);
+    if (btnStopScan) btnStopScan->setEnabled(false);
+}
+
+void DuplicateCleanerWidget::onBrowseClicked() {
+    const QString start = (m_pathLineEdit && !m_pathLineEdit->text().trimmed().isEmpty())
+                              ? m_pathLineEdit->text().trimmed()
+                              : QDir::homePath();
+    const QString dir = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("選擇目標資料夾"), start, QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (dir.isEmpty()) return;
+    setSuggestedPath(dir);
+}
+
+void DuplicateCleanerWidget::onStartClicked() {
+    const QString dir = m_pathLineEdit ? m_pathLineEdit->text().trimmed() : QString();
+    if (dir.isEmpty()) {
+        if (m_statusLabel) m_statusLabel->setText(QStringLiteral("狀態：請先選擇目標資料夾"));
+        return;
+    }
+    m_targetPath = dir;
     startScan();
 }
 

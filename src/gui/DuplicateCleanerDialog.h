@@ -11,6 +11,7 @@ class QLabel;
 class QProgressBar;
 class QTreeWidget;
 class QPushButton;
+class QLineEdit;
 template <typename T> class QFutureWatcher;
 
 class DuplicateCleanerWidget : public QWidget {
@@ -26,7 +27,7 @@ public:
     explicit DuplicateCleanerWidget(QWidget *parent = nullptr);
     ~DuplicateCleanerWidget() override;
 
-    void startScanForPath(const QString &targetPath);
+    void setSuggestedPath(const QString &targetPath);
 
 signals:
     // [oldPath, newPath] moved into staging area
@@ -38,9 +39,13 @@ private:
     void applyDefaultChecks();
     void moveCheckedToStaging();
     void requestStop();
+    void onBrowseClicked();
+    void onStartClicked();
 
     QString m_targetPath;
-    QLabel *m_pathLabel = nullptr;
+    QLineEdit *m_pathLineEdit = nullptr;
+    QPushButton *m_btnBrowse = nullptr;
+    QPushButton *m_btnStartScan = nullptr;
     QLabel *m_statusLabel = nullptr;
     QProgressBar *m_progressBar = nullptr;
     QTreeWidget *tree = nullptr;

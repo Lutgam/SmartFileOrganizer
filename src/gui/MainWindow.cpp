@@ -186,6 +186,20 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             this, &MainWindow::onDuplicateCleanupCompleted);
     m_mainTabWidget->addTab(m_duplicateCleanerTab, QStringLiteral("冗餘檔案清理"));
 
+    m_graphTab = new QWidget(this);
+    auto *graphLayout = new QVBoxLayout(m_graphTab);
+    graphLayout->setContentsMargins(0, 0, 0, 0);
+    m_graphWidget = new GraphWidget(&tagManager, m_graphTab);
+    graphLayout->addWidget(m_graphWidget, 1);
+    m_mainTabWidget->addTab(m_graphTab, QStringLiteral("關聯圖譜分析"));
+
+    connect(m_mainTabWidget, &QTabWidget::currentChanged, this, [this](int) {
+        if (!m_mainTabWidget || !m_graphWidget || !m_graphTab) return;
+        if (m_mainTabWidget->currentWidget() == m_graphTab) {
+            m_graphWidget->buildGraph();
+        }
+    });
+
     setupContextMenus();
 
     m_dirWatcher = new QFileSystemWatcher(this);
@@ -327,22 +341,6 @@ void MainWindow::onDirectoryChanged(const QString &path) {
     }
 }
 
-void MainWindow::showGraphWindow() {
-    if (!m_graphWindow) {
-        m_graphWindow = new GraphWidget(&tagManager, nullptr);
-        m_graphWindow->setWindowFlag(Qt::Window, true);
-        m_graphWindow->setAttribute(Qt::WA_DeleteOnClose, true);
-        m_graphWindow->setWindowTitle(QStringLiteral("🕸️ 視覺化圖譜"));
-        m_graphWindow->resize(980, 720);
-        connect(m_graphWindow, &QObject::destroyed, this, [this]() { m_graphWindow = nullptr; });
-    }
-
-    m_graphWindow->buildGraph();
-    m_graphWindow->show();
-    m_graphWindow->raise();
-    m_graphWindow->activateWindow();
-}
-
 void MainWindow::showDuplicateCleanerTab() {
     if (!m_mainTabWidget || !m_duplicateCleanerWidget) return;
     if (rootPath.trimmed().isEmpty()) {
@@ -350,7 +348,7 @@ void MainWindow::showDuplicateCleanerTab() {
         return;
     }
     m_mainTabWidget->setCurrentWidget(m_duplicateCleanerTab);
-    m_duplicateCleanerWidget->startScanForPath(rootPath);
+    m_duplicateCleanerWidget->setSuggestedPath(rootPath);
 }
 
 void MainWindow::onDuplicateCleanupCompleted(const QList<QPair<QString, QString>> &movedHistory) {
@@ -576,16 +574,6 @@ void MainWindow::setupFourColumnLayout() {
     previewPanel = new QWidget(this);
     auto *previewLayout = new QVBoxLayout(previewPanel);
     previewLayout->addWidget(new QLabel(QStringLiteral("👁️ 預覽與控制"), this));
-
-    btnDuplicateCleaner = new QPushButton(QStringLiteral("尋找冗餘檔案"), this);
-    btnDuplicateCleaner->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700; padding: 10px;"));
-    connect(btnDuplicateCleaner, &QPushButton::clicked, this, &MainWindow::showDuplicateCleanerTab);
-    previewLayout->addWidget(btnDuplicateCleaner);
-
-    btnShowGraph = new QPushButton(QStringLiteral("🕸️ 開啟視覺化圖譜"), this);
-    btnShowGraph->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 700; padding: 8px;"));
-    connect(btnShowGraph, &QPushButton::clicked, this, &MainWindow::showGraphWindow);
-    previewLayout->addWidget(btnShowGraph);
 
     lblPreviewImage = new QLabel(QStringLiteral("選擇檔案以預覽"), this);
     lblPreviewImage->setAlignment(Qt::AlignCenter);
@@ -1402,8 +1390,8 @@ void MainWindow::scanFiles() {
         scanPhysicalFolder();
     }
 
-    if (m_graphWindow && m_graphWindow->isVisible()) {
-        m_graphWindow->buildGraph();
+    if (m_mainTabWidget && m_graphWidget && m_graphTab && m_mainTabWidget->currentWidget() == m_graphTab) {
+        m_graphWidget->buildGraph();
     }
 }
 
