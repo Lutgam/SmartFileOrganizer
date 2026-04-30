@@ -11,6 +11,7 @@
 #include <QHash>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QPointer>
 #include <QProgressDialog>
 #include <QPushButton>
@@ -101,6 +102,11 @@ DuplicateCleanerDialog::DuplicateCleanerDialog(const QString &targetPath, QWidge
     resize(980, 640);
 
     auto *root = new QVBoxLayout(this);
+
+    auto *pathLabel = new QLabel(QStringLiteral("掃描目錄：%1").arg(QDir::cleanPath(m_targetPath)), this);
+    pathLabel->setWordWrap(true);
+    pathLabel->setStyleSheet(QStringLiteral("font-weight: 700;"));
+    root->addWidget(pathLabel);
 
     tree = new QTreeWidget(this);
     tree->setColumnCount(2);

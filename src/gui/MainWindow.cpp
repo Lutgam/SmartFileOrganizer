@@ -291,6 +291,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 }
 
 void MainWindow::onDirectoryChanged(const QString &path) {
+    const QString clean = QDir::cleanPath(path);
+    if (clean.contains(QStringLiteral("/.smartfile")) || clean.contains(QStringLiteral("\\.smartfile"))
+        || clean.contains(QStringLiteral("_冗餘檔案待處理區"))) {
+        return;
+    }
     m_lastDirChangePath = path;
     if (m_dirDebounceTimer) {
         m_dirDebounceTimer->start();
@@ -1018,7 +1023,7 @@ void MainWindow::physicalArchiveFiles() {
     const int answer = QMessageBox::question(
         this,
         QStringLiteral("實體歸檔 (依標籤)"),
-        QStringLiteral("此操作將根據目前的標籤，在根目錄建立實體資料夾並移動檔案。檔案路徑將會改變，是否繼續？"),
+        QStringLiteral("將對以下目錄進行實體歸檔：\n【%1】\n此操作將改變檔案實體位置，是否繼續？").arg(rootPath),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
     if (answer != QMessageBox::Yes) {
@@ -1856,8 +1861,15 @@ void MainWindow::analyzeFile() {
     }
 
     if (!llamaEngine.isModelLoaded()) {
-        QMessageBox::warning(this, QStringLiteral("Model"), QStringLiteral("模型尚未載入"));
-        return;
+        // If we're auto-loading in background, wait (blocking) to avoid "Model not loaded" race.
+        if (modelLoadWatcher && modelLoadWatcher->isRunning()) {
+            lblStatus->setText(QStringLiteral("等待模型載入完成…"));
+            modelLoadWatcher->future().waitForFinished();
+        }
+        if (!llamaEngine.isModelLoaded()) {
+            QMessageBox::warning(this, QStringLiteral("Model"), QStringLiteral("模型尚未載入"));
+            return;
+        }
     }
 
     cancelFlag.store(false);
