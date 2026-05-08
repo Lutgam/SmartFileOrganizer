@@ -17,6 +17,34 @@
 #include <QSet>
 #include <algorithm>
 
+#include "LanguageManager.h"
+
+static QString translateVirtualTagForDisplay(const QString &tag) {
+    // Keep the underlying tag untouched; only translate for UI display.
+    auto &lm = LanguageManager::instance();
+    QString t = tag.trimmed();
+    if (t.isEmpty()) return t;
+
+    // Emoji prefixes can be multiple QChars (surrogates + variation selectors).
+    // Parse a "non-letter/number" prefix (excluding spaces) and translate the remainder.
+    QString prefix;
+    int i = 0;
+    while (i < t.size()) {
+        const QChar c = t.at(i);
+        if (c.isSpace()) break;
+        if (c.isLetterOrNumber()) break;
+        prefix.append(c);
+        ++i;
+    }
+    const QString rest = t.mid(i).trimmed();
+    if (!prefix.isEmpty() && !rest.isEmpty()) {
+        const QString translatedRest = lm.getText(rest);
+        if (translatedRest != rest) return QStringLiteral("%1 %2").arg(prefix, translatedRest).trimmed();
+    }
+
+    return lm.getText(t);
+}
+
 // --- Edge Implementation ---
 Edge::Edge(Node *sourceNode, Node *destNode)
     : source(sourceNode), dest(destNode)
@@ -329,13 +357,17 @@ void GraphWidget::ensureToolbar() {
     row->setContentsMargins(10, 8, 10, 8);
     row->setSpacing(8);
 
-    auto *lbl = new QLabel(QStringLiteral("標籤過濾"), m_toolbar);
-    row->addWidget(lbl);
+    m_filterLabel = new QLabel(QStringLiteral("標籤過濾"), m_toolbar);
+    row->addWidget(m_filterLabel);
 
     m_tagFilter = new QComboBox(m_toolbar);
     row->addWidget(m_tagFilter, 1);
 
     connect(m_tagFilter, &QComboBox::currentIndexChanged, this, [this](int) { buildGraph(); });
+    connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() {
+        if (m_filterLabel) m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
+        rebuildTagFilterOptions();
+    });
 
     m_toolbar->show();
 }
@@ -351,11 +383,13 @@ void GraphWidget::rebuildTagFilterOptions() {
     ensureToolbar();
     if (!m_tagFilter) return;
 
+    if (m_filterLabel) m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
+
     const QString prev = selectedFilterTag();
 
     m_tagFilter->blockSignals(true);
     m_tagFilter->clear();
-    m_tagFilter->addItem(QStringLiteral("顯示全部"), QStringLiteral("__ALL__"));
+    m_tagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("顯示全部")), QStringLiteral("__ALL__"));
     if (tagManager) {
         auto tags = tagManager->getAllTags();
         std::sort(tags.begin(), tags.end(), [](const QString &a, const QString &b) {
@@ -363,7 +397,7 @@ void GraphWidget::rebuildTagFilterOptions() {
         });
         for (const auto &t : tags) {
             if (t.trimmed().isEmpty()) continue;
-            m_tagFilter->addItem(t, t);
+            m_tagFilter->addItem(translateVirtualTagForDisplay(t), t);
         }
     }
     // restore selection if possible
@@ -411,10 +445,11 @@ void GraphWidget::buildGraph() {
     const int totalFiles = candidateFiles.size();
     bool limitNodes = false;
     if (totalFiles > MAX_NODES_RENDER) {
+        auto &lm = LanguageManager::instance();
         const int answer = QMessageBox::question(
             this,
-            QStringLiteral("關聯圖譜"),
-            QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？")
+            lm.getText(QStringLiteral("關聯圖譜")),
+            lm.getText(QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？"))
                 .arg(totalFiles),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::Yes);
@@ -449,7 +484,7 @@ void GraphWidget::buildGraph() {
     const int tagCount = tagList.size();
     for (int i = 0; i < tagCount; ++i) {
         const QString &qTag = tagList[i];
-        Node *tagNode = new Node(this, Node::Tag, qTag);
+        Node *tagNode = new Node(this, Node::Tag, translateVirtualTagForDisplay(qTag));
         const double angle = 2.0 * M_PI * i / std::max(1, tagCount);
         tagNode->setPos(220 * cos(angle), 220 * sin(angle));
         scene()->addItem(tagNode);

@@ -1,5 +1,7 @@
 #include "DuplicateCleanerDialog.h"
 
+#include "LanguageManager.h"
+
 #include <QByteArrayView>
 #include <QCoreApplication>
 #include <QEventLoop>
@@ -103,9 +105,9 @@ DuplicateCleanerWidget::DuplicateCleanerWidget(QWidget *parent) : QWidget(parent
     auto *root = new QVBoxLayout(this);
 
     auto *pathRow = new QHBoxLayout();
-    auto *lbl = new QLabel(QStringLiteral("目標目錄："), this);
-    lbl->setStyleSheet(QStringLiteral("font-weight: 700;"));
-    pathRow->addWidget(lbl);
+    m_targetDirLabel = new QLabel(QStringLiteral("目標目錄："), this);
+    m_targetDirLabel->setStyleSheet(QStringLiteral("font-weight: 700;"));
+    pathRow->addWidget(m_targetDirLabel);
 
     m_pathLineEdit = new QLineEdit(this);
     m_pathLineEdit->setReadOnly(true);
@@ -122,7 +124,7 @@ DuplicateCleanerWidget::DuplicateCleanerWidget(QWidget *parent) : QWidget(parent
     root->addLayout(pathRow);
 
     auto *statusRow = new QHBoxLayout();
-    m_statusLabel = new QLabel(QStringLiteral("狀態：就緒"), this);
+    m_statusLabel = new QLabel(LanguageManager::instance().getText(QStringLiteral("狀態：就緒")), this);
     m_statusLabel->setWordWrap(true);
     statusRow->addWidget(m_statusLabel, 1);
     root->addLayout(statusRow);
@@ -130,7 +132,7 @@ DuplicateCleanerWidget::DuplicateCleanerWidget(QWidget *parent) : QWidget(parent
     m_progressBar = new QProgressBar(this);
     m_progressBar->setRange(0, 1);
     m_progressBar->setValue(0);
-    m_progressBar->setFormat(QStringLiteral("已處理: %v / 總數: %m (%p%)"));
+    m_progressBar->setFormat(tr("已處理: %v / 總數: %m (%p%)"));
     m_progressBar->setTextVisible(true);
     m_progressBar->setMinimumHeight(25);
     root->addWidget(m_progressBar);
@@ -159,6 +161,9 @@ DuplicateCleanerWidget::DuplicateCleanerWidget(QWidget *parent) : QWidget(parent
     connect(btnMoveToStaging, &QPushButton::clicked, this, &DuplicateCleanerWidget::moveCheckedToStaging);
     connect(m_btnBrowse, &QPushButton::clicked, this, &DuplicateCleanerWidget::onBrowseClicked);
     connect(m_btnStartScan, &QPushButton::clicked, this, &DuplicateCleanerWidget::onStartClicked);
+
+    connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() { updateTexts(); });
+    updateTexts();
 }
 
 DuplicateCleanerWidget::~DuplicateCleanerWidget() {
@@ -173,9 +178,7 @@ void DuplicateCleanerWidget::setSuggestedPath(const QString &targetPath) {
     if (m_pathLineEdit) {
         m_pathLineEdit->setText(clean);
     }
-    if (m_statusLabel) {
-        m_statusLabel->setText(QStringLiteral("狀態：就緒（尚未開始分析）"));
-    }
+    if (m_statusLabel) m_statusLabel->setText(LanguageManager::instance().getText(QStringLiteral("狀態：就緒（尚未開始分析）")));
     if (m_progressBar) {
         m_progressBar->setRange(0, 1);
         m_progressBar->setValue(0);
@@ -184,12 +187,29 @@ void DuplicateCleanerWidget::setSuggestedPath(const QString &targetPath) {
     if (btnStopScan) btnStopScan->setEnabled(false);
 }
 
+void DuplicateCleanerWidget::updateTexts() {
+    auto &lm = LanguageManager::instance();
+    if (m_targetDirLabel) m_targetDirLabel->setText(lm.getText(QStringLiteral("目標目錄")) + QStringLiteral("："));
+    if (m_btnBrowse) m_btnBrowse->setText(lm.getText(QStringLiteral("瀏覽...")));
+    if (m_btnStartScan) m_btnStartScan->setText(QStringLiteral("▶ %1").arg(lm.getText(QStringLiteral("開始分析"))));
+    if (btnStopScan) btnStopScan->setText(lm.getText(QStringLiteral("停止掃描")));
+    if (btnMoveToStaging) btnMoveToStaging->setText(lm.getText(QStringLiteral("將勾選檔案移至待處理區")));
+    if (tree) tree->setHeaderLabels({lm.getText(QStringLiteral("重複檔案群組 (依 Hash)")), lm.getText(QStringLiteral("檔案路徑"))});
+    if (m_pathLineEdit) m_pathLineEdit->setPlaceholderText(lm.getText(QStringLiteral("請選擇要掃描的資料夾")));
+    if (m_statusLabel) {
+        const QString cur = m_statusLabel->text();
+        if (cur == QStringLiteral("狀態：就緒") || cur == QStringLiteral("Status: Ready")) {
+            m_statusLabel->setText(lm.getText(QStringLiteral("狀態：就緒")));
+        }
+    }
+}
+
 void DuplicateCleanerWidget::onBrowseClicked() {
     const QString start = (m_pathLineEdit && !m_pathLineEdit->text().trimmed().isEmpty())
                               ? m_pathLineEdit->text().trimmed()
                               : QDir::homePath();
     const QString dir = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("選擇目標資料夾"), start, QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+        this, tr("選擇目標資料夾"), start, QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (dir.isEmpty()) return;
     setSuggestedPath(dir);
 }
@@ -197,7 +217,7 @@ void DuplicateCleanerWidget::onBrowseClicked() {
 void DuplicateCleanerWidget::onStartClicked() {
     const QString dir = m_pathLineEdit ? m_pathLineEdit->text().trimmed() : QString();
     if (dir.isEmpty()) {
-        if (m_statusLabel) m_statusLabel->setText(QStringLiteral("狀態：請先選擇目標資料夾"));
+        if (m_statusLabel) m_statusLabel->setText(LanguageManager::instance().getText(QStringLiteral("狀態：請先選擇目標資料夾")));
         return;
     }
     m_targetPath = dir;
@@ -207,7 +227,7 @@ void DuplicateCleanerWidget::onStartClicked() {
 void DuplicateCleanerWidget::requestStop() {
     m_cancelRequested.store(true, std::memory_order_relaxed);
     if (m_statusLabel) {
-        m_statusLabel->setText(QStringLiteral("狀態：停止中…"));
+        m_statusLabel->setText(LanguageManager::instance().getText(QStringLiteral("狀態：停止中…")));
     }
     if (btnStopScan) btnStopScan->setEnabled(false);
 }
@@ -223,12 +243,12 @@ void DuplicateCleanerWidget::startScan() {
         m_progressBar->setRange(0, 1);
         m_progressBar->setValue(0);
     }
-    if (m_statusLabel) m_statusLabel->setText(QStringLiteral("狀態：掃描檔案大小分群中…"));
+    if (m_statusLabel) m_statusLabel->setText(LanguageManager::instance().getText(QStringLiteral("狀態：掃描檔案大小分群中…")));
 
     const QString rootClean = QDir::cleanPath(m_targetPath);
     if (rootClean.isEmpty() || !QFileInfo(rootClean).exists()) {
         auto *empty = new QTreeWidgetItem(tree);
-        empty->setText(0, QStringLiteral("請指定有效的資料夾"));
+        empty->setText(0, tr("請指定有效的資料夾"));
         empty->setFirstColumnSpanned(true);
         if (btnStopScan) btnStopScan->setEnabled(false);
         return;
@@ -251,21 +271,22 @@ void DuplicateCleanerWidget::startScan() {
         if (m_cancelRequested.load(std::memory_order_relaxed)) {
             tree->clear();
             auto *rootItem = new QTreeWidgetItem(tree);
-            rootItem->setText(0, QStringLiteral("重複檔案群組 (依 Hash)"));
+            rootItem->setText(0, LanguageManager::instance().getText(QStringLiteral("重複檔案群組 (依 Hash)")));
             rootItem->setFirstColumnSpanned(true);
             auto *msg = new QTreeWidgetItem(rootItem);
-            msg->setText(0, QStringLiteral("已取消掃描"));
+            msg->setText(0, tr("已取消掃描"));
             msg->setFirstColumnSpanned(true);
             rootItem->setExpanded(true);
-            if (m_statusLabel) m_statusLabel->setText(QStringLiteral("狀態：已取消"));
+            if (m_statusLabel) m_statusLabel->setText(LanguageManager::instance().getText(QStringLiteral("狀態：已取消")));
             if (btnMoveToStaging) btnMoveToStaging->setEnabled(false);
             return;
         }
 
         populateTree(groups);
         if (m_statusLabel) {
-            m_statusLabel->setText(groups.isEmpty() ? QStringLiteral("狀態：未找到重複檔案")
-                                                    : QStringLiteral("狀態：掃描完成，請勾選要移動的檔案"));
+            m_statusLabel->setText(groups.isEmpty()
+                                       ? LanguageManager::instance().getText(QStringLiteral("狀態：未找到重複檔案"))
+                                       : LanguageManager::instance().getText(QStringLiteral("狀態：掃描完成，請勾選要移動的檔案")));
         }
     });
 
@@ -300,7 +321,7 @@ void DuplicateCleanerWidget::startScan() {
             self,
             [self, totalToHash]() {
                 if (!self) return;
-                if (self->m_statusLabel) self->m_statusLabel->setText(QStringLiteral("狀態：正在計算 SHA-256…"));
+                if (self->m_statusLabel) self->m_statusLabel->setText(LanguageManager::instance().getText(QStringLiteral("狀態：正在計算 SHA-256…")));
                 if (self->m_progressBar) {
                     self->m_progressBar->setRange(0, std::max(1, totalToHash));
                     self->m_progressBar->setValue(0);
@@ -380,12 +401,12 @@ void DuplicateCleanerWidget::populateTree(const QList<DuplicateGroup> &groups) {
     tree->clear();
 
     auto *rootItem = new QTreeWidgetItem(tree);
-    rootItem->setText(0, QStringLiteral("重複檔案群組 (依 Hash)"));
+    rootItem->setText(0, LanguageManager::instance().getText(QStringLiteral("重複檔案群組 (依 Hash)")));
     rootItem->setFirstColumnSpanned(true);
 
     if (groups.isEmpty()) {
         auto *empty = new QTreeWidgetItem(rootItem);
-        empty->setText(0, QStringLiteral("未找到重複檔案"));
+        empty->setText(0, tr("未找到重複檔案"));
         empty->setFirstColumnSpanned(true);
         rootItem->setExpanded(true);
         if (btnMoveToStaging) btnMoveToStaging->setEnabled(false);
@@ -394,7 +415,7 @@ void DuplicateCleanerWidget::populateTree(const QList<DuplicateGroup> &groups) {
 
     for (const DuplicateGroup &g : groups) {
         auto *grp = new QTreeWidgetItem(rootItem);
-        grp->setText(0, QStringLiteral("Hash %1 (%2)  大小: %3 bytes")
+        grp->setText(0, tr("Hash %1 (%2)  大小: %3 bytes")
                             .arg(g.hashHex.left(12))
                             .arg(g.files.size())
                             .arg(g.size));
@@ -490,7 +511,7 @@ void DuplicateCleanerWidget::moveCheckedToStaging() {
     }
 
     if (m_statusLabel) {
-        m_statusLabel->setText(QStringLiteral("狀態：已搬移 %1 個檔案到待處理區").arg(moved.size()));
+        m_statusLabel->setText(LanguageManager::instance().getText(QStringLiteral("狀態：已搬移 %1 個檔案到待處理區")).arg(moved.size()));
     }
 
     if (!moved.isEmpty()) {

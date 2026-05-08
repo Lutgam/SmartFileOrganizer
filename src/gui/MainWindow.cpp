@@ -44,6 +44,8 @@
 
 #include "DuplicateCleanerDialog.h"
 #include "GraphWidget.h"
+#include "LanguageManager.h"
+#include "SettingsDialog.h"
 
 class FileItemDelegate : public QStyledItemDelegate {
 public:
@@ -121,6 +123,46 @@ static QString normalizeDisplayTag(const QString &t) {
     return s;
 }
 
+static QString systemTagBaseZh(const QString &canon) {
+    if (canon == kTagImage) return QStringLiteral("圖片");
+    if (canon == kTagVideo) return QStringLiteral("影片");
+    if (canon == kTagDoc) return QStringLiteral("文件");
+    if (canon == kTagAudio) return QStringLiteral("音檔");
+    if (canon.contains(QStringLiteral("壓縮檔"))) return QStringLiteral("壓縮檔");
+    if (canon.contains(QStringLiteral("程式碼"))) return QStringLiteral("程式碼");
+    if (canon.contains(QStringLiteral("安裝檔"))) return QStringLiteral("安裝檔");
+    if (canon.contains(QStringLiteral("備份檔"))) return QStringLiteral("備份檔");
+    if (canon.contains(QStringLiteral("設定"))) return QStringLiteral("設定");
+    if (canon.contains(QStringLiteral("設計"))) return QStringLiteral("設計");
+    if (canon.contains(QStringLiteral("資料庫"))) return QStringLiteral("資料庫");
+    if (canon.contains(QStringLiteral("學校作業"))) return QStringLiteral("學校作業");
+    if (canon.contains(QStringLiteral("應用程式"))) return QStringLiteral("應用程式");
+    if (canon.contains(QStringLiteral("履歷"))) return QStringLiteral("履歷");
+    return QString();
+}
+
+static QString systemTagEmojiPrefix(const QString &canon) {
+    // Extract a leading emoji-ish prefix even when there's no space.
+    // We stop once we hit a letter/number or CJK ideograph.
+    QString out;
+    for (int i = 0; i < canon.size(); ++i) {
+        const QChar c = canon.at(i);
+        if (c.isSpace()) {
+            if (!out.isEmpty()) break;
+            continue;
+        }
+        const ushort u = c.unicode();
+        const bool isCjk = (u >= 0x4E00 && u <= 0x9FFF);
+        if (c.isLetterOrNumber() || isCjk) {
+            break;
+        }
+        out.append(c);
+        // Safety: don't let it grow unbounded
+        if (out.size() >= 6) break;
+    }
+    return out.trimmed();
+}
+
 static QString emojiForMime(const QMimeType &mt) {
     const QString name = mt.name();
     if (name.startsWith("image/")) return QStringLiteral("🖼️");
@@ -175,7 +217,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     setupFourColumnLayout();
     workspaceLayout->addWidget(mainSplitter);
-    m_mainTabWidget->addTab(m_workspaceTab, QStringLiteral("核心工作區"));
+    m_mainTabWidget->addTab(m_workspaceTab, tr("核心工作區"));
 
     m_duplicateCleanerTab = new QWidget(this);
     auto *dupLayout = new QVBoxLayout(m_duplicateCleanerTab);
@@ -184,14 +226,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     dupLayout->addWidget(m_duplicateCleanerWidget, 1);
     connect(m_duplicateCleanerWidget, &DuplicateCleanerWidget::cleanupCompleted,
             this, &MainWindow::onDuplicateCleanupCompleted);
-    m_mainTabWidget->addTab(m_duplicateCleanerTab, QStringLiteral("冗餘檔案清理"));
+    m_mainTabWidget->addTab(m_duplicateCleanerTab, tr("冗餘檔案清理"));
 
     m_graphTab = new QWidget(this);
     auto *graphLayout = new QVBoxLayout(m_graphTab);
     graphLayout->setContentsMargins(0, 0, 0, 0);
     m_graphWidget = new GraphWidget(&tagManager, m_graphTab);
     graphLayout->addWidget(m_graphWidget, 1);
-    m_mainTabWidget->addTab(m_graphTab, QStringLiteral("關聯圖譜分析"));
+    m_mainTabWidget->addTab(m_graphTab, tr("關聯圖譜分析"));
 
     connect(m_mainTabWidget, &QTabWidget::currentChanged, this, [this](int) {
         if (!m_mainTabWidget || !m_graphWidget || !m_graphTab) return;
@@ -217,8 +259,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
         const int answer = QMessageBox::question(
             this,
-            QStringLiteral("工作區變更"),
-            QStringLiteral("監測到工作區檔案發生變更，是否重新掃描並整理？"),
+            tr("Workspace changed"),
+            tr("Detected workspace file changes. Rescan and refresh?"),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::Yes);
         if (answer == QMessageBox::Yes) {
@@ -238,8 +280,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     modelLoadWatcher = new QFutureWatcher<bool>(this);
     connect(modelLoadWatcher, &QFutureWatcher<bool>::finished, this, [this]() {
         const bool ok = modelLoadWatcher->result();
-        lblStatus->setText(ok ? QStringLiteral("模型已自動載入 (Model auto-loaded)")
-                              : QStringLiteral("模型自動載入失敗 (Auto-load failed)"));
+        lblStatus->setText(ok ? LanguageManager::instance().getText(QStringLiteral("模型已自動載入 (Model auto-loaded)"))
+                              : LanguageManager::instance().getText(QStringLiteral("模型自動載入失敗 (Auto-load failed)")));
     });
 
     initialScanWatcher = new QFutureWatcher<void>(this);
@@ -257,9 +299,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     const QString modelPath = resolveModelPath();
     if (!QFile::exists(modelPath)) {
-        lblStatus->setText(QStringLiteral("❌ 找不到模型: %1（請確認 assets/models/chat_model.gguf）").arg(modelPath));
+        lblStatus->setText(LanguageManager::instance()
+                               .getText(QStringLiteral("❌ 找不到模型: %1（請確認 assets/models/chat_model.gguf）"))
+                               .arg(modelPath));
     } else {
-        lblStatus->setText(QStringLiteral("正在自動載入模型… %1").arg(modelPath));
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在自動載入模型… %1")).arg(modelPath));
         modelLoadWatcher->setFuture(QtConcurrent::run([this, modelPath]() {
             return llamaEngine.loadModel(modelPath.toStdString());
         }));
@@ -321,6 +365,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     resize(1200, 800);
     setWindowTitle(QStringLiteral("Smart File Organizer"));
+
+    connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() { updateAllTexts(); });
+    updateAllTexts();
 }
 
 void MainWindow::onDirectoryChanged(const QString &path) {
@@ -367,6 +414,153 @@ void MainWindow::onDuplicateCleanupCompleted(const QList<QPair<QString, QString>
     }
 }
 
+void MainWindow::openSettings() {
+    SettingsDialog dlg(rootPath, this);
+    connect(&dlg, &SettingsDialog::settingsApplied, this, [this]() { updateAllTexts(); });
+    const int code = dlg.exec();
+    if (code != QDialog::Accepted) return;
+
+    updateAllTexts();
+
+    const QString newModelPath = dlg.modelPath();
+    if (!newModelPath.isEmpty()) {
+        // Prevent reloading while inference is active.
+        if (watcher && watcher->isRunning()) {
+            cancelFlag.store(true);
+            watcher->future().waitForFinished();
+        }
+        if (modelLoadWatcher && modelLoadWatcher->isRunning()) {
+            modelLoadWatcher->future().waitForFinished();
+        }
+
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在載入新模型… %1")).arg(newModelPath));
+        modelLoadWatcher->setFuture(QtConcurrent::run([this, newModelPath]() {
+            return llamaEngine.loadModel(newModelPath.toStdString());
+        }));
+    }
+}
+
+void MainWindow::updateAllTexts() {
+    auto &lm = LanguageManager::instance();
+
+    if (m_mainTabWidget && m_workspaceTab) m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_workspaceTab), lm.getText(QStringLiteral("tab_workspace")));
+    if (m_mainTabWidget && m_duplicateCleanerTab) m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_duplicateCleanerTab), lm.getText(QStringLiteral("tab_duplicates")));
+    if (m_mainTabWidget && m_graphTab) m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_graphTab), lm.getText(QStringLiteral("tab_graph")));
+
+    if (m_actOpenFolder) m_actOpenFolder->setText(lm.getText(QStringLiteral("toolbar_open")));
+    if (m_actFindDuplicates) m_actFindDuplicates->setText(lm.getText(QStringLiteral("toolbar_duplicates")));
+    if (m_actSettings) m_actSettings->setText(lm.getText(QStringLiteral("toolbar_settings")));
+
+    llamaEngine.setOutputLanguage(lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("en_US")
+                                                                                   : QStringLiteral("zh_TW"));
+
+    if (btnAnalyzeFile) btnAnalyzeFile->setText(lm.getText(QStringLiteral("btn_analyze")));
+    if (btnCancelAnalysis) btnCancelAnalysis->setText(lm.getText(QStringLiteral("btn_cancel")));
+    if (btnSaveTags) btnSaveTags->setText(lm.getText(QStringLiteral("btn_save")));
+    if (btnAddTag) btnAddTag->setText(lm.getText(QStringLiteral("btn_add_tag")));
+    if (btnRemoveTag) btnRemoveTag->setText(lm.getText(QStringLiteral("btn_remove_tag")));
+    if (btnAddExistingTag) btnAddExistingTag->setText(lm.getText(QStringLiteral("btn_add_existing_tag")));
+    if (btnPhysicalArchive) btnPhysicalArchive->setText(lm.getText(QStringLiteral("btn_physical_archive")));
+    if (btnUndoPhysicalArchive) btnUndoPhysicalArchive->setText(lm.getText(QStringLiteral("btn_undo_archive")));
+
+    // Workspace static texts (labels, group titles, placeholders)
+    if (lblTagLibraryTitle) lblTagLibraryTitle->setText(QStringLiteral("🏷️ %1").arg(lm.getText(QStringLiteral("標籤庫"))));
+    if (chkRecursive) chkRecursive->setText(lm.getText(QStringLiteral("包含子資料夾")));
+    if (lblFolderTreeTitle) lblFolderTreeTitle->setText(QStringLiteral("🗂️ %1").arg(lm.getText(QStringLiteral("資料夾樹"))));
+    if (lblFileListTitle) lblFileListTitle->setText(QStringLiteral("📂 %1").arg(lm.getText(QStringLiteral("檔案清單"))));
+    if (lblPreviewTitle) lblPreviewTitle->setText(QStringLiteral("👁️ %1").arg(lm.getText(QStringLiteral("預覽與控制"))));
+    if (lblPreviewImage) {
+        // Only update the default placeholder text
+        if (lblPreviewImage->text().contains(QStringLiteral("選擇檔案以預覽"))
+            || lblPreviewImage->text().contains(QStringLiteral("Select a file to preview"))) {
+            lblPreviewImage->setText(lm.getText(QStringLiteral("選擇檔案以預覽")));
+        }
+    }
+    if (grpTagManagement) grpTagManagement->setTitle(lm.getText(QStringLiteral("標籤管理")));
+    if (grpFileOperations) grpFileOperations->setTitle(lm.getText(QStringLiteral("檔案操作")));
+    if (btnRenameFile) btnRenameFile->setText(lm.getText(QStringLiteral("重新命名")));
+    if (btnDeleteFile) btnDeleteFile->setText(lm.getText(QStringLiteral("刪除檔案")));
+    if (btnRevealFile) btnRevealFile->setText(lm.getText(QStringLiteral("開啟位置")));
+
+    if (cmbSort) {
+        const int idx = cmbSort->currentIndex();
+        cmbSort->blockSignals(true);
+        cmbSort->clear();
+        cmbSort->addItem(lm.getText(QStringLiteral("依名稱")));
+        cmbSort->addItem(lm.getText(QStringLiteral("依日期")));
+        cmbSort->addItem(lm.getText(QStringLiteral("依大小")));
+        cmbSort->setCurrentIndex(std::max(0, idx));
+        cmbSort->blockSignals(false);
+    }
+    if (txtSearch) {
+        txtSearch->setPlaceholderText(QStringLiteral("🔍 %1").arg(lm.getText(QStringLiteral("搜尋"))));
+    }
+
+    // Home title (only when currently in Home mode)
+    if (workspaceTitleLabel) {
+        const QString homeTitleZh = QStringLiteral("📁 本機磁碟 (Home)");
+        const QString homeTitleEn = QStringLiteral("📁 Local Disk (Home)");
+        if (workspaceTitleLabel->text() == homeTitleZh || workspaceTitleLabel->text() == homeTitleEn) {
+            workspaceTitleLabel->setText(QStringLiteral("📁 %1").arg(lm.getText(QStringLiteral("本機磁碟 (Home)"))));
+        }
+    }
+
+    // Re-render tag list display names (system tags need presentation translation)
+    if (tagListWidget) {
+        const QString allFilesText = lm.getText(QStringLiteral("All Files"));
+        if (tagListWidget->count() > 0) {
+            auto *it0 = tagListWidget->item(0);
+            if (it0 && it0->data(Qt::UserRole).toString() == QStringLiteral("ALL")) {
+                it0->setText(allFilesText);
+            }
+        }
+        for (int i = 0; i < tagListWidget->count(); ++i) {
+            auto *it = tagListWidget->item(i);
+            if (!it) continue;
+            const QString role = it->data(Qt::UserRole).toString();
+            if (role == QStringLiteral("ALL")) continue;
+            const int n = it->data(Qt::UserRole + 1).toInt();
+            const QString canon = normalizeDisplayTag(role);
+            const QString baseZh = it->data(Qt::UserRole + 2).toString();
+            const QString emoji = systemTagEmojiPrefix(canon);
+            const QString displayName = baseZh.isEmpty()
+                                            ? canon
+                                            : QStringLiteral("%1 %2").arg(emoji, lm.getText(baseZh));
+            it->setText(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n));
+        }
+    }
+
+    if (cmbTagFilter && cmbTagFilter->count() > 0) {
+        cmbTagFilter->setItemText(0, lm.getText(QStringLiteral("All Files")));
+    }
+
+    if (lblTags) {
+        const QString zh = QStringLiteral("標籤: --");
+        const QString en = QStringLiteral("Tags: --");
+        if (lblTags->text() == zh || lblTags->text() == en) {
+            lblTags->setText(QStringLiteral("%1: --").arg(lm.getText(QStringLiteral("標籤"))));
+        }
+    }
+    if (lblStatus) {
+        const QString zh = QStringLiteral("狀態: 就緒");
+        const QString en = QStringLiteral("Status: Ready");
+        if (lblStatus->text() == zh || lblStatus->text() == en) {
+            lblStatus->setText(QStringLiteral("%1: %2").arg(lm.getText(QStringLiteral("狀態")), lm.getText(QStringLiteral("就緒"))));
+        }
+    }
+
+    if (m_duplicateCleanerWidget) m_duplicateCleanerWidget->updateTexts();
+
+    if (btnLoadMore) {
+        btnLoadMore->setText(QStringLiteral("%1 (%2)")
+                                 .arg(lm.getText(QStringLiteral("載入更多")))
+                                 .arg(BATCH_SIZE));
+    }
+    if (btnLoadAll) {
+        btnLoadAll->setText(lm.getText(QStringLiteral("載入全部")));
+    }
+}
+
 MainWindow::~MainWindow() = default;
 
 void MainWindow::onBackgroundScanProgress() {
@@ -375,18 +569,23 @@ void MainWindow::onBackgroundScanProgress() {
 
 void MainWindow::onBackgroundScanFinished() {
     updateTagList();
-    lblStatus->setText(lblStatus->text() + QStringLiteral(" | 背景全域掃描完成"));
+    lblStatus->setText(lblStatus->text() + QStringLiteral(" | %1").arg(LanguageManager::instance().getText(QStringLiteral("背景全域掃描完成"))));
 }
 
 void MainWindow::setupToolbar() {
-    toolbar = addToolBar(QStringLiteral("Main Toolbar"));
+    toolbar = addToolBar(tr("Main Toolbar"));
     toolbar->setMovable(false);
-    QAction *actOpen = toolbar->addAction(QStringLiteral("開啟資料夾"));
-    connect(actOpen, &QAction::triggered, this, &MainWindow::openFolder);
-    QAction *actTwins = toolbar->addAction(QStringLiteral("🧹 尋找冗餘檔案"));
-    connect(actTwins, &QAction::triggered, this, [this]() {
+    m_actOpenFolder = toolbar->addAction(QStringLiteral("開啟資料夾"));
+    connect(m_actOpenFolder, &QAction::triggered, this, &MainWindow::openFolder);
+
+    m_actFindDuplicates = toolbar->addAction(QStringLiteral("🧹 尋找冗餘檔案"));
+    connect(m_actFindDuplicates, &QAction::triggered, this, [this]() {
         showDuplicateCleanerTab();
     });
+
+    toolbar->addSeparator();
+    m_actSettings = toolbar->addAction(QStringLiteral("⚙️ 設定 (Settings)"));
+    connect(m_actSettings, &QAction::triggered, this, &MainWindow::openSettings);
     toolbar->addSeparator();
 }
 
@@ -397,7 +596,8 @@ void MainWindow::setupFourColumnLayout() {
     tagsPanel = new QWidget(this);
     auto *tagsLayout = new QVBoxLayout(tagsPanel);
     auto *tagsHeader = new QHBoxLayout();
-    tagsHeader->addWidget(new QLabel(QStringLiteral("🏷️ 標籤庫"), this));
+    lblTagLibraryTitle = new QLabel(QStringLiteral("🏷️ 標籤庫"), this);
+    tagsHeader->addWidget(lblTagLibraryTitle);
     tagsHeader->addStretch(1);
     chkRecursive = new QCheckBox(QStringLiteral("包含子資料夾"), this);
     chkRecursive->setChecked(false);
@@ -445,7 +645,8 @@ void MainWindow::setupFourColumnLayout() {
     // --- Column 2: Folders + nav under title ---
     foldersPanel = new QWidget(this);
     auto *foldersLayout = new QVBoxLayout(foldersPanel);
-    foldersLayout->addWidget(new QLabel(QStringLiteral("🗂️ 資料夾樹"), this));
+    lblFolderTreeTitle = new QLabel(QStringLiteral("🗂️ 資料夾樹"), this);
+    foldersLayout->addWidget(lblFolderTreeTitle);
 
     auto *navRow = new QHBoxLayout();
     btnBack = new QPushButton(QStringLiteral("⬅️"), this);
@@ -506,7 +707,8 @@ void MainWindow::setupFourColumnLayout() {
     // --- Column 3: Files (row1 sort, row2 filter+search) ---
     filesPanel = new QWidget(this);
     auto *filesLayout = new QVBoxLayout(filesPanel);
-    filesLayout->addWidget(new QLabel(QStringLiteral("📂 檔案清單"), this));
+    lblFileListTitle = new QLabel(QStringLiteral("📂 檔案清單"), this);
+    filesLayout->addWidget(lblFileListTitle);
 
     auto *controlsCol = new QVBoxLayout();
 
@@ -522,7 +724,7 @@ void MainWindow::setupFourColumnLayout() {
 
     auto *rowFilter = new QHBoxLayout();
     cmbTagFilter = new QComboBox(this);
-    cmbTagFilter->addItem(QStringLiteral("All Files"));
+    cmbTagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("All Files")), QStringLiteral("ALL"));
     cmbTagFilter->setToolTip(QStringLiteral("🏷️ 標籤篩選"));
     rowFilter->addWidget(cmbTagFilter, 1);
 
@@ -573,7 +775,8 @@ void MainWindow::setupFourColumnLayout() {
     // --- Column 4: Preview ---
     previewPanel = new QWidget(this);
     auto *previewLayout = new QVBoxLayout(previewPanel);
-    previewLayout->addWidget(new QLabel(QStringLiteral("👁️ 預覽與控制"), this));
+    lblPreviewTitle = new QLabel(QStringLiteral("👁️ 預覽與控制"), this);
+    previewLayout->addWidget(lblPreviewTitle);
 
     lblPreviewImage = new QLabel(QStringLiteral("選擇檔案以預覽"), this);
     lblPreviewImage->setAlignment(Qt::AlignCenter);
@@ -595,8 +798,8 @@ void MainWindow::setupFourColumnLayout() {
     previewLayout->addWidget(lblStatus);
 
     // ===== Group 1: Tag management =====
-    auto *tagGroup = new QGroupBox(QStringLiteral("標籤管理"), this);
-    auto *tagGroupLayout = new QVBoxLayout(tagGroup);
+    grpTagManagement = new QGroupBox(QStringLiteral("標籤管理"), this);
+    auto *tagGroupLayout = new QVBoxLayout(grpTagManagement);
 
     auto *tagRow1 = new QHBoxLayout();
     btnSaveTags = new QPushButton(QStringLiteral("💾 儲存"), this);
@@ -621,11 +824,11 @@ void MainWindow::setupFourColumnLayout() {
     tagGroupLayout->addWidget(btnAddExistingTag);
     rebuildAddExistingTagMenu();
 
-    previewLayout->addWidget(tagGroup);
+    previewLayout->addWidget(grpTagManagement);
 
     // ===== Group 2: File operations =====
-    auto *fileGroup = new QGroupBox(QStringLiteral("檔案操作"), this);
-    auto *fileGroupLayout = new QVBoxLayout(fileGroup);
+    grpFileOperations = new QGroupBox(QStringLiteral("檔案操作"), this);
+    auto *fileGroupLayout = new QVBoxLayout(grpFileOperations);
 
     auto *analysisRow = new QHBoxLayout();
     btnAnalyzeFile = new QPushButton(QStringLiteral("✨ 分析"), this);
@@ -640,15 +843,15 @@ void MainWindow::setupFourColumnLayout() {
     fileGroupLayout->addLayout(analysisRow);
 
     auto *fileOpsRow = new QHBoxLayout();
-    auto *btnRename = new QPushButton(QStringLiteral("重新命名"), this);
-    auto *btnDelete = new QPushButton(QStringLiteral("刪除檔案"), this);
-    auto *btnReveal = new QPushButton(QStringLiteral("開啟位置"), this);
-    connect(btnRename, &QPushButton::clicked, this, &MainWindow::renameCurrentFile);
-    connect(btnDelete, &QPushButton::clicked, this, &MainWindow::deleteCurrentFile);
-    connect(btnReveal, &QPushButton::clicked, this, &MainWindow::revealCurrentFile);
-    fileOpsRow->addWidget(btnRename);
-    fileOpsRow->addWidget(btnDelete);
-    fileOpsRow->addWidget(btnReveal);
+    btnRenameFile = new QPushButton(QStringLiteral("重新命名"), this);
+    btnDeleteFile = new QPushButton(QStringLiteral("刪除檔案"), this);
+    btnRevealFile = new QPushButton(QStringLiteral("開啟位置"), this);
+    connect(btnRenameFile, &QPushButton::clicked, this, &MainWindow::renameCurrentFile);
+    connect(btnDeleteFile, &QPushButton::clicked, this, &MainWindow::deleteCurrentFile);
+    connect(btnRevealFile, &QPushButton::clicked, this, &MainWindow::revealCurrentFile);
+    fileOpsRow->addWidget(btnRenameFile);
+    fileOpsRow->addWidget(btnDeleteFile);
+    fileOpsRow->addWidget(btnRevealFile);
     fileOpsRow->addStretch(1);
     fileGroupLayout->addLayout(fileOpsRow);
 
@@ -664,7 +867,7 @@ void MainWindow::setupFourColumnLayout() {
     archiveRow->addStretch(1);
     fileGroupLayout->addLayout(archiveRow);
 
-    previewLayout->addWidget(fileGroup);
+    previewLayout->addWidget(grpFileOperations);
 
     previewLayout->addStretch(1);
     mainSplitter->addWidget(previewPanel);
@@ -1285,7 +1488,7 @@ void MainWindow::goHome() {
     }
 
     folderModel->setRootPath(rootPath);
-    if (workspaceTitleLabel) workspaceTitleLabel->setText(QStringLiteral("📁 本機磁碟 (Home)"));
+    if (workspaceTitleLabel) workspaceTitleLabel->setText(QStringLiteral("📁 %1").arg(LanguageManager::instance().getText(QStringLiteral("本機磁碟 (Home)"))));
     if (proxyModel) {
         const QString homeParent = QFileInfo(home).path();
         proxyModel->setWorkspace(home);
@@ -1442,10 +1645,16 @@ void MainWindow::scanPhysicalFolder() {
     }
     updateTagList();
 
-    lblStatus->setText(QStringLiteral("資料夾: %1 | 檔案數: %2 %3")
-                           .arg(currentPath)
-                           .arg(count)
-                           .arg(recursive ? QStringLiteral("[遞迴]") : QStringLiteral("[僅此層]")));
+    {
+        auto &lm = LanguageManager::instance();
+        const QString scope = recursive ? lm.getText(QStringLiteral("遞迴")) : lm.getText(QStringLiteral("僅此層"));
+        lblStatus->setText(QStringLiteral("%1: %2 | %3: %4 [%5]")
+                               .arg(lm.getText(QStringLiteral("資料夾")))
+                               .arg(currentPath)
+                               .arg(lm.getText(QStringLiteral("檔案數")))
+                               .arg(count)
+                               .arg(scope));
+    }
 
     fileList->clear();
     renderFileListBatch(BATCH_SIZE);
@@ -1466,9 +1675,37 @@ void MainWindow::populateVirtualTagFiles(const QString &tag) {
         m_pendingFilesToDisplay = tagManager.getFilesByTag(tag);
     }
 
-    lblStatus->setText(QStringLiteral("虛擬標籤檢視: %1 | 檔案數: %2")
-                           .arg(tag)
-                           .arg(static_cast<int>(m_pendingFilesToDisplay.size())));
+    auto translateVirtualTagForDisplay = [&](const QString &raw) {
+        auto &lm = LanguageManager::instance();
+        QString t = raw.trimmed();
+        if (t.isEmpty()) return t;
+
+        // Emoji prefixes can be multiple QChars (surrogates + variation selectors).
+        QString prefix;
+        int i = 0;
+        while (i < t.size()) {
+            const QChar c = t.at(i);
+            if (c.isSpace()) break;
+            if (c.isLetterOrNumber()) break;
+            prefix.append(c);
+            ++i;
+        }
+        const QString rest = t.mid(i).trimmed();
+        if (!prefix.isEmpty() && !rest.isEmpty()) {
+            const QString translatedRest = lm.getText(rest);
+            if (translatedRest != rest) return QStringLiteral("%1 %2").arg(prefix, translatedRest).trimmed();
+        }
+        return lm.getText(t);
+    };
+
+    {
+        auto &lm = LanguageManager::instance();
+        lblStatus->setText(QStringLiteral("%1: %2 | %3: %4")
+                               .arg(lm.getText(QStringLiteral("虛擬標籤檢視")))
+                               .arg(translateVirtualTagForDisplay(tag))
+                               .arg(lm.getText(QStringLiteral("檔案數")))
+                               .arg(static_cast<int>(m_pendingFilesToDisplay.size())));
+    }
 
     renderFileListBatch(BATCH_SIZE);
 }
@@ -1545,8 +1782,15 @@ void MainWindow::updateTagListCountsOnly() {
             QMutexLocker locker(&tagMutex);
             n = static_cast<int>(tagManager.getFilesByTag(canon).size());
         }
-        it->setText(QStringLiteral("%1 (%2)").arg(canon).arg(n));
-        it->setData(Qt::UserRole, canon);
+        const QString baseZh = systemTagBaseZh(canon);
+        const QString emoji = systemTagEmojiPrefix(canon);
+        const QString displayName = baseZh.isEmpty()
+                                        ? canon
+                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+        it->setText(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n));
+        it->setData(Qt::UserRole, canon);          // keep internal tag for TagManager
+        it->setData(Qt::UserRole + 1, n);          // count
+        it->setData(Qt::UserRole + 2, baseZh);     // base zh for translation (if any)
     }
     syncTagFilterFromTagList();
 }
@@ -1554,7 +1798,7 @@ void MainWindow::updateTagListCountsOnly() {
 void MainWindow::updateTagList() {
     tagListWidget->clear();
 
-    auto *allItem = new QListWidgetItem(QStringLiteral("All Files"), tagListWidget);
+    auto *allItem = new QListWidgetItem(LanguageManager::instance().getText(QStringLiteral("All Files")), tagListWidget);
     allItem->setData(Qt::UserRole, QStringLiteral("ALL"));
 
     std::vector<QString> rawTags;
@@ -1591,8 +1835,15 @@ void MainWindow::updateTagList() {
             QMutexLocker locker(&tagMutex);
             n = static_cast<int>(tagManager.getFilesByTag(canon).size());
         }
-        auto *it = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(canon).arg(n), tagListWidget);
-        it->setData(Qt::UserRole, canon);
+        const QString baseZh = systemTagBaseZh(canon);
+        const QString emoji = systemTagEmojiPrefix(canon);
+        const QString displayName = baseZh.isEmpty()
+                                        ? canon
+                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+        auto *it = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n), tagListWidget);
+        it->setData(Qt::UserRole, canon);      // internal/original tag
+        it->setData(Qt::UserRole + 1, n);      // count
+        it->setData(Qt::UserRole + 2, baseZh); // base zh (optional)
     }
 
     syncTagFilterFromTagList();
@@ -1600,26 +1851,32 @@ void MainWindow::updateTagList() {
 }
 
 void MainWindow::syncTagFilterFromTagList() {
-    const QString prev = cmbTagFilter->currentText();
+    const QString prevData = cmbTagFilter->currentData().toString();
     cmbTagFilter->blockSignals(true);
     cmbTagFilter->clear();
-    cmbTagFilter->addItem(QStringLiteral("All Files"));
+    cmbTagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("All Files")), QStringLiteral("ALL"));
     for (int i = 0; i < tagListWidget->count(); ++i) {
         const auto *it = tagListWidget->item(i);
         if (!it) continue;
         if (it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) continue;
         const QString rawTag = it->data(Qt::UserRole).toString();
         if (rawTag.isEmpty()) continue;
-        cmbTagFilter->addItem(rawTag, rawTag);
+        const QString baseZh = it->data(Qt::UserRole + 2).toString();
+        const QString canon = normalizeDisplayTag(rawTag);
+        const QString emoji = systemTagEmojiPrefix(canon);
+        const QString displayName = baseZh.isEmpty()
+                                        ? canon
+                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+        cmbTagFilter->addItem(displayName.trimmed(), rawTag);
     }
-    const int idx = cmbTagFilter->findText(prev);
+    const int idx = cmbTagFilter->findData(prevData);
     cmbTagFilter->setCurrentIndex(idx >= 0 ? idx : 0);
     cmbTagFilter->blockSignals(false);
 }
 
 void MainWindow::syncTagListFromTagFilter() {
-    const QString selected = cmbTagFilter->currentText();
-    if (selected == QStringLiteral("All Files")) {
+    const QString selected = cmbTagFilter->currentData().toString();
+    if (selected == QStringLiteral("ALL") || selected.isEmpty()) {
         for (int i = 0; i < tagListWidget->count(); ++i) {
             auto *it = tagListWidget->item(i);
             if (it && it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) {
@@ -1640,10 +1897,10 @@ void MainWindow::syncTagListFromTagFilter() {
 
 void MainWindow::filterFiles() {
     const QString query = txtSearch->text().trimmed().toLower();
-    const QString tagFilter = cmbTagFilter->currentText();
+    const QString tagFilter = cmbTagFilter->currentData().toString();
 
     std::vector<QString> filesWithTag;
-    if (tagFilter != QStringLiteral("All Files")) {
+    if (!tagFilter.isEmpty() && tagFilter != QStringLiteral("ALL")) {
         QMutexLocker locker(&tagMutex);
         filesWithTag = tagManager.getFilesByTag(tagFilter);
     }
@@ -1673,7 +1930,7 @@ void MainWindow::filterFiles() {
             }
         }
 
-        if (match && tagFilter != QStringLiteral("All Files")) {
+        if (match && !tagFilter.isEmpty() && tagFilter != QStringLiteral("ALL")) {
             bool tagOk = false;
             for (const auto &fp : filesWithTag) {
                 if (fp == absPath || baseName(fp) == baseName(absPath)) {
@@ -1774,7 +2031,8 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     }
 
     txtPreviewText->setVisible(true);
-    txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(二進位檔：不顯示內容)"));
+    txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(%1)")
+                                     .arg(LanguageManager::instance().getText(QStringLiteral("二進位檔：不顯示內容"))));
 }
 
 void MainWindow::updateTagDisplayForFile(const QString &absPath) {
@@ -1826,23 +2084,50 @@ void MainWindow::updateTagDisplayForFile(const QString &absPath) {
     manualTags.sort(Qt::CaseInsensitive);
     aiShown.sort(Qt::CaseInsensitive);
 
+    auto &lm = LanguageManager::instance();
+    auto displayTag = [&](const QString &rawTag) {
+        // Presentation-only translation: keep emoji/prefix (can be multi-QChar), translate base part if known.
+        QString t = rawTag.trimmed();
+        if (t.isEmpty()) return t;
+
+        QString prefix;
+        int i = 0;
+        while (i < t.size()) {
+            const QChar c = t.at(i);
+            if (c.isSpace()) break;
+            if (c.isLetterOrNumber()) break;
+            prefix.append(c);
+            ++i;
+        }
+        const QString rest = t.mid(i).trimmed();
+        if (!prefix.isEmpty() && !rest.isEmpty()) {
+            const QString translatedRest = lm.getText(rest);
+            if (translatedRest != rest) return QStringLiteral("%1 %2").arg(prefix, translatedRest).trimmed();
+        }
+
+        return lm.getText(t);
+    };
+
     QString html;
-    html += QStringLiteral("<div><b>個人標籤</b>: ");
+    html += QStringLiteral("<div><b>%1</b>: ").arg(displayTag(QStringLiteral("個人標籤")).toHtmlEscaped());
     if (manualTags.isEmpty()) {
-        html += QStringLiteral("<span style='color:#888'>(無)</span>");
+        html += QStringLiteral("<span style='color:#888'>(%1)</span>").arg(displayTag(QStringLiteral("無")).toHtmlEscaped());
     } else {
         for (const QString &t : manualTags) {
-            html += QStringLiteral("<span style='background:#444; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>%1</span>").arg(t.toHtmlEscaped());
+            html += QStringLiteral("<span style='background:#444; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>%1</span>")
+                        .arg(displayTag(t).toHtmlEscaped());
         }
     }
     html += QStringLiteral("</div>");
 
-    html += QStringLiteral("<div style='margin-top:6px;'><b>AI 智能建議</b>: ");
+    html += QStringLiteral("<div style='margin-top:6px;'><b>%1</b>: ")
+                .arg(displayTag(QStringLiteral("AI 智能建議")).toHtmlEscaped());
     if (aiShown.isEmpty()) {
-        html += QStringLiteral("<span style='color:#888'>(無)</span>");
+        html += QStringLiteral("<span style='color:#888'>(%1)</span>").arg(displayTag(QStringLiteral("無")).toHtmlEscaped());
     } else {
         for (const QString &t : aiShown) {
-            html += QStringLiteral("<span style='background:#2b6cb0; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>🤖 %1</span>").arg(t.toHtmlEscaped());
+            html += QStringLiteral("<span style='background:#2b6cb0; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>🤖 %1</span>")
+                        .arg(displayTag(t).toHtmlEscaped());
         }
     }
     html += QStringLiteral("</div>");
@@ -1869,12 +2154,14 @@ std::vector<QString> MainWindow::sanitizeAiTags(const QString &raw) const {
     QStringList parts = cleaned.split(QRegularExpression(QStringLiteral("[,，、]")), Qt::SkipEmptyParts);
     QSet<QString> seen;
     std::vector<QString> out;
+    const bool en = (LanguageManager::instance().language() == LanguageManager::Language::EN_US);
+    const int maxLen = en ? 24 : 8;
 
     for (const QString &p0 : parts) {
         QString p = p0.trimmed();
         p.replace(QRegularExpression(QStringLiteral("[\\s\\.。;；:：\\[\\]\\(\\)<>\"'`~!@#$%^&*+=\\|\\\\/?]+")), QString());
         if (p.isEmpty()) continue;
-        if (p.size() > 8) continue;
+        if (p.size() > maxLen) continue;
         if (seen.contains(p)) continue;
         seen.insert(p);
         out.push_back(p);
@@ -1910,14 +2197,14 @@ void MainWindow::analyzeFile() {
 
     QFileInfo fi(fp);
     if (!isAnalyzableFile(fi)) {
-        lblStatus->setText(QStringLiteral("此項目不可分析"));
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("此項目不可分析")));
         return;
     }
 
     if (!llamaEngine.isModelLoaded()) {
         // If we're auto-loading in background, wait (blocking) to avoid "Model not loaded" race.
         if (modelLoadWatcher && modelLoadWatcher->isRunning()) {
-            lblStatus->setText(QStringLiteral("等待模型載入完成…"));
+            lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("等待模型載入完成…")));
             modelLoadWatcher->future().waitForFinished();
         }
         if (!llamaEngine.isModelLoaded()) {
@@ -1928,7 +2215,7 @@ void MainWindow::analyzeFile() {
 
     cancelFlag.store(false);
     setUiBusy(true);
-    lblStatus->setText(QStringLiteral("準備分析…"));
+    lblStatus->setText(tr("Preparing…"));
 
     const QString filename = fi.fileName();
     const QString existingTags = historicalTagsString();
@@ -1954,7 +2241,7 @@ void MainWindow::analyzeFile() {
         }
     }
 
-    lblStatus->setText(QStringLiteral("分析中…"));
+    lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析中…")));
 
     QFuture<std::string> future = QtConcurrent::run([this, filename, content, existingTags, rejectedTagsCsv]() {
         // existingTags param is used for "historical tags"; rejectedTagsCsv used to constrain outputs
@@ -1965,7 +2252,7 @@ void MainWindow::analyzeFile() {
 
 void MainWindow::cancelAnalysis() {
     cancelFlag.store(true);
-    lblStatus->setText(QStringLiteral("取消中…"));
+    lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("取消中…")));
 }
 
 void MainWindow::onAnalysisFinished() {
@@ -1976,19 +2263,19 @@ void MainWindow::onAnalysisFinished() {
     const QString qRaw = QString::fromStdString(raw);
 
     if (raw.rfind("Error:", 0) == 0) {
-        lblStatus->setText(QStringLiteral("分析失敗"));
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析失敗")));
         QMessageBox::critical(this, QStringLiteral("Error"), qRaw);
         return;
     }
 
     if (cancelFlag.load()) {
-        lblStatus->setText(QStringLiteral("已取消"));
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("已取消")));
         return;
     }
 
     const auto tags = sanitizeAiTags(qRaw);
     if (fp.isEmpty()) {
-        lblStatus->setText(QStringLiteral("分析完成（無選取檔案）"));
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成（無選取檔案）")));
         return;
     }
 
@@ -2003,7 +2290,7 @@ void MainWindow::onAnalysisFinished() {
     if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
     else populateVirtualTagFiles(activeVirtualTag);
 
-    lblStatus->setText(QStringLiteral("分析完成"));
+    lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
 }
 
 void MainWindow::saveTags() {
@@ -2083,7 +2370,7 @@ void MainWindow::removeGlobalTag() {
 
     const QString data = selected.first()->data(Qt::UserRole).toString();
     if (data == QStringLiteral("ALL")) {
-        QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("無法刪除 All Files"));
+        QMessageBox::warning(this, tr("Warning"), tr("Cannot delete All Files"));
         return;
     }
 
@@ -2117,15 +2404,23 @@ void MainWindow::rebuildAddExistingTagMenu() {
     for (const auto &t : allTags) history << normalizeDisplayTag(t);
 
     auto addCategory = [&](const QString &name, const QStringList &preset) {
-        QMenu *sub = menu->addMenu(name);
+        QMenu *sub = menu->addMenu(LanguageManager::instance().getText(name));
         for (const QString &t : preset) {
-            QAction *a = sub->addAction(t);
-            connect(a, &QAction::triggered, this, [this, t]() {
+            const QString canon = normalizeDisplayTag(t);
+            const QString baseZh = systemTagBaseZh(canon).isEmpty() ? canon : systemTagBaseZh(canon);
+            const QString emoji = systemTagEmojiPrefix(canon);
+            const QString display = (LanguageManager::instance().getText(baseZh) == baseZh)
+                                        ? canon
+                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+            QAction *a = sub->addAction(display.trimmed());
+            a->setData(canon);
+            connect(a, &QAction::triggered, this, [this, a]() {
                 const QString fp = currentFilePath();
                 if (fp.isEmpty()) return;
+                const QString tag = a->data().toString();
                 {
                     QMutexLocker locker(&tagMutex);
-                    tagManager.addTag(fp, t, true);
+                    tagManager.addTag(fp, tag, true);
                     tagManager.saveTags();
                 }
                 updateTagDisplayForFile(fp);
@@ -2137,13 +2432,21 @@ void MainWindow::rebuildAddExistingTagMenu() {
         if (!history.isEmpty()) {
             sub->addSeparator();
             for (const QString &t : history) {
-                QAction *a = sub->addAction(t);
-                connect(a, &QAction::triggered, this, [this, t]() {
+                const QString canon = normalizeDisplayTag(t);
+                const QString baseZh = systemTagBaseZh(canon).isEmpty() ? canon : systemTagBaseZh(canon);
+                const QString emoji = systemTagEmojiPrefix(canon);
+                const QString display = (LanguageManager::instance().getText(baseZh) == baseZh)
+                                            ? canon
+                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+                QAction *a = sub->addAction(display.trimmed());
+                a->setData(canon);
+                connect(a, &QAction::triggered, this, [this, a]() {
                     const QString fp = currentFilePath();
                     if (fp.isEmpty()) return;
+                    const QString tag = a->data().toString();
                     {
                         QMutexLocker locker(&tagMutex);
-                        tagManager.addTag(fp, t, true);
+                        tagManager.addTag(fp, tag, true);
                         tagManager.saveTags();
                     }
                     updateTagDisplayForFile(fp);

@@ -9,6 +9,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QList>
+#include <QGroupBox>
 #include <QMenu>
 #include <QPair>
 #include <QPushButton>
@@ -69,6 +70,7 @@ protected:
 
 class GraphWidget;
 class DuplicateCleanerWidget;
+class SettingsDialog;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -93,6 +95,7 @@ private slots:
     void onDirectoryChanged(const QString &path);
     void showDuplicateCleanerTab();
     void onDuplicateCleanupCompleted(const QList<QPair<QString, QString>> &movedHistory);
+    void openSettings();
 
     void goBack();
     void goForward();
@@ -123,14 +126,22 @@ private:
     DuplicateCleanerWidget *m_duplicateCleanerWidget = nullptr;
     GraphWidget *m_graphWidget = nullptr;
 
+    QAction *m_actOpenFolder = nullptr;
+    QAction *m_actFindDuplicates = nullptr;
+    QAction *m_actSettings = nullptr;
+
+    void updateAllTexts();
+
     // Column 1: Tags
     QWidget *tagsPanel = nullptr;
+    QLabel *lblTagLibraryTitle = nullptr;
     QListWidget *tagListWidget = nullptr;
     QPushButton *btnLeftAddTag = nullptr;
     QPushButton *btnLeftRemoveTag = nullptr;
 
     // Column 2: Folders + navigation under title
     QWidget *foldersPanel = nullptr;
+    QLabel *lblFolderTreeTitle = nullptr;
     QTreeView *folderTree = nullptr;
     QLabel *workspaceTitleLabel = nullptr;
     QFileSystemModel *folderModel = nullptr;
@@ -141,6 +152,7 @@ private:
 
     // Column 3: Files
     QWidget *filesPanel = nullptr;
+    QLabel *lblFileListTitle = nullptr;
     QComboBox *cmbSort = nullptr;
     QComboBox *cmbTagFilter = nullptr;
     QLineEdit *txtSearch = nullptr;
@@ -150,6 +162,7 @@ private:
 
     // Column 4: Preview & Controls
     QWidget *previewPanel = nullptr;
+    QLabel *lblPreviewTitle = nullptr;
     QLabel *lblPreviewImage = nullptr;
     QTextEdit *txtPreviewText = nullptr;
     QLabel *lblTags = nullptr;
@@ -164,6 +177,11 @@ private:
     QPushButton *btnPhysicalArchive = nullptr;
     QPushButton *btnUndoPhysicalArchive = nullptr;
     // Tabbed UI: no duplicate/graph buttons in Tab 1 preview panel
+    QGroupBox *grpTagManagement = nullptr;
+    QGroupBox *grpFileOperations = nullptr;
+    QPushButton *btnRenameFile = nullptr;
+    QPushButton *btnDeleteFile = nullptr;
+    QPushButton *btnRevealFile = nullptr;
 
     QToolBar *toolbar = nullptr;
     QCheckBox *chkRecursive = nullptr;

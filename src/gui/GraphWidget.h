@@ -11,6 +11,7 @@ class Edge;
 class TagManager;
 class GraphWidget; // Forward declaration
 class QComboBox;
+class QLabel;
 class QWidget;
 
 // --- Edge Class ---
@@ -111,6 +112,7 @@ private:
     std::map<QString, Node*> tagNodes;
 
     QWidget *m_toolbar = nullptr;
+    QLabel *m_filterLabel = nullptr;
     QComboBox *m_tagFilter = nullptr;
 };
 

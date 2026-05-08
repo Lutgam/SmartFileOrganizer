@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QTimer>
 #include <QMutex>
+#include <QString>
 #include <atomic>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@ public:
                             const std::string& rejectedTagsCsv = "",
                             const std::string& existingTags = "");
     void setCancelFlag(std::atomic<bool>* flag) { m_cancelFlag = flag; } // Link to UI cancel flag
+    void setOutputLanguage(const QString &lang);
 
 private:
     friend struct InferenceGuard;
@@ -40,6 +42,8 @@ private:
     struct llama_model* model = nullptr;
     struct llama_context* ctx = nullptr;
     std::atomic<bool>* m_cancelFlag = nullptr; // Points to MainWindow's flag (not owned)
+
+    QString m_currentLanguage = QStringLiteral("zh_TW");
 };
 
 #endif // LLAMAENGINE_H

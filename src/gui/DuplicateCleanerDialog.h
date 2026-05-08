@@ -28,6 +28,7 @@ public:
     ~DuplicateCleanerWidget() override;
 
     void setSuggestedPath(const QString &targetPath);
+    void updateTexts();
 
 signals:
     // [oldPath, newPath] moved into staging area
@@ -43,6 +44,7 @@ private:
     void onStartClicked();
 
     QString m_targetPath;
+    QLabel *m_targetDirLabel = nullptr;
     QLineEdit *m_pathLineEdit = nullptr;
     QPushButton *m_btnBrowse = nullptr;
     QPushButton *m_btnStartScan = nullptr;

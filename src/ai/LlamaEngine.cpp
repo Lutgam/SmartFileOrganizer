@@ -61,6 +61,13 @@ LlamaEngine::~LlamaEngine() {
   llama_backend_free();
 }
 
+void LlamaEngine::setOutputLanguage(const QString &lang) {
+  QMutexLocker locker(&m_mutex);
+  const QString cleaned = lang.trimmed();
+  if (cleaned.isEmpty()) return;
+  m_currentLanguage = cleaned;
+}
+
 void LlamaEngine::stopIdleTimerAsync() {
   if (!idleTimer) return;
   if (QThread::currentThread() == thread()) {
@@ -248,22 +255,35 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
   InferenceGuard guard(this);
   if (!ensureModelLoaded()) return "Error: Model not loaded";
 
+  // --- Language awareness ---
+  QString lang;
+  {
+    QMutexLocker locker(&m_mutex);
+    lang = m_currentLanguage.trimmed();
+  }
+  const bool en = (lang.compare(QStringLiteral("en_US"), Qt::CaseInsensitive) == 0);
+
   // Minimal, non-threatening prompt — avoids parroting
-  std::string instruction =
-      "請輸出兩個描述此檔案主題的詞彙，用逗號分隔，不要有任何其他文字。";
+  std::string instruction = en
+                                ? "Output two short topic tags for this file, separated by a comma. Output tags only."
+                                : "請輸出兩個描述此檔案主題的詞彙，用逗號分隔，不要有任何其他文字。";
 
   std::string prompt;
   if (content.empty()) {
-    prompt = instruction + "\n檔名: " + filename + "\n輸出:";
+    prompt = instruction + (en ? "\nFilename: " : "\n檔名: ") + filename + (en ? "\nOutput:" : "\n輸出:");
   } else {
     std::string safeContent = content.substr(0, 600);
-    prompt = instruction + "\n檔名: " + filename +
-             "\n內容片段: " + safeContent + "\n輸出:";
+    prompt = instruction + (en ? "\nFilename: " : "\n檔名: ") + filename +
+             (en ? "\nContent snippet: " : "\n內容片段: ") + safeContent + (en ? "\nOutput:" : "\n輸出:");
   }
 
   if (!rejectedTagsCsv.empty()) {
-    prompt += "\n【嚴格限制】：請絕對不要使用以下標籤進行分類：" + rejectedTagsCsv + "\n";
+    prompt += en ? "\nSTRICT: Do NOT use the following tags: " + rejectedTagsCsv + "\n"
+                 : "\n【嚴格限制】：請絕對不要使用以下標籤進行分類：" + rejectedTagsCsv + "\n";
   }
+
+  prompt += en ? "\nIMPORTANT: The user interface is in English. You MUST output all tags, categories, and summaries entirely in English.\n"
+              : "\n請使用繁體中文輸出標籤與摘要。\n";
 
   std::string rawResponse = generateResponse(prompt);
 
@@ -275,32 +295,38 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
   qRaw.replace("標籤:", "").replace("標签:", "");
   qRaw.replace("Assistant:", "").replace("User:", "").replace("輸出:", "");
 
-  // 1. 移除點、句號、空白與換行
+  if (en) {
+    // English: keep spaces, split by commas/newlines.
+    qRaw.replace("\r", " ");
+    QStringList parts = qRaw.split(QRegularExpression("[,\\n]"), Qt::SkipEmptyParts);
+    QStringList out;
+    for (const QString &p : parts) {
+      QString t = p.trimmed();
+      t.replace(QRegularExpression("^[-•\\s]+"), "");
+      t.replace(QRegularExpression("[\"'`]+"), "");
+      if (t.isEmpty()) continue;
+      if (t.size() > 24) continue;
+      out << t;
+    }
+    out.removeDuplicates();
+    while (out.size() > 2) out.removeLast();
+    return out.join(", ").toStdString();
+  }
+
+  // zh_TW: legacy cleanup
   qRaw.replace("。", "").replace(".", "").replace("\n", "").replace(" ", "");
-
-  // 2. 以逗號與頓號切分
   QStringList parts = qRaw.split(QRegularExpression("[,，、]"), Qt::SkipEmptyParts);
-
-  // 3. 物理長度過濾 (>8字元 = 幻覺/說明文字，直接丟棄) + 黑名單過濾
   QStringList blacklist = {"文件", "圖片", "音訊", "影片", "壓縮檔", "專案"};
   QStringList resultParts;
-  for (const QString& p : parts) {
-      QString t = p.trimmed();
-      if (t.isEmpty()) continue;
-      // Physical length gate: drop anything over 8 chars (stops hallucinated sentences)
-      if (t.size() > 8) continue;
-      // Blacklist gate
-      if (blacklist.contains(t)) continue;
-      resultParts << t;
+  for (const QString &p : parts) {
+    QString t = p.trimmed();
+    if (t.isEmpty()) continue;
+    if (t.size() > 8) continue;
+    if (blacklist.contains(t)) continue;
+    resultParts << t;
   }
-
-  // 4. 去重與截斷 (最多 2 個)
   resultParts.removeDuplicates();
-  while (resultParts.size() > 2) {
-      resultParts.removeLast();
-  }
-
-  // 5. 組合回傳
+  while (resultParts.size() > 2) resultParts.removeLast();
   return resultParts.join(", ").toStdString();
 }
 
