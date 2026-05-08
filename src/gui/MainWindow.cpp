@@ -1783,16 +1783,71 @@ void MainWindow::updateTagDisplayForFile(const QString &absPath) {
         QMutexLocker locker(&tagMutex);
         tags = tagManager.getTags(absPath);
     }
-    QString s = QStringLiteral("標籤: ");
-    if (tags.empty()) {
-        s += QStringLiteral("(無)");
-    } else {
-        for (int i = 0; i < static_cast<int>(tags.size()); ++i) {
-            s += tags[static_cast<size_t>(i)];
-            if (i + 1 < static_cast<int>(tags.size())) s += QStringLiteral(", ");
+
+    auto isAiTag = [](const QString &t) {
+        return t.trimmed().toLower().startsWith(QStringLiteral("[ai]"));
+    };
+    auto stripAiPrefix = [](const QString &t) {
+        QString s = t.trimmed();
+        const QString low = s.toLower();
+        const QString pref = QStringLiteral("[ai]");
+        if (low.startsWith(pref)) {
+            s = s.mid(pref.size()).trimmed();
+        }
+        return s;
+    };
+    auto normBase = [&](const QString &t) {
+        return stripAiPrefix(t).trimmed().toLower();
+    };
+
+    QSet<QString> manualBases;
+    QStringList manualTags;
+    QStringList aiTags;
+    for (const auto &t : tags) {
+        const QString base = normBase(t);
+        if (base.isEmpty()) continue;
+        if (isAiTag(t)) {
+            aiTags << base;
+        } else {
+            manualBases.insert(base);
+            manualTags << base;
         }
     }
-    lblTags->setText(s);
+
+    // Dedup: manual wins over AI.
+    QStringList aiShown;
+    for (const QString &b : aiTags) {
+        if (manualBases.contains(b)) continue;
+        aiShown << b;
+    }
+
+    manualTags.removeDuplicates();
+    aiShown.removeDuplicates();
+    manualTags.sort(Qt::CaseInsensitive);
+    aiShown.sort(Qt::CaseInsensitive);
+
+    QString html;
+    html += QStringLiteral("<div><b>個人標籤</b>: ");
+    if (manualTags.isEmpty()) {
+        html += QStringLiteral("<span style='color:#888'>(無)</span>");
+    } else {
+        for (const QString &t : manualTags) {
+            html += QStringLiteral("<span style='background:#444; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>%1</span>").arg(t.toHtmlEscaped());
+        }
+    }
+    html += QStringLiteral("</div>");
+
+    html += QStringLiteral("<div style='margin-top:6px;'><b>AI 智能建議</b>: ");
+    if (aiShown.isEmpty()) {
+        html += QStringLiteral("<span style='color:#888'>(無)</span>");
+    } else {
+        for (const QString &t : aiShown) {
+            html += QStringLiteral("<span style='background:#2b6cb0; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>🤖 %1</span>").arg(t.toHtmlEscaped());
+        }
+    }
+    html += QStringLiteral("</div>");
+
+    lblTags->setText(html);
 }
 
 QString MainWindow::historicalTagsString() const {
@@ -1939,7 +1994,7 @@ void MainWindow::onAnalysisFinished() {
 
     {
         QMutexLocker locker(&tagMutex);
-        for (const auto &t : tags) tagManager.addTag(fp, t, false);
+        for (const auto &t : tags) tagManager.addTag(fp, QStringLiteral("[AI] ") + t, false);
         tagManager.saveTags();
     }
 

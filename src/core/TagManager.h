@@ -47,6 +47,8 @@ private:
     std::set<QString> m_rejectedTags;
     mutable QRecursiveMutex m_mutex;
     
+    QString normalizeTag(const QString &tag) const;
+
     std::string getMetadataPath() const;
     std::string getRejectedTagsPath() const;
     void loadRejectedTags();

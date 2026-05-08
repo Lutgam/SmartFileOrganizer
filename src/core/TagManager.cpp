@@ -14,6 +14,24 @@ namespace fs = std::filesystem;
 TagManager::TagManager() {
 }
 
+QString TagManager::normalizeTag(const QString &tag) const {
+    QString t = tag.trimmed();
+    if (t.isEmpty()) return QString();
+
+    // Preserve standardized AI prefix, normalize only the payload.
+    // Accept existing variants like "[ai]" / "[AI]" / "[Ai]".
+    const QString lower = t.toLower();
+    const QString aiPrefixLower = QStringLiteral("[ai]");
+    if (lower.startsWith(aiPrefixLower)) {
+        QString rest = t.mid(aiPrefixLower.size()).trimmed();
+        rest = rest.toLower();
+        if (rest.isEmpty()) return QString();
+        return QStringLiteral("[AI] ") + rest;
+    }
+
+    return t.toLower();
+}
+
 void TagManager::loadTags(const std::string& directory) {
     QMutexLocker locker(&m_mutex);
     currentDirectory = directory;
@@ -60,8 +78,10 @@ void TagManager::saveTags() {
 
 void TagManager::addTag(const QString& filename, const QString& tag, bool save) {
     QMutexLocker locker(&m_mutex);
-    m_fileToTags[filename].insert(tag);
-    m_tagToFilePaths[tag].insert(filename);
+    const QString nt = normalizeTag(tag);
+    if (nt.isEmpty()) return;
+    m_fileToTags[filename].insert(nt);
+    m_tagToFilePaths[nt].insert(filename);
     if (save) {
         saveTags();
     }
@@ -69,26 +89,31 @@ void TagManager::addTag(const QString& filename, const QString& tag, bool save) 
 
 void TagManager::removeTag(const QString& filename, const QString& tag) {
     QMutexLocker locker(&m_mutex);
+    const QString nt = normalizeTag(tag);
+    if (nt.isEmpty()) return;
     if (m_fileToTags.count(filename)) {
-        m_fileToTags[filename].erase(tag);
+        m_fileToTags[filename].erase(nt);
         if (m_fileToTags[filename].empty()) m_fileToTags.erase(filename);
     }
-    if (m_tagToFilePaths.count(tag)) {
-        m_tagToFilePaths[tag].erase(filename);
-        if (m_tagToFilePaths[tag].empty()) m_tagToFilePaths.erase(tag);
+    if (m_tagToFilePaths.count(nt)) {
+        m_tagToFilePaths[nt].erase(filename);
+        if (m_tagToFilePaths[nt].empty()) m_tagToFilePaths.erase(nt);
     }
     saveTags();
 }
 
 void TagManager::renameTag(const QString& oldTag, const QString& newTag) {
     QMutexLocker locker(&m_mutex);
-    if (m_tagToFilePaths.count(oldTag)) {
-        std::set<QString> files = m_tagToFilePaths[oldTag];
-        m_tagToFilePaths.erase(oldTag);
+    const QString nOld = normalizeTag(oldTag);
+    const QString nNew = normalizeTag(newTag);
+    if (nOld.isEmpty() || nNew.isEmpty()) return;
+    if (m_tagToFilePaths.count(nOld)) {
+        std::set<QString> files = m_tagToFilePaths[nOld];
+        m_tagToFilePaths.erase(nOld);
         for (const QString& file : files) {
-            m_fileToTags[file].erase(oldTag);
-            m_fileToTags[file].insert(newTag);
-            m_tagToFilePaths[newTag].insert(file);
+            m_fileToTags[file].erase(nOld);
+            m_fileToTags[file].insert(nNew);
+            m_tagToFilePaths[nNew].insert(file);
         }
         saveTags();
     }
@@ -96,11 +121,13 @@ void TagManager::renameTag(const QString& oldTag, const QString& newTag) {
 
 void TagManager::deleteTag(const QString& tag) {
     QMutexLocker locker(&m_mutex);
-    if (m_tagToFilePaths.count(tag)) {
-        std::set<QString> files = m_tagToFilePaths[tag];
-        m_tagToFilePaths.erase(tag);
+    const QString nt = normalizeTag(tag);
+    if (nt.isEmpty()) return;
+    if (m_tagToFilePaths.count(nt)) {
+        std::set<QString> files = m_tagToFilePaths[nt];
+        m_tagToFilePaths.erase(nt);
         for (const QString& file : files) {
-            m_fileToTags[file].erase(tag);
+            m_fileToTags[file].erase(nt);
             if (m_fileToTags[file].empty()) m_fileToTags.erase(file);
         }
         saveTags();
@@ -167,8 +194,10 @@ void TagManager::setTags(const QString& filename, const std::vector<QString>& ta
 
     // Add new ones
     for (const QString& tag : tags) {
-        m_fileToTags[filename].insert(tag);
-        m_tagToFilePaths[tag].insert(filename);
+        const QString nt = normalizeTag(tag);
+        if (nt.isEmpty()) continue;
+        m_fileToTags[filename].insert(nt);
+        m_tagToFilePaths[nt].insert(filename);
     }
     saveTags();
 }
@@ -184,8 +213,10 @@ std::vector<QString> TagManager::getAllTags() const {
 
 std::vector<QString> TagManager::getFilesByTag(const QString& tag) const {
     QMutexLocker locker(&m_mutex);
+    const QString nt = normalizeTag(tag);
+    if (nt.isEmpty()) return {};
     std::vector<QString> result;
-    auto it = m_tagToFilePaths.find(tag);
+    auto it = m_tagToFilePaths.find(nt);
     if (it != m_tagToFilePaths.end()) {
         result.assign(it->second.begin(), it->second.end());
     }
@@ -211,7 +242,7 @@ void TagManager::loadRejectedTags() {
         if (!root.is_array()) return;
         for (const auto& v : root) {
             if (!v.is_string()) continue;
-            const QString t = QString::fromStdString(v.get<std::string>()).trimmed();
+            const QString t = normalizeTag(QString::fromStdString(v.get<std::string>())); // normalizes + trims
             if (!t.isEmpty()) m_rejectedTags.insert(t);
         }
     } catch (const std::exception& e) {
@@ -243,7 +274,7 @@ void TagManager::saveRejectedTags() const {
 
 void TagManager::addRejectedTag(const QString& tag) {
     QMutexLocker locker(&m_mutex);
-    const QString t = tag.trimmed();
+    const QString t = normalizeTag(tag);
     if (t.isEmpty()) return;
     m_rejectedTags.insert(t);
     saveRejectedTags();
