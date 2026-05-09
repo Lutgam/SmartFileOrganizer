@@ -22,6 +22,7 @@ public:
     void removeTag(const QString& filename, const QString& tag);
     void renameTag(const QString& oldTag, const QString& newTag);
     void deleteTag(const QString& tag);
+    void mergeTag(const QString& oldTag, const QString& newTag);
     std::vector<QString> getTags(const QString& filename) const;
     
     void setTags(const QString& filename, const std::vector<QString>& tags);

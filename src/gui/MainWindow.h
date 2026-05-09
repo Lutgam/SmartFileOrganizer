@@ -134,10 +134,12 @@ private:
 
     void updateAllTexts();
 
-    // Column 1: Tags
+    // Column 1: Tags (tabbed: system / AI)
     QWidget *tagsPanel = nullptr;
     QLabel *lblTagLibraryTitle = nullptr;
-    QListWidget *tagListWidget = nullptr;
+    QTabWidget *m_tagTabWidget = nullptr;
+    QListWidget *m_systemTagListWidget = nullptr;
+    QListWidget *m_aiTagListWidget = nullptr;
     QPushButton *btnLeftAddTag = nullptr;
     QPushButton *btnLeftRemoveTag = nullptr;
 
@@ -172,6 +174,7 @@ private:
     QLabel *m_lblSummaryTitle = nullptr;
     QTextEdit *m_aiSummaryEdit = nullptr;
     QPushButton *btnBatchAnalyze = nullptr;
+    QPushButton *btnStopBatchAnalyze = nullptr;
     QProgressBar *batchProgressBar = nullptr;
     QLabel *lblBatchStatus = nullptr;
     QTabWidget *m_previewTabWidget = nullptr;

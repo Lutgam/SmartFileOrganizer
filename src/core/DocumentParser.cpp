@@ -67,13 +67,21 @@ std::string DocumentParser::extractText(const std::string& filePath)
             mz_free(pHeap);
 
             QXmlStreamReader xml(xmlContent);
+            // Some PPTX files rely on namespaces; be tolerant.
+            xml.setNamespaceProcessing(false);
             while (!xml.atEnd() && !xml.hasError()) {
                 const auto token = xml.readNext();
                 if (token == QXmlStreamReader::StartElement) {
                     const QString n = xml.name().toString();
-                    if (n == QStringLiteral("t")) {
+                    const QString qn = xml.qualifiedName().toString();
+                    const bool isText = (n == QStringLiteral("t")) || qn.endsWith(QStringLiteral(":t"));
+                    const bool isPara = (n == QStringLiteral("p")) || qn.endsWith(QStringLiteral(":p"));
+                    const bool isBreak = (n == QStringLiteral("br")) || qn.endsWith(QStringLiteral(":br"));
+                    if (isText) {
                         text += xml.readElementText() + QStringLiteral(" ");
-                    } else if (n == QStringLiteral("p")) {
+                    } else if (isBreak) {
+                        text += QStringLiteral("\n");
+                    } else if (isPara) {
                         text += QStringLiteral("\n");
                     }
                 }

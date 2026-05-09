@@ -187,12 +187,21 @@ QString LanguageManager::getText(const QString &key) const {
         return en ? QStringLiteral("Cannot extract text (possibly scanned or encrypted)") : QStringLiteral("無法提取文字內容（可能為掃描檔或加密）");
     }
 
-    if (key == QStringLiteral("批次分析")) return en ? QStringLiteral("Batch Analyze") : QStringLiteral("批次分析");
-    if (key == QStringLiteral("批次分析完成")) return en ? QStringLiteral("Batch analysis completed") : QStringLiteral("批次分析完成");
-    if (key == QStringLiteral("正在批次分析")) return en ? QStringLiteral("Batch analyzing") : QStringLiteral("正在批次分析");
+    if (key == QStringLiteral("資料夾分析")) return en ? QStringLiteral("Folder Analyze") : QStringLiteral("資料夾分析");
+    if (key == QStringLiteral("資料夾分析完成")) return en ? QStringLiteral("Folder analysis completed") : QStringLiteral("資料夾分析完成");
+    if (key == QStringLiteral("正在資料夾分析")) return en ? QStringLiteral("Folder analyzing") : QStringLiteral("正在資料夾分析");
     if (key == QStringLiteral("在資料夾中顯示")) return en ? QStringLiteral("Reveal in Folder") : QStringLiteral("在資料夾中顯示");
     if (key == QStringLiteral("刪除")) return en ? QStringLiteral("Delete") : QStringLiteral("刪除");
     if (key == QStringLiteral("新的檔名：")) return en ? QStringLiteral("New filename:") : QStringLiteral("新的檔名：");
+
+    if (key == QStringLiteral("預設分類 (System Tags)")) return en ? QStringLiteral("System Tags") : QStringLiteral("預設分類 (System Tags)");
+    if (key == QStringLiteral("AI 標籤 (AI Tags)")) return en ? QStringLiteral("AI Tags") : QStringLiteral("AI 標籤 (AI Tags)");
+
+    if (key == QStringLiteral("停止")) return en ? QStringLiteral("Stop") : QStringLiteral("停止");
+    if (key == QStringLiteral("已停止資料夾分析")) return en ? QStringLiteral("Folder analysis stopped") : QStringLiteral("已停止資料夾分析");
+
+    if (key == QStringLiteral("合併標籤至...")) return en ? QStringLiteral("Merge Tag into...") : QStringLiteral("合併標籤至...");
+    if (key == QStringLiteral("選擇目標標籤:")) return en ? QStringLiteral("Choose target tag:") : QStringLiteral("選擇目標標籤:");
     if (key == QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？")) {
         return en ? QStringLiteral("The current folder contains too many files (total %1). Rendering the full graph may be cluttered or slow. Show only core tags and the first 50 related files?")
                   : QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？");

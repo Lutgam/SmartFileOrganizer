@@ -4,6 +4,7 @@
 #include <iostream>
 #include <QDebug>
 #include <QMutexLocker>
+#include <QRegularExpression>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -64,22 +65,18 @@ QString TagManager::normalizeTag(const QString &tag) const {
     };
 
     // Preserve standardized AI prefix, normalize only the payload.
-    // Accept existing variants like "[ai]" / "[AI]" / "[Ai]".
-    const QString lower = t.toLower();
-    const QString aiPrefixLower = QStringLiteral("[ai]");
-    if (lower.startsWith(aiPrefixLower)) {
-        QString rest = t.mid(aiPrefixLower.size()).trimmed();
-        rest = rest.toLower();
+    // Avoid hard-coded slicing; use regex capture for safety.
+    const QRegularExpression aiRe(QStringLiteral("^\\s*\\[ai\\]\\s*(.*)$"), QRegularExpression::CaseInsensitiveOption);
+    const auto m = aiRe.match(t);
+    if (m.hasMatch()) {
+        QString rest = m.captured(1).trimmed().toLower();
         const QString mapped = resolveSynonym(rest);
-        if (!mapped.isEmpty()) {
-            // Merge into system preset tag: do NOT keep [AI] prefix
-            return mapped;
-        }
+        if (!mapped.isEmpty()) return mapped; // merge into system preset tag
         if (rest.isEmpty()) return QString();
         return QStringLiteral("[AI] ") + rest;
     }
 
-    const QString mapped = resolveSynonym(lower);
+    const QString mapped = resolveSynonym(t.toLower());
     if (!mapped.isEmpty()) return mapped;
     return t.toLower();
 }
@@ -184,6 +181,39 @@ void TagManager::deleteTag(const QString& tag) {
         }
         saveTags();
     }
+}
+
+void TagManager::mergeTag(const QString& oldTag, const QString& newTag) {
+    QMutexLocker locker(&m_mutex);
+    const QString nOld = normalizeTag(oldTag);
+    const QString nNew = normalizeTag(newTag);
+    if (nOld.isEmpty() || nNew.isEmpty()) return;
+    if (nOld == nNew) return;
+
+    auto it = m_tagToFilePaths.find(nOld);
+    if (it == m_tagToFilePaths.end()) return;
+
+    const std::set<QString> files = it->second; // copy
+    for (const QString &fp : files) {
+        // remove old
+        if (m_fileToTags.count(fp)) {
+            m_fileToTags[fp].erase(nOld);
+            m_fileToTags[fp].insert(nNew);
+        } else {
+            m_fileToTags[fp].insert(nNew);
+        }
+        m_tagToFilePaths[nNew].insert(fp);
+    }
+
+    // remove old tag mapping entirely
+    m_tagToFilePaths.erase(nOld);
+
+    // Remove from rejected tags if present (optional hygiene)
+    if (m_rejectedTags.count(nOld)) {
+        m_rejectedTags.erase(nOld);
+    }
+
+    saveTags();
 }
 
 std::vector<std::pair<QString, QString>> TagManager::taggedFilesWithPrimaryTag() const {

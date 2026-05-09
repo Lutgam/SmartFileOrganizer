@@ -121,6 +121,12 @@ static const QString kTagAudio = QStringLiteral("🎵 音檔");
 
 static QString normalizeDisplayTag(const QString &t) {
     const QString s = t.trimmed();
+    // Merge legacy plain system tags into canonical emoji+zh tags
+    if (s == QStringLiteral("圖片")) return kTagImage;
+    if (s == QStringLiteral("影片")) return kTagVideo;
+    if (s == QStringLiteral("文件")) return kTagDoc;
+    if (s == QStringLiteral("音檔") || s == QStringLiteral("音訊")) return kTagAudio;
+
     if (s == QStringLiteral("🖼️圖片") || s == kTagImage) return kTagImage;
     if (s == QStringLiteral("🎬影片") || s == kTagVideo) return kTagVideo;
     if (s == QStringLiteral("📄文件") || s == kTagDoc) return kTagDoc;
@@ -512,16 +518,24 @@ void MainWindow::updateAllTexts() {
     }
 
     // Re-render tag list display names (system tags need presentation translation)
-    if (tagListWidget) {
+    if (m_tagTabWidget && m_systemTagListWidget && m_aiTagListWidget) {
+        m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_systemTagListWidget), lm.getText(QStringLiteral("預設分類 (System Tags)")));
+        m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_aiTagListWidget), lm.getText(QStringLiteral("AI 標籤 (AI Tags)")));
+    }
+
+    auto *activeList = m_systemTagListWidget;
+    if (m_tagTabWidget && m_tagTabWidget->currentIndex() == 1) activeList = m_aiTagListWidget;
+
+    if (activeList) {
         const QString allFilesText = lm.getText(QStringLiteral("All Files"));
-        if (tagListWidget->count() > 0) {
-            auto *it0 = tagListWidget->item(0);
+        if (activeList->count() > 0) {
+            auto *it0 = activeList->item(0);
             if (it0 && it0->data(Qt::UserRole).toString() == QStringLiteral("ALL")) {
                 it0->setText(allFilesText);
             }
         }
-        for (int i = 0; i < tagListWidget->count(); ++i) {
-            auto *it = tagListWidget->item(i);
+        for (int i = 0; i < activeList->count(); ++i) {
+            auto *it = activeList->item(i);
             if (!it) continue;
             const QString role = it->data(Qt::UserRole).toString();
             if (role == QStringLiteral("ALL")) continue;
@@ -566,7 +580,8 @@ void MainWindow::updateAllTexts() {
         btnLoadAll->setText(lm.getText(QStringLiteral("載入全部")));
     }
 
-    if (btnBatchAnalyze) btnBatchAnalyze->setText(lm.getText(QStringLiteral("批次分析")));
+    if (btnBatchAnalyze) btnBatchAnalyze->setText(lm.getText(QStringLiteral("資料夾分析")));
+    if (btnStopBatchAnalyze) btnStopBatchAnalyze->setText(lm.getText(QStringLiteral("停止")));
 
     if (m_lblSummaryTitle) m_lblSummaryTitle->setText(lm.getText(QStringLiteral("AI 智慧摘要")));
     if (m_aiSummaryEdit) {
@@ -626,10 +641,16 @@ void MainWindow::setupFourColumnLayout() {
     tagsHeader->addWidget(chkRecursive);
     tagsLayout->addLayout(tagsHeader);
 
-    tagListWidget = new QListWidget(this);
-    tagListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(tagListWidget, &QListWidget::itemClicked, this, &MainWindow::onTagSelected);
-    tagsLayout->addWidget(tagListWidget);
+    m_tagTabWidget = new QTabWidget(this);
+    m_systemTagListWidget = new QListWidget(this);
+    m_aiTagListWidget = new QListWidget(this);
+    m_systemTagListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_aiTagListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_systemTagListWidget, &QListWidget::itemClicked, this, &MainWindow::onTagSelected);
+    connect(m_aiTagListWidget, &QListWidget::itemClicked, this, &MainWindow::onTagSelected);
+    m_tagTabWidget->addTab(m_systemTagListWidget, LanguageManager::instance().getText(QStringLiteral("預設分類 (System Tags)")));
+    m_tagTabWidget->addTab(m_aiTagListWidget, LanguageManager::instance().getText(QStringLiteral("AI 標籤 (AI Tags)")));
+    tagsLayout->addWidget(m_tagTabWidget);
 
     auto *tagButtons = new QHBoxLayout();
     btnLeftAddTag = new QPushButton(QStringLiteral("➕"), this);
@@ -827,13 +848,57 @@ void MainWindow::setupFourColumnLayout() {
     previewLayout->addWidget(m_aiSummaryEdit);
 
     // ===== Batch analyze controls =====
-    btnBatchAnalyze = new QPushButton(QStringLiteral("批次分析"), this);
+    auto *batchRow = new QHBoxLayout();
+    btnBatchAnalyze = new QPushButton(QStringLiteral("資料夾分析"), this);
     connect(btnBatchAnalyze, &QPushButton::clicked, this, [this]() { startBatchAnalysis(); });
-    previewLayout->addWidget(btnBatchAnalyze);
+    batchRow->addWidget(btnBatchAnalyze);
+
+    btnStopBatchAnalyze = new QPushButton(QStringLiteral("停止"), this);
+    btnStopBatchAnalyze->setEnabled(false);
+    connect(btnStopBatchAnalyze, &QPushButton::clicked, this, [this]() {
+        // Abort current inference and stop the queue.
+        cancelFlag.store(true);
+        m_analysisQueue.clear();
+        // Default behavior: apply completed results before stopping.
+        flushPendingBatchResults();
+        m_totalBatchSize = 0;
+        m_isBatchMode = false;
+        m_currentAnalyzingFile.clear();
+        if (batchProgressBar) batchProgressBar->setVisible(false);
+        if (lblBatchStatus) lblBatchStatus->setVisible(false);
+        if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
+        if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
+        if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
+        // Refresh once so UI reflects applied results.
+        updateTagList();
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("已停止資料夾分析")));
+    });
+    batchRow->addWidget(btnStopBatchAnalyze);
+    batchRow->addStretch(1);
+    previewLayout->addLayout(batchRow);
 
     batchProgressBar = new QProgressBar(this);
     batchProgressBar->setVisible(false);
     batchProgressBar->setTextVisible(true);
+    batchProgressBar->setFixedHeight(24);
+    batchProgressBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    batchProgressBar->setFormat(QStringLiteral("%p%"));
+    batchProgressBar->setAlignment(Qt::AlignCenter);
+    // Ensure visible on dark backgrounds (macOS can be subtle at 0%).
+    batchProgressBar->setStyleSheet(QStringLiteral(
+        "QProgressBar {"
+        "  border: 1px solid rgba(255,255,255,70);"
+        "  border-radius: 8px;"
+        "  background: rgba(255,255,255,10);"
+        "  padding: 2px;"               /* inner gap between border and fill */
+        "  color: rgba(255,255,255,230);"
+        "  font-weight: 600;"
+        "}"
+        "QProgressBar::chunk {"
+        "  background: #2b6cb0;"
+        "  border-radius: 6px;"
+        "  margin: 0px;"                /* keep fill flush within padded area */
+        "}"));
     previewLayout->addWidget(batchProgressBar);
 
     lblBatchStatus = new QLabel(QString(), this);
@@ -915,8 +980,13 @@ void MainWindow::setupFourColumnLayout() {
 }
 
 void MainWindow::setupContextMenus() {
-    connect(tagListWidget, &QListWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
-        QListWidgetItem *it = tagListWidget->itemAt(pos);
+    auto *systemList = m_systemTagListWidget;
+    auto *aiList = m_aiTagListWidget;
+    if (!systemList || !aiList) return;
+
+    auto attachMenu = [this](QListWidget *list) {
+        connect(list, &QListWidget::customContextMenuRequested, this, [this, list](const QPoint &pos) {
+            QListWidgetItem *it = list->itemAt(pos);
         if (!it) return;
         if (it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) return;
 
@@ -924,9 +994,11 @@ void MainWindow::setupContextMenus() {
         if (rawTag.isEmpty()) return;
 
         QMenu menu(this);
-        QAction *actRename = menu.addAction(QStringLiteral("重新命名"));
-        QAction *actDelete = menu.addAction(QStringLiteral("刪除（全域）"));
-        QAction *chosen = menu.exec(tagListWidget->mapToGlobal(pos));
+        auto &lm = LanguageManager::instance();
+        QAction *actRename = menu.addAction(lm.getText(QStringLiteral("重新命名")));
+        QAction *actDelete = menu.addAction(lm.getText(QStringLiteral("刪除（全域）")));
+        QAction *actMerge = menu.addAction(lm.getText(QStringLiteral("合併標籤至...")));
+            QAction *chosen = menu.exec(list->mapToGlobal(pos));
         if (!chosen) return;
 
         if (chosen == actRename) {
@@ -936,6 +1008,39 @@ void MainWindow::setupContextMenus() {
             QMutexLocker locker(&tagMutex);
             tagManager.renameTag(rawTag, newTag);
             tagManager.saveTags();
+        } else if (chosen == actMerge) {
+            // Pick a target tag (exclude current)
+            std::vector<QString> all;
+            {
+                QMutexLocker locker(&tagMutex);
+                all = tagManager.getAllTags();
+            }
+            QStringList items;
+            items.reserve(static_cast<int>(all.size()));
+            for (const auto &t : all) {
+                if (t == rawTag) continue;
+                items << t;
+            }
+            items.removeDuplicates();
+            items.sort(Qt::CaseInsensitive);
+            if (items.isEmpty()) return;
+
+            bool ok = false;
+            const QString target = QInputDialog::getItem(
+                this,
+                lm.getText(QStringLiteral("合併標籤至...")),
+                lm.getText(QStringLiteral("選擇目標標籤:")),
+                items,
+                0,
+                false,
+                &ok);
+            if (!ok || target.trimmed().isEmpty()) return;
+
+            {
+                QMutexLocker locker(&tagMutex);
+                tagManager.mergeTag(rawTag, target);
+                tagManager.saveTags();
+            }
         } else if (chosen == actDelete) {
             QMutexLocker locker(&tagMutex);
             tagManager.deleteTag(rawTag);
@@ -945,7 +1050,11 @@ void MainWindow::setupContextMenus() {
         activeVirtualTag.clear();
         updateTagList();
         scanFiles();
-    });
+        });
+    };
+
+    attachMenu(systemList);
+    attachMenu(aiList);
 
 }
 
@@ -1659,35 +1768,44 @@ void MainWindow::renderFileListBatch(int count) {
 }
 
 void MainWindow::updateTagListCountsOnly() {
-    for (int i = 0; i < tagListWidget->count(); ++i) {
-        QListWidgetItem *it = tagListWidget->item(i);
-        if (!it) continue;
-        const QString role = it->data(Qt::UserRole).toString();
-        if (role == QStringLiteral("ALL")) continue;
-        const QString canon = normalizeDisplayTag(role);
-        int n = 0;
-        {
-            QMutexLocker locker(&tagMutex);
-            n = static_cast<int>(tagManager.getFilesByTag(canon).size());
+    auto updateList = [this](QListWidget *list) {
+        if (!list) return;
+        for (int i = 0; i < list->count(); ++i) {
+            QListWidgetItem *it = list->item(i);
+            if (!it) continue;
+            const QString role = it->data(Qt::UserRole).toString();
+            if (role == QStringLiteral("ALL")) continue;
+            const QString canon = normalizeDisplayTag(role);
+            int n = 0;
+            {
+                QMutexLocker locker(&tagMutex);
+                n = static_cast<int>(tagManager.getFilesByTag(canon).size());
+            }
+            const QString baseZh = systemTagBaseZh(canon);
+            const QString emoji = systemTagEmojiPrefix(canon);
+            const QString displayName = baseZh.isEmpty()
+                                            ? canon
+                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+            it->setText(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n));
+            it->setData(Qt::UserRole, canon);
+            it->setData(Qt::UserRole + 1, n);
+            it->setData(Qt::UserRole + 2, baseZh);
         }
-        const QString baseZh = systemTagBaseZh(canon);
-        const QString emoji = systemTagEmojiPrefix(canon);
-        const QString displayName = baseZh.isEmpty()
-                                        ? canon
-                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-        it->setText(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n));
-        it->setData(Qt::UserRole, canon);          // keep internal tag for TagManager
-        it->setData(Qt::UserRole + 1, n);          // count
-        it->setData(Qt::UserRole + 2, baseZh);     // base zh for translation (if any)
-    }
+    };
+
+    updateList(m_systemTagListWidget);
+    updateList(m_aiTagListWidget);
     syncTagFilterFromTagList();
 }
 
 void MainWindow::updateTagList() {
-    tagListWidget->clear();
+    if (m_systemTagListWidget) m_systemTagListWidget->clear();
+    if (m_aiTagListWidget) m_aiTagListWidget->clear();
 
-    auto *allItem = new QListWidgetItem(LanguageManager::instance().getText(QStringLiteral("All Files")), tagListWidget);
-    allItem->setData(Qt::UserRole, QStringLiteral("ALL"));
+    if (m_systemTagListWidget) {
+        auto *allItem = new QListWidgetItem(LanguageManager::instance().getText(QStringLiteral("All Files")), m_systemTagListWidget);
+        allItem->setData(Qt::UserRole, QStringLiteral("ALL"));
+    }
 
     std::vector<QString> rawTags;
     {
@@ -1712,7 +1830,21 @@ void MainWindow::updateTagList() {
     for (const QString &d : defaults) keys.insert(normalizeDisplayTag(d));
 
     QList<QString> ordered = keys.values();
-    std::sort(ordered.begin(), ordered.end(), [](const QString &a, const QString &b) {
+    std::sort(ordered.begin(), ordered.end(), [this, &normToFiles](const QString &a, const QString &b) {
+        const bool aAi = a.trimmed().toLower().startsWith(QStringLiteral("[ai]"));
+        const bool bAi = b.trimmed().toLower().startsWith(QStringLiteral("[ai]"));
+
+        // Frequency sorting for AI tags: count desc, then name
+        if (aAi && bAi) {
+            const int na = normToFiles.count(a) ? static_cast<int>(normToFiles[a].size())
+                                                : static_cast<int>(tagManager.getFilesByTag(a).size());
+            const int nb = normToFiles.count(b) ? static_cast<int>(normToFiles[b].size())
+                                                : static_cast<int>(tagManager.getFilesByTag(b).size());
+            if (na != nb) return na > nb;
+            return a.localeAwareCompare(b) < 0;
+        }
+        // Keep system tags before AI tags (stable UX)
+        if (aAi != bAi) return !aAi;
         return a.localeAwareCompare(b) < 0;
     });
 
@@ -1728,10 +1860,13 @@ void MainWindow::updateTagList() {
         const QString displayName = baseZh.isEmpty()
                                         ? canon
                                         : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-        auto *it = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n), tagListWidget);
-        it->setData(Qt::UserRole, canon);      // internal/original tag
-        it->setData(Qt::UserRole + 1, n);      // count
-        it->setData(Qt::UserRole + 2, baseZh); // base zh (optional)
+        const bool isAi = canon.trimmed().toLower().startsWith(QStringLiteral("[ai]"));
+        QListWidget *target = isAi ? m_aiTagListWidget : m_systemTagListWidget;
+        if (!target) continue;
+        auto *it = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n), target);
+        it->setData(Qt::UserRole, canon);
+        it->setData(Qt::UserRole + 1, n);
+        it->setData(Qt::UserRole + 2, baseZh);
     }
 
     syncTagFilterFromTagList();
@@ -1743,20 +1878,25 @@ void MainWindow::syncTagFilterFromTagList() {
     cmbTagFilter->blockSignals(true);
     cmbTagFilter->clear();
     cmbTagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("All Files")), QStringLiteral("ALL"));
-    for (int i = 0; i < tagListWidget->count(); ++i) {
-        const auto *it = tagListWidget->item(i);
-        if (!it) continue;
-        if (it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) continue;
-        const QString rawTag = it->data(Qt::UserRole).toString();
-        if (rawTag.isEmpty()) continue;
-        const QString baseZh = it->data(Qt::UserRole + 2).toString();
-        const QString canon = normalizeDisplayTag(rawTag);
-        const QString emoji = systemTagEmojiPrefix(canon);
-        const QString displayName = baseZh.isEmpty()
-                                        ? canon
-                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-        cmbTagFilter->addItem(displayName.trimmed(), rawTag);
-    }
+    auto addFromList = [this](QListWidget *list) {
+        if (!list) return;
+        for (int i = 0; i < list->count(); ++i) {
+            const auto *it = list->item(i);
+            if (!it) continue;
+            if (it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) continue;
+            const QString rawTag = it->data(Qt::UserRole).toString();
+            if (rawTag.isEmpty()) continue;
+            const QString baseZh = it->data(Qt::UserRole + 2).toString();
+            const QString canon = normalizeDisplayTag(rawTag);
+            const QString emoji = systemTagEmojiPrefix(canon);
+            const QString displayName = baseZh.isEmpty()
+                                            ? canon
+                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+            cmbTagFilter->addItem(displayName.trimmed(), rawTag);
+        }
+    };
+    addFromList(m_systemTagListWidget);
+    addFromList(m_aiTagListWidget);
     const int idx = cmbTagFilter->findData(prevData);
     cmbTagFilter->setCurrentIndex(idx >= 0 ? idx : 0);
     cmbTagFilter->blockSignals(false);
@@ -1765,22 +1905,30 @@ void MainWindow::syncTagFilterFromTagList() {
 void MainWindow::syncTagListFromTagFilter() {
     const QString selected = cmbTagFilter->currentData().toString();
     if (selected == QStringLiteral("ALL") || selected.isEmpty()) {
-        for (int i = 0; i < tagListWidget->count(); ++i) {
-            auto *it = tagListWidget->item(i);
-            if (it && it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) {
-                tagListWidget->setCurrentItem(it);
-                break;
+        if (m_systemTagListWidget) {
+            for (int i = 0; i < m_systemTagListWidget->count(); ++i) {
+                auto *it = m_systemTagListWidget->item(i);
+                if (it && it->data(Qt::UserRole).toString() == QStringLiteral("ALL")) {
+                    m_systemTagListWidget->setCurrentItem(it);
+                    break;
+                }
             }
         }
         return;
     }
-    for (int i = 0; i < tagListWidget->count(); ++i) {
-        auto *it = tagListWidget->item(i);
-        if (it && it->data(Qt::UserRole).toString() == selected) {
-            tagListWidget->setCurrentItem(it);
-            break;
+    auto selectIn = [&](QListWidget *list) {
+        if (!list) return false;
+        for (int i = 0; i < list->count(); ++i) {
+            auto *it = list->item(i);
+            if (it && it->data(Qt::UserRole).toString() == selected) {
+                list->setCurrentItem(it);
+                return true;
+            }
         }
-    }
+        return false;
+    };
+    if (selectIn(m_systemTagListWidget)) return;
+    (void)selectIn(m_aiTagListWidget);
 }
 
 void MainWindow::filterFiles() {
@@ -2080,7 +2228,8 @@ void MainWindow::setUiBusy(bool busy) {
     btnSaveTags->setEnabled(!busy && btnSaveTags->isEnabled());
     fileList->setEnabled(!busy);
     folderTree->setEnabled(!busy);
-    tagListWidget->setEnabled(!busy);
+    if (m_systemTagListWidget) m_systemTagListWidget->setEnabled(!busy);
+    if (m_aiTagListWidget) m_aiTagListWidget->setEnabled(!busy);
     cmbTagFilter->setEnabled(!busy);
     txtSearch->setEnabled(!busy);
     cmbSort->setEnabled(!busy);
@@ -2250,15 +2399,20 @@ void MainWindow::startBatchAnalysis() {
         batchProgressBar->setValue(0);
         batchProgressBar->setFormat(QStringLiteral("%p%"));
         batchProgressBar->setVisible(true);
+        batchProgressBar->show();
+        batchProgressBar->update();
+        batchProgressBar->repaint();
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     }
     if (lblBatchStatus) {
         lblBatchStatus->setVisible(true);
-        lblBatchStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在批次分析")));
+        lblBatchStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在資料夾分析")));
     }
 
     // Only protect against re-entry; keep the rest of the UI interactive.
     if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(false);
     if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(false);
+    if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(true);
 
     processNextInQueue();
 }
@@ -2278,6 +2432,7 @@ void MainWindow::processNextInQueue() {
 
         // Restore UI
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
+        if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
         if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
 
         // Refresh once at end for UI correctness
@@ -2286,8 +2441,8 @@ void MainWindow::processNextInQueue() {
         else populateVirtualTagFiles(activeVirtualTag);
 
         QMessageBox::information(this,
-                                 LanguageManager::instance().getText(QStringLiteral("批次分析")),
-                                 LanguageManager::instance().getText(QStringLiteral("批次分析完成")));
+                                 LanguageManager::instance().getText(QStringLiteral("資料夾分析")),
+                                 LanguageManager::instance().getText(QStringLiteral("資料夾分析完成")));
         return;
     }
 
@@ -2295,7 +2450,7 @@ void MainWindow::processNextInQueue() {
     const int nowDone = m_totalBatchSize - m_analysisQueue.size();
     if (lblBatchStatus) {
         lblBatchStatus->setText(QStringLiteral("%1: %2 (%3/%4)")
-                                    .arg(LanguageManager::instance().getText(QStringLiteral("正在批次分析")))
+                                    .arg(LanguageManager::instance().getText(QStringLiteral("正在資料夾分析")))
                                     .arg(QFileInfo(nextFile).fileName())
                                     .arg(nowDone)
                                     .arg(m_totalBatchSize));
@@ -2572,7 +2727,12 @@ void MainWindow::removeTag() {
 }
 
 void MainWindow::removeGlobalTag() {
-    const auto selected = tagListWidget->selectedItems();
+    QList<QListWidgetItem*> selected;
+    if (m_tagTabWidget && m_tagTabWidget->currentIndex() == 1) {
+        if (m_aiTagListWidget) selected = m_aiTagListWidget->selectedItems();
+    } else {
+        if (m_systemTagListWidget) selected = m_systemTagListWidget->selectedItems();
+    }
     if (selected.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇標籤"));
         return;
