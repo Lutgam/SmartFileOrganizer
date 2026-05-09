@@ -481,11 +481,12 @@ void MainWindow::updateAllTexts() {
             lblPreviewImage->setText(lm.getText(QStringLiteral("選擇檔案以預覽")));
         }
     }
-    if (grpTagManagement) grpTagManagement->setTitle(lm.getText(QStringLiteral("標籤管理")));
-    if (grpFileOperations) grpFileOperations->setTitle(lm.getText(QStringLiteral("檔案操作")));
-    if (btnRenameFile) btnRenameFile->setText(lm.getText(QStringLiteral("重新命名")));
-    if (btnDeleteFile) btnDeleteFile->setText(lm.getText(QStringLiteral("刪除檔案")));
-    if (btnRevealFile) btnRevealFile->setText(lm.getText(QStringLiteral("開啟位置")));
+    if (m_previewTabWidget && m_previewTagTab) {
+        m_previewTabWidget->setTabText(m_previewTabWidget->indexOf(m_previewTagTab), lm.getText(QStringLiteral("標籤管理")));
+    }
+    if (m_previewTabWidget && m_previewOpsTab) {
+        m_previewTabWidget->setTabText(m_previewTabWidget->indexOf(m_previewOpsTab), lm.getText(QStringLiteral("檔案操作")));
+    }
 
     if (cmbSort) {
         const int idx = cmbSort->currentIndex();
@@ -564,6 +565,8 @@ void MainWindow::updateAllTexts() {
     if (btnLoadAll) {
         btnLoadAll->setText(lm.getText(QStringLiteral("載入全部")));
     }
+
+    if (btnBatchAnalyze) btnBatchAnalyze->setText(lm.getText(QStringLiteral("批次分析")));
 
     if (m_lblSummaryTitle) m_lblSummaryTitle->setText(lm.getText(QStringLiteral("AI 智慧摘要")));
     if (m_aiSummaryEdit) {
@@ -823,9 +826,29 @@ void MainWindow::setupFourColumnLayout() {
     m_aiSummaryEdit->setPlaceholderText(QStringLiteral("尚未分析"));
     previewLayout->addWidget(m_aiSummaryEdit);
 
-    // ===== Group 1: Tag management =====
-    grpTagManagement = new QGroupBox(QStringLiteral("標籤管理"), this);
-    auto *tagGroupLayout = new QVBoxLayout(grpTagManagement);
+    // ===== Batch analyze controls =====
+    btnBatchAnalyze = new QPushButton(QStringLiteral("批次分析"), this);
+    connect(btnBatchAnalyze, &QPushButton::clicked, this, [this]() { startBatchAnalysis(); });
+    previewLayout->addWidget(btnBatchAnalyze);
+
+    batchProgressBar = new QProgressBar(this);
+    batchProgressBar->setVisible(false);
+    batchProgressBar->setTextVisible(true);
+    previewLayout->addWidget(batchProgressBar);
+
+    lblBatchStatus = new QLabel(QString(), this);
+    lblBatchStatus->setVisible(false);
+    lblBatchStatus->setWordWrap(true);
+    previewLayout->addWidget(lblBatchStatus);
+
+    // ===== Tabbed controls (Tag Management / File Operations) =====
+    m_previewTabWidget = new QTabWidget(this);
+    m_previewTagTab = new QWidget(this);
+    m_previewOpsTab = new QWidget(this);
+    m_previewTabWidget->addTab(m_previewTagTab, QStringLiteral("標籤管理"));
+    m_previewTabWidget->addTab(m_previewOpsTab, QStringLiteral("檔案操作"));
+
+    auto *tagGroupLayout = new QVBoxLayout(m_previewTagTab);
 
     auto *tagRow1 = new QHBoxLayout();
     btnSaveTags = new QPushButton(QStringLiteral("💾 儲存"), this);
@@ -849,12 +872,9 @@ void MainWindow::setupFourColumnLayout() {
     btnAddExistingTag = new QPushButton(QStringLiteral("🏷️ 加入現有標籤"), this);
     tagGroupLayout->addWidget(btnAddExistingTag);
     rebuildAddExistingTagMenu();
+    tagGroupLayout->addStretch(1);
 
-    previewLayout->addWidget(grpTagManagement);
-
-    // ===== Group 2: File operations =====
-    grpFileOperations = new QGroupBox(QStringLiteral("檔案操作"), this);
-    auto *fileGroupLayout = new QVBoxLayout(grpFileOperations);
+    auto *fileGroupLayout = new QVBoxLayout(m_previewOpsTab);
 
     auto *analysisRow = new QHBoxLayout();
     btnAnalyzeFile = new QPushButton(QStringLiteral("✨ 分析"), this);
@@ -868,19 +888,6 @@ void MainWindow::setupFourColumnLayout() {
     analysisRow->addStretch(1);
     fileGroupLayout->addLayout(analysisRow);
 
-    auto *fileOpsRow = new QHBoxLayout();
-    btnRenameFile = new QPushButton(QStringLiteral("重新命名"), this);
-    btnDeleteFile = new QPushButton(QStringLiteral("刪除檔案"), this);
-    btnRevealFile = new QPushButton(QStringLiteral("開啟位置"), this);
-    connect(btnRenameFile, &QPushButton::clicked, this, &MainWindow::renameCurrentFile);
-    connect(btnDeleteFile, &QPushButton::clicked, this, &MainWindow::deleteCurrentFile);
-    connect(btnRevealFile, &QPushButton::clicked, this, &MainWindow::revealCurrentFile);
-    fileOpsRow->addWidget(btnRenameFile);
-    fileOpsRow->addWidget(btnDeleteFile);
-    fileOpsRow->addWidget(btnRevealFile);
-    fileOpsRow->addStretch(1);
-    fileGroupLayout->addLayout(fileOpsRow);
-
     auto *archiveRow = new QHBoxLayout();
     btnPhysicalArchive = new QPushButton(QStringLiteral("實體歸檔 (依標籤)"), this);
     connect(btnPhysicalArchive, &QPushButton::clicked, this, &MainWindow::physicalArchiveFiles);
@@ -892,8 +899,9 @@ void MainWindow::setupFourColumnLayout() {
     archiveRow->addWidget(btnUndoPhysicalArchive);
     archiveRow->addStretch(1);
     fileGroupLayout->addLayout(archiveRow);
+    fileGroupLayout->addStretch(1);
 
-    previewLayout->addWidget(grpFileOperations);
+    previewLayout->addWidget(m_previewTabWidget);
 
     previewLayout->addStretch(1);
     mainSplitter->addWidget(previewPanel);
@@ -971,10 +979,11 @@ void MainWindow::showFileContextMenu(const QPoint &pos) {
 
     // 4. 建立並配置右鍵選單
     QMenu menu(this);
-    QAction *actRename = menu.addAction(QStringLiteral("重新命名"));
-    QAction *actDelete = menu.addAction(QStringLiteral("刪除"));
+    auto &lm = LanguageManager::instance();
+    QAction *actRename = menu.addAction(lm.getText(QStringLiteral("重新命名")));
+    QAction *actDelete = menu.addAction(lm.getText(QStringLiteral("刪除")));
     menu.addSeparator();
-    QAction *actReveal = menu.addAction(QStringLiteral("在資料夾中顯示"));
+    QAction *actReveal = menu.addAction(lm.getText(QStringLiteral("在資料夾中顯示")));
 
     // 5. 將 Viewport 座標轉換為全域螢幕座標並阻塞執行
     QAction *chosen = menu.exec(fileList->viewport()->mapToGlobal(pos));
@@ -991,8 +1000,8 @@ void MainWindow::showFileContextMenu(const QPoint &pos) {
 
         const QString newName = QInputDialog::getText(
                                     this,
-                                    QStringLiteral("重新命名"),
-                                    QStringLiteral("新的檔名："),
+                                    lm.getText(QStringLiteral("重新命名")),
+                                    lm.getText(QStringLiteral("新的檔名：")),
                                     QLineEdit::Normal,
                                     oldName,
                                     &ok)
@@ -1057,154 +1066,7 @@ void MainWindow::showFileContextMenu(const QPoint &pos) {
     }
 }
 
-void MainWindow::renameCurrentFile() {
-    const QString filePath = currentFilePath();
-    if (filePath.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("重新命名"), QStringLiteral("請先選取要重新命名的檔案。"));
-        return;
-    }
-
-    const QFileInfo oldInfo(filePath);
-    const QString oldName = oldInfo.fileName();
-    const QString oldBaseName = oldInfo.completeBaseName();
-    const QString oldSuffix = oldInfo.suffix();
-
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("重新命名"));
-
-    auto *root = new QVBoxLayout(&dialog);
-
-    auto *inputRow = new QHBoxLayout();
-    auto *nameEdit = new QLineEdit(&dialog);
-    auto *suffixLabel = new QLabel(&dialog);
-
-    nameEdit->setText(oldBaseName);
-    suffixLabel->setText(oldSuffix.isEmpty() ? QString() : QStringLiteral(".%1").arg(oldSuffix));
-    suffixLabel->setVisible(!oldSuffix.isEmpty());
-
-    inputRow->addWidget(nameEdit, 1);
-    inputRow->addWidget(suffixLabel);
-    root->addLayout(inputRow);
-
-    auto *chkEditSuffix = new QCheckBox(QStringLiteral("修改副檔名"), &dialog);
-    chkEditSuffix->setChecked(false);
-    root->addWidget(chkEditSuffix);
-
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    root->addWidget(buttons);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-
-    QObject::connect(chkEditSuffix, &QCheckBox::toggled, &dialog, [=](bool checked) {
-        if (checked) {
-            nameEdit->setText(oldName);
-            suffixLabel->setVisible(false);
-        } else {
-            const QString current = nameEdit->text().trimmed();
-            QString base = current;
-            if (!oldSuffix.isEmpty()) {
-                const QString dotExt = QStringLiteral(".%1").arg(oldSuffix);
-                if (base.endsWith(dotExt, Qt::CaseInsensitive)) {
-                    base.chop(dotExt.size());
-                } else {
-                    const int lastDot = base.lastIndexOf('.');
-                    if (lastDot > 0) base = base.left(lastDot);
-                }
-            } else {
-                const int lastDot = base.lastIndexOf('.');
-                if (lastDot > 0) base = base.left(lastDot);
-            }
-
-            nameEdit->setText(base);
-            suffixLabel->setText(oldSuffix.isEmpty() ? QString() : QStringLiteral(".%1").arg(oldSuffix));
-            suffixLabel->setVisible(!oldSuffix.isEmpty());
-        }
-    });
-
-    nameEdit->selectAll();
-    nameEdit->setFocus();
-
-    if (dialog.exec() != QDialog::Accepted) return;
-
-    const bool editSuffix = chkEditSuffix->isChecked();
-    const QString userText = nameEdit->text().trimmed();
-    if (userText.isEmpty()) return;
-
-    QString finalName;
-    if (!editSuffix && !oldSuffix.isEmpty()) {
-        finalName = userText + QStringLiteral(".") + oldSuffix;
-    } else {
-        finalName = userText;
-    }
-
-    if (finalName.isEmpty() || finalName == oldName) return;
-
-    const QString newPath = oldInfo.dir().filePath(finalName);
-    if (QFileInfo::exists(newPath)) {
-        QMessageBox::warning(this, QStringLiteral("重新命名失敗"), QStringLiteral("目標檔名已存在。"));
-        return;
-    }
-
-    if (!QFile::rename(filePath, newPath)) {
-        QMessageBox::warning(this, QStringLiteral("重新命名失敗"), QStringLiteral("檔案可能被占用或沒有權限。"));
-        return;
-    }
-
-    // 更新目前選取項目的顯示與資料綁定
-    if (auto *item = fileList ? fileList->currentItem() : nullptr) {
-        const QFileInfo newInfo(newPath);
-        item->setText(newInfo.fileName());
-        item->setData(Qt::UserRole, newPath);
-        if (fileListMode == FileListMode::VirtualTag) {
-            QString relativePath = QDir(rootPath).relativeFilePath(newInfo.absolutePath());
-            if (relativePath == QStringLiteral(".")) relativePath = QStringLiteral("根目錄");
-            item->setData(Qt::UserRole + 1, relativePath);
-        }
-        onFileSelected(item);
-    } else {
-        scanFiles();
-        sortFileList();
-    }
-}
-
-void MainWindow::deleteCurrentFile() {
-    const QString filePath = currentFilePath();
-    if (filePath.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("刪除"), QStringLiteral("請先選取要刪除的檔案。"));
-        return;
-    }
-
-    const int ret = QMessageBox::question(
-        this,
-        QStringLiteral("刪除確認"),
-        QStringLiteral("確定要刪除「%1」嗎？").arg(QFileInfo(filePath).fileName()),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (ret != QMessageBox::Yes) return;
-
-    QFile file(filePath);
-    bool removed = file.moveToTrash();
-    if (!removed) removed = file.remove();
-    if (!removed) {
-        QMessageBox::warning(this, QStringLiteral("刪除失敗"), QStringLiteral("檔案可能被鎖定或沒有權限。"));
-        return;
-    }
-
-    if (fileList) {
-        if (auto *item = fileList->currentItem()) {
-            delete fileList->takeItem(fileList->row(item));
-        }
-    }
-}
-
-void MainWindow::revealCurrentFile() {
-    const QString filePath = currentFilePath();
-    if (filePath.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("開啟位置"), QStringLiteral("請先選取檔案。"));
-        return;
-    }
-    QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(filePath).absolutePath()));
-}
+// File operation buttons (Rename/Delete/Reveal) were removed in favor of the right-click context menu.
 
 namespace {
 QString sanitizeTagFolderName(const QString &tag) {
@@ -2232,6 +2094,12 @@ void MainWindow::analyzeFile() {
         QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
         return;
     }
+    analyzeFileForPath(fp);
+}
+
+void MainWindow::analyzeFileForPath(const QString &absPath) {
+    const QString fp = QDir::cleanPath(absPath);
+    if (fp.isEmpty()) return;
 
     QFileInfo fi(fp);
     if (!isAnalyzableFile(fi)) {
@@ -2255,6 +2123,7 @@ void MainWindow::analyzeFile() {
     setUiBusy(true);
     lblStatus->setText(tr("Preparing…"));
 
+    m_currentAnalyzingFile = fp;
     const QString filename = fi.fileName();
     // IMPORTANT: Do NOT feed full historical tags into the prompt.
     // It causes "prompt contamination" where prior institution names get repeated.
@@ -2349,10 +2218,107 @@ void MainWindow::cancelAnalysis() {
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("取消中…")));
 }
 
+void MainWindow::startBatchAnalysis() {
+    if (m_isBatchMode) return;
+
+    m_analysisQueue.clear();
+    m_totalBatchSize = 0;
+
+    // Enqueue all files currently displayed in fileList
+    for (int i = 0; i < fileList->count(); ++i) {
+        auto *it = fileList->item(i);
+        if (!it) continue;
+        const QString absPath = it->data(Qt::UserRole).toString();
+        if (absPath.isEmpty()) continue;
+        QFileInfo fi(absPath);
+        if (!fi.exists() || !fi.isFile()) continue;
+        if (!isAnalyzableFile(fi)) continue;
+        m_analysisQueue.enqueue(QDir::cleanPath(absPath));
+    }
+
+    m_totalBatchSize = m_analysisQueue.size();
+    if (m_totalBatchSize <= 0) return;
+
+    m_isBatchMode = true;
+    if (batchProgressBar) {
+        batchProgressBar->setRange(0, m_totalBatchSize);
+        batchProgressBar->setValue(0);
+        batchProgressBar->setVisible(true);
+    }
+    if (lblBatchStatus) {
+        lblBatchStatus->setVisible(true);
+        lblBatchStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在批次分析")));
+    }
+
+    // Disable potentially interfering controls
+    if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(false);
+    if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(false);
+    if (folderTree) folderTree->setEnabled(false);
+    if (fileList) fileList->setEnabled(false);
+    if (tagListWidget) tagListWidget->setEnabled(false);
+    if (cmbTagFilter) cmbTagFilter->setEnabled(false);
+    if (txtSearch) txtSearch->setEnabled(false);
+    if (cmbSort) cmbSort->setEnabled(false);
+    if (btnHome) btnHome->setEnabled(false);
+    if (btnBack) btnBack->setEnabled(false);
+    if (btnForward) btnForward->setEnabled(false);
+
+    processNextInQueue();
+}
+
+void MainWindow::processNextInQueue() {
+    if (!m_isBatchMode) return;
+
+    const int done = m_totalBatchSize - m_analysisQueue.size();
+    if (batchProgressBar) batchProgressBar->setValue(done);
+
+    if (m_analysisQueue.isEmpty()) {
+        // Completed
+        m_isBatchMode = false;
+        m_currentAnalyzingFile.clear();
+        if (batchProgressBar) batchProgressBar->setVisible(false);
+        if (lblBatchStatus) lblBatchStatus->setVisible(false);
+
+        // Restore UI
+        if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
+        if (folderTree) folderTree->setEnabled(true);
+        if (fileList) fileList->setEnabled(true);
+        if (tagListWidget) tagListWidget->setEnabled(true);
+        if (cmbTagFilter) cmbTagFilter->setEnabled(true);
+        if (txtSearch) txtSearch->setEnabled(true);
+        if (cmbSort) cmbSort->setEnabled(true);
+        if (btnHome) btnHome->setEnabled(true);
+        syncNavigationButtons();
+
+        // Refresh once at end for UI correctness
+        updateTagList();
+        if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
+        else populateVirtualTagFiles(activeVirtualTag);
+
+        QMessageBox::information(this,
+                                 LanguageManager::instance().getText(QStringLiteral("批次分析")),
+                                 LanguageManager::instance().getText(QStringLiteral("批次分析完成")));
+        return;
+    }
+
+    const QString nextFile = m_analysisQueue.dequeue();
+    const int nowDone = m_totalBatchSize - m_analysisQueue.size();
+    if (batchProgressBar) batchProgressBar->setValue(nowDone - 1);
+    if (lblBatchStatus) {
+        lblBatchStatus->setText(QStringLiteral("%1: %2 (%3/%4)")
+                                    .arg(LanguageManager::instance().getText(QStringLiteral("正在批次分析")))
+                                    .arg(QFileInfo(nextFile).fileName())
+                                    .arg(nowDone)
+                                    .arg(m_totalBatchSize));
+    }
+
+    analyzeFileForPath(nextFile);
+}
+
 void MainWindow::onAnalysisFinished() {
     setUiBusy(false);
 
-    const QString fp = currentFilePath();
+    const QString fp = m_currentAnalyzingFile.isEmpty() ? currentFilePath() : m_currentAnalyzingFile;
     const std::string raw = watcher->result();
     const QString qRaw = QString::fromStdString(raw);
 
@@ -2486,12 +2452,21 @@ void MainWindow::onAnalysisFinished() {
     m_aiSummaryByPath.insert(fp, summary);
     if (m_aiSummaryEdit) m_aiSummaryEdit->setPlainText(summary);
 
-    updateTagDisplayForFile(fp);
-    updateTagList();
-    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-    else populateVirtualTagFiles(activeVirtualTag);
+    // In batch mode, avoid expensive rescans per file.
+    if (!m_isBatchMode) {
+        updateTagDisplayForFile(fp);
+        updateTagList();
+        if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
+        else populateVirtualTagFiles(activeVirtualTag);
+    } else {
+        updateTagListCountsOnly();
+    }
 
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
+
+    if (m_isBatchMode) {
+        QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
+    }
 }
 
 void MainWindow::saveTags() {

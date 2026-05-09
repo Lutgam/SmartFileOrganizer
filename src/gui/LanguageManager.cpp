@@ -186,6 +186,13 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("無法提取文字內容（可能為掃描檔或加密）")) {
         return en ? QStringLiteral("Cannot extract text (possibly scanned or encrypted)") : QStringLiteral("無法提取文字內容（可能為掃描檔或加密）");
     }
+
+    if (key == QStringLiteral("批次分析")) return en ? QStringLiteral("Batch Analyze") : QStringLiteral("批次分析");
+    if (key == QStringLiteral("批次分析完成")) return en ? QStringLiteral("Batch analysis completed") : QStringLiteral("批次分析完成");
+    if (key == QStringLiteral("正在批次分析")) return en ? QStringLiteral("Batch analyzing") : QStringLiteral("正在批次分析");
+    if (key == QStringLiteral("在資料夾中顯示")) return en ? QStringLiteral("Reveal in Folder") : QStringLiteral("在資料夾中顯示");
+    if (key == QStringLiteral("刪除")) return en ? QStringLiteral("Delete") : QStringLiteral("刪除");
+    if (key == QStringLiteral("新的檔名：")) return en ? QStringLiteral("New filename:") : QStringLiteral("新的檔名：");
     if (key == QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？")) {
         return en ? QStringLiteral("The current folder contains too many files (total %1). Rendering the full graph may be cluttered or slow. Show only core tags and the first 50 related files?")
                   : QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？");

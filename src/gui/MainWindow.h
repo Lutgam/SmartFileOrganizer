@@ -30,6 +30,8 @@
 #include <QTimer>
 #include <QVector>
 #include <QHash>
+#include <QQueue>
+#include <QProgressBar>
 
 #include <atomic>
 #include <string>
@@ -88,9 +90,6 @@ private slots:
     void onFileSelected(QListWidgetItem *item);
     void onTagSelected(QListWidgetItem *item);
 
-    void renameCurrentFile();
-    void deleteCurrentFile();
-    void revealCurrentFile();
     void physicalArchiveFiles();
     void undoLastPhysicalArchive();
     void onDirectoryChanged(const QString &path);
@@ -170,6 +169,12 @@ private:
     QLabel *lblStatus = nullptr;
     QLabel *m_lblSummaryTitle = nullptr;
     QTextEdit *m_aiSummaryEdit = nullptr;
+    QPushButton *btnBatchAnalyze = nullptr;
+    QProgressBar *batchProgressBar = nullptr;
+    QLabel *lblBatchStatus = nullptr;
+    QTabWidget *m_previewTabWidget = nullptr;
+    QWidget *m_previewTagTab = nullptr;
+    QWidget *m_previewOpsTab = nullptr;
 
     QPushButton *btnAnalyzeFile = nullptr;
     QPushButton *btnCancelAnalysis = nullptr;
@@ -180,11 +185,7 @@ private:
     QPushButton *btnPhysicalArchive = nullptr;
     QPushButton *btnUndoPhysicalArchive = nullptr;
     // Tabbed UI: no duplicate/graph buttons in Tab 1 preview panel
-    QGroupBox *grpTagManagement = nullptr;
-    QGroupBox *grpFileOperations = nullptr;
-    QPushButton *btnRenameFile = nullptr;
-    QPushButton *btnDeleteFile = nullptr;
-    QPushButton *btnRevealFile = nullptr;
+    // Tag management + file operations are now in m_previewTabWidget
 
     QToolBar *toolbar = nullptr;
     QCheckBox *chkRecursive = nullptr;
@@ -206,6 +207,16 @@ private:
     FileListMode fileListMode = FileListMode::PhysicalFolder;
     QString activeVirtualTag;
     QHash<QString, QString> m_aiSummaryByPath;
+
+    // ===== Batch AI analysis queue =====
+    QQueue<QString> m_analysisQueue;
+    int m_totalBatchSize = 0;
+    bool m_isBatchMode = false;
+    QString m_currentAnalyzingFile;
+
+    void startBatchAnalysis();
+    void processNextInQueue();
+    void analyzeFileForPath(const QString &absPath);
 
     std::vector<QString> m_pendingFilesToDisplay;
     int m_currentLoadedCount = 0;
