@@ -18,6 +18,51 @@ QString TagManager::normalizeTag(const QString &tag) const {
     QString t = tag.trimmed();
     if (t.isEmpty()) return QString();
 
+    auto resolveSynonym = [](const QString &lowerOrZh) -> QString {
+        // Map common AI synonyms / English tags to system preset tags (ZH).
+        static const QHash<QString, QString> map = []() {
+            QHash<QString, QString> m;
+            // database
+            m.insert(QStringLiteral("database"), QStringLiteral("資料庫"));
+            m.insert(QStringLiteral("db"), QStringLiteral("資料庫"));
+            m.insert(QStringLiteral("sql"), QStringLiteral("資料庫"));
+            m.insert(QStringLiteral("資料庫"), QStringLiteral("資料庫"));
+
+            // document
+            m.insert(QStringLiteral("document"), QStringLiteral("文件"));
+            m.insert(QStringLiteral("documents"), QStringLiteral("文件"));
+            m.insert(QStringLiteral("pdf"), QStringLiteral("文件"));
+            m.insert(QStringLiteral("word"), QStringLiteral("文件"));
+            m.insert(QStringLiteral("text"), QStringLiteral("文件"));
+            m.insert(QStringLiteral("文件"), QStringLiteral("文件"));
+
+            // image
+            m.insert(QStringLiteral("image"), QStringLiteral("圖片"));
+            m.insert(QStringLiteral("images"), QStringLiteral("圖片"));
+            m.insert(QStringLiteral("picture"), QStringLiteral("圖片"));
+            m.insert(QStringLiteral("photo"), QStringLiteral("圖片"));
+            m.insert(QStringLiteral("圖片"), QStringLiteral("圖片"));
+
+            // code
+            m.insert(QStringLiteral("code"), QStringLiteral("程式碼"));
+            m.insert(QStringLiteral("script"), QStringLiteral("程式碼"));
+            m.insert(QStringLiteral("source"), QStringLiteral("程式碼"));
+            m.insert(QStringLiteral("source code"), QStringLiteral("程式碼"));
+            m.insert(QStringLiteral("程式碼"), QStringLiteral("程式碼"));
+
+            // video
+            m.insert(QStringLiteral("video"), QStringLiteral("影片"));
+            m.insert(QStringLiteral("movie"), QStringLiteral("影片"));
+            m.insert(QStringLiteral("影片"), QStringLiteral("影片"));
+
+            return m;
+        }();
+
+        const auto it = map.constFind(lowerOrZh);
+        if (it == map.constEnd()) return QString();
+        return it.value();
+    };
+
     // Preserve standardized AI prefix, normalize only the payload.
     // Accept existing variants like "[ai]" / "[AI]" / "[Ai]".
     const QString lower = t.toLower();
@@ -25,10 +70,17 @@ QString TagManager::normalizeTag(const QString &tag) const {
     if (lower.startsWith(aiPrefixLower)) {
         QString rest = t.mid(aiPrefixLower.size()).trimmed();
         rest = rest.toLower();
+        const QString mapped = resolveSynonym(rest);
+        if (!mapped.isEmpty()) {
+            // Merge into system preset tag: do NOT keep [AI] prefix
+            return mapped;
+        }
         if (rest.isEmpty()) return QString();
         return QStringLiteral("[AI] ") + rest;
     }
 
+    const QString mapped = resolveSynonym(lower);
+    if (!mapped.isEmpty()) return mapped;
     return t.toLower();
 }
 

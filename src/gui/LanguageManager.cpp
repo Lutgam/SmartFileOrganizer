@@ -121,6 +121,8 @@ QString LanguageManager::getText(const QString &key) const {
     // Preview tag display group labels / status snippets
     if (key == QStringLiteral("個人標籤")) return en ? QStringLiteral("Personal Tags") : QStringLiteral("個人標籤");
     if (key == QStringLiteral("AI 智能建議")) return en ? QStringLiteral("AI Suggestions") : QStringLiteral("AI 智能建議");
+    if (key == QStringLiteral("AI 智慧摘要")) return en ? QStringLiteral("AI Smart Summary") : QStringLiteral("AI 智慧摘要");
+    if (key == QStringLiteral("尚未分析")) return en ? QStringLiteral("Not analyzed yet") : QStringLiteral("尚未分析");
     if (key == QStringLiteral("無")) return en ? QStringLiteral("None") : QStringLiteral("無");
     if (key == QStringLiteral("分析完成")) return en ? QStringLiteral("Analysis complete") : QStringLiteral("分析完成");
     if (key == QStringLiteral("分析中…")) return en ? QStringLiteral("Analyzing…") : QStringLiteral("分析中…");
@@ -180,6 +182,10 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("狀態：就緒")) return en ? QStringLiteral("Status: Ready") : QStringLiteral("狀態：就緒");
     if (key == QStringLiteral("已取消掃描")) return en ? QStringLiteral("Scan cancelled") : QStringLiteral("已取消掃描");
     if (key == QStringLiteral("二進位檔：不顯示內容")) return en ? QStringLiteral("Binary file: content not shown") : QStringLiteral("二進位檔：不顯示內容");
+    if (key == QStringLiteral("...[內容過長已截斷]")) return en ? QStringLiteral("...[Content truncated]") : QStringLiteral("...[內容過長已截斷]");
+    if (key == QStringLiteral("無法提取文字內容（可能為掃描檔或加密）")) {
+        return en ? QStringLiteral("Cannot extract text (possibly scanned or encrypted)") : QStringLiteral("無法提取文字內容（可能為掃描檔或加密）");
+    }
     if (key == QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？")) {
         return en ? QStringLiteral("The current folder contains too many files (total %1). Rendering the full graph may be cluttered or slow. Show only core tags and the first 50 related files?")
                   : QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？");

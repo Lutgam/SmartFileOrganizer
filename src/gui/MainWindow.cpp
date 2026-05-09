@@ -47,6 +47,11 @@
 #include "LanguageManager.h"
 #include "SettingsDialog.h"
 
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+
 class FileItemDelegate : public QStyledItemDelegate {
 public:
     explicit FileItemDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
@@ -559,6 +564,14 @@ void MainWindow::updateAllTexts() {
     if (btnLoadAll) {
         btnLoadAll->setText(lm.getText(QStringLiteral("載入全部")));
     }
+
+    if (m_lblSummaryTitle) m_lblSummaryTitle->setText(lm.getText(QStringLiteral("AI 智慧摘要")));
+    if (m_aiSummaryEdit) {
+        m_aiSummaryEdit->setPlaceholderText(lm.getText(QStringLiteral("尚未分析")));
+        if (m_aiSummaryEdit->toPlainText().trimmed().isEmpty()) {
+            // Keep it empty; placeholder will show.
+        }
+    }
 }
 
 MainWindow::~MainWindow() = default;
@@ -796,6 +809,19 @@ void MainWindow::setupFourColumnLayout() {
     lblStatus = new QLabel(QStringLiteral("狀態: 就緒"), this);
     lblStatus->setWordWrap(true);
     previewLayout->addWidget(lblStatus);
+
+    m_lblSummaryTitle = new QLabel(QStringLiteral("AI 智慧摘要"), this);
+    m_lblSummaryTitle->setStyleSheet(QStringLiteral("font-weight: 700; margin-top: 10px;"));
+    previewLayout->addWidget(m_lblSummaryTitle);
+
+    m_aiSummaryEdit = new QTextEdit(this);
+    m_aiSummaryEdit->setReadOnly(true);
+    m_aiSummaryEdit->setAcceptRichText(false);
+    m_aiSummaryEdit->setFixedHeight(88);
+    m_aiSummaryEdit->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_aiSummaryEdit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_aiSummaryEdit->setPlaceholderText(QStringLiteral("尚未分析"));
+    previewLayout->addWidget(m_aiSummaryEdit);
 
     // ===== Group 1: Tag management =====
     grpTagManagement = new QGroupBox(QStringLiteral("標籤管理"), this);
@@ -1986,6 +2012,14 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
 
     lblPreviewImage->setVisible(false);
     txtPreviewText->setVisible(false);
+    if (m_aiSummaryEdit) {
+        const QString s = m_aiSummaryByPath.value(absPath).trimmed();
+        if (s.isEmpty()) {
+            m_aiSummaryEdit->clear(); // show placeholder "尚未分析"
+        } else {
+            m_aiSummaryEdit->setPlainText(s);
+        }
+    }
 
     if (!fi.exists()) {
         txtPreviewText->setVisible(true);
@@ -2010,7 +2044,11 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
         txtPreviewText->setVisible(true);
         std::string content = DocumentParser::extractText(absPath.toStdString());
         if (content.size() > 2500) content = content.substr(0, 2500) + "...";
-        if (content.empty()) content = "(No searchable text found or encrypted)";
+        if (content.empty()) {
+            content = QStringLiteral("[%1]")
+                          .arg(LanguageManager::instance().getText(QStringLiteral("無法提取文字內容（可能為掃描檔或加密）")))
+                          .toStdString();
+        }
         txtPreviewText->setPlainText(typeLine + QStringLiteral("\n") + QString::fromStdString(content));
         return;
     }
@@ -2224,28 +2262,82 @@ void MainWindow::analyzeFile() {
         return tagManager.getRejectedTags().join(QStringLiteral(", "));
     }();
 
-    std::string content;
     const QString suffix = fi.suffix().toLower();
-    if (suffix == QStringLiteral("pdf") || suffix == QStringLiteral("docx") || suffix == QStringLiteral("xlsx")) {
-        content = DocumentParser::extractText(fp.toStdString());
-        if (content.size() > 2500) content = content.substr(0, 2500);
-    } else {
-        std::ifstream f(fp.toStdString(), std::ios::binary);
-        if (f.is_open()) {
-            std::string buf;
-            buf.resize(2048);
-            f.read(buf.data(), static_cast<std::streamsize>(buf.size()));
-            buf.resize(static_cast<size_t>(f.gcount()));
-            const QString q = QString::fromUtf8(buf.data(), static_cast<int>(buf.size()));
-            if (!q.isEmpty()) content = q.toStdString();
+    const QStringList textExtensions = {QStringLiteral("txt"),
+                                        QStringLiteral("md"),
+                                        QStringLiteral("cpp"),
+                                        QStringLiteral("h"),
+                                        QStringLiteral("c"),
+                                        QStringLiteral("hpp"),
+                                        QStringLiteral("json"),
+                                        QStringLiteral("xml"),
+                                        QStringLiteral("csv"),
+                                        QStringLiteral("log"),
+                                        QStringLiteral("pdf"),
+                                        // Modern XML (ZIP+XML) families
+                                        QStringLiteral("docx"),
+                                        QStringLiteral("docm"),
+                                        QStringLiteral("xlsx"),
+                                        QStringLiteral("xlsm"),
+                                        QStringLiteral("pptx"),
+                                        QStringLiteral("pptm"),
+                                        QStringLiteral("odt"),
+                                        QStringLiteral("ods"),
+                                        QStringLiteral("odp")};
+
+    const QSet<QString> legacyBinaryBlocked = {QStringLiteral("doc"), QStringLiteral("xls"), QStringLiteral("ppt")};
+    const bool isTextExt = textExtensions.contains(suffix) && !legacyBinaryBlocked.contains(suffix);
+    QString contentQ;
+    if (isTextExt) {
+        const QSet<QString> zipXmlExtractable = {QStringLiteral("pdf"),
+                                                 QStringLiteral("docx"),
+                                                 QStringLiteral("docm"),
+                                                 QStringLiteral("xlsx"),
+                                                 QStringLiteral("xlsm"),
+                                                 QStringLiteral("pptx"),
+                                                 QStringLiteral("pptm"),
+                                                 QStringLiteral("odt"),
+                                                 QStringLiteral("ods"),
+                                                 QStringLiteral("odp")};
+        if (zipXmlExtractable.contains(suffix)) {
+            // Use the same extraction logic as Preview & Control.
+            if (suffix == QStringLiteral("pdf")) {
+                contentQ = DocumentParser::extractPdfText(fp);
+            } else {
+                contentQ = QString::fromStdString(DocumentParser::extractText(fp.toStdString()));
+            }
+        } else {
+            // Read textual content only. (Never feed binary bytes to AI.)
+            std::ifstream f(fp.toStdString(), std::ios::binary);
+            if (f.is_open()) {
+                std::string buf;
+                buf.resize(8000);
+                f.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+                buf.resize(static_cast<size_t>(f.gcount()));
+                contentQ = QString::fromUtf8(buf.data(), static_cast<int>(buf.size()));
+            }
         }
     }
 
+    const bool contentReadable = !contentQ.trimmed().isEmpty();
+
+    // Token/context guard: truncate to 3000 chars before prompt (only when readable).
+    if (contentReadable && contentQ.size() > 3000) {
+        contentQ = contentQ.left(3000) + QStringLiteral("\n") +
+                   LanguageManager::instance().getText(QStringLiteral("...[內容過長已截斷]"));
+    }
+    const std::string content = contentQ.toStdString();
+
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析中…")));
 
-    QFuture<std::string> future = QtConcurrent::run([this, filename, content, existingTags, rejectedTagsCsv]() {
+    QFuture<std::string> future = QtConcurrent::run([this, filename, content, rejectedTagsCsv, existingTags, contentReadable, suffix]() {
         // existingTags param is used for "historical tags"; rejectedTagsCsv used to constrain outputs
-        return llamaEngine.suggestTags(filename.toStdString(), content, rejectedTagsCsv.toStdString(), existingTags.toStdString());
+        return llamaEngine.suggestTags(filename.toStdString(),
+                                      content,
+                                      rejectedTagsCsv.toStdString(),
+                                      existingTags.toStdString(),
+                                      contentReadable,
+                                      suffix.toStdString());
     });
     watcher->setFuture(future);
 }
@@ -2273,7 +2365,111 @@ void MainWindow::onAnalysisFinished() {
         return;
     }
 
-    const auto tags = sanitizeAiTags(qRaw);
+    auto stripMarkdownFences = [](QString t) -> QString {
+        t = t.trimmed();
+        t.remove(QRegularExpression(QStringLiteral("^```\\s*json\\s*"), QRegularExpression::CaseInsensitiveOption));
+        t.remove(QRegularExpression(QStringLiteral("^```\\s*"), QRegularExpression::CaseInsensitiveOption));
+        t.remove(QRegularExpression(QStringLiteral("```\\s*$")));
+        return t.trimmed();
+    };
+
+    auto repairCommonJsonGlitches = [](QString jsonText) -> QString {
+        // Repair common model glitch: stray empty string field like:  {"summary":"...","","tags":[...]}
+        jsonText.replace(QRegularExpression(QStringLiteral(",\\s*\"\"\\s*")), QString());
+        jsonText.replace(QRegularExpression(QStringLiteral("\"\"\\s*,")), QString());
+        jsonText.replace(QRegularExpression(QStringLiteral(",\\s*,+")), QStringLiteral(","));
+        jsonText.replace(QRegularExpression(QStringLiteral("\\{\\s*,")), QStringLiteral("{"));
+        jsonText.replace(QRegularExpression(QStringLiteral(",\\s*\\}")), QStringLiteral("}"));
+        return jsonText.trimmed();
+    };
+
+    auto extractJsonObjectCandidates = [&](const QString &s) -> QStringList {
+        // Model sometimes outputs multiple JSON objects back-to-back.
+        // Extract all minimal "{...}" blocks and let the parser decide.
+        const QString t = stripMarkdownFences(s);
+        QRegularExpression re(QStringLiteral("\\{.*?\\}"));
+        re.setPatternOptions(QRegularExpression::DotMatchesEverythingOption);
+        QStringList out;
+        auto it = re.globalMatch(t);
+        while (it.hasNext()) {
+            const auto m = it.next();
+            if (!m.hasMatch()) continue;
+            const QString cand = m.captured(0).trimmed();
+            if (!cand.isEmpty()) out << cand;
+        }
+        return out;
+    };
+
+    auto normalizeAiTag = [](QString tag) -> QString {
+        tag = tag.trimmed().toLower();
+        tag.replace(QRegularExpression(QStringLiteral("^[-•\\s]+")), QString());
+        tag.replace(QRegularExpression(QStringLiteral("^[\"'`]+|[\"'`]+$")), QString());
+        tag.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+        tag = tag.trimmed();
+        return tag;
+    };
+
+    QString summary;
+    std::vector<QString> tags;
+
+    {
+        const QStringList candidates = extractJsonObjectCandidates(qRaw);
+        QStringList tagsList;
+
+        for (const QString &cand0 : candidates) {
+            const QString cand = repairCommonJsonGlitches(cand0);
+            if (cand.isEmpty()) continue;
+
+            QJsonParseError err{};
+            const QJsonDocument doc = QJsonDocument::fromJson(cand.toUtf8(), &err);
+            if (err.error != QJsonParseError::NoError || !doc.isObject()) continue;
+
+            const QJsonObject obj = doc.object();
+
+            const QString s = obj.value(QStringLiteral("summary")).toString().trimmed();
+            if (summary.isEmpty() && !s.isEmpty()) summary = s;
+
+            const QJsonValue tagsV = obj.value(QStringLiteral("tags"));
+            if (tagsV.isArray()) {
+                const QJsonArray arr = tagsV.toArray();
+                for (const auto &v : arr) {
+                    if (tagsList.size() >= 3) break; // hard limit across all blocks
+                    QString t = normalizeAiTag(v.toString());
+                    if (t.isEmpty()) continue;
+                    if (t == QStringLiteral("ai")) continue; // drop meaningless tag
+                    if (t.size() > 15) continue; // drop long phrases
+                    tagsList << t;
+                }
+            }
+
+            if (!summary.isEmpty() && tagsList.size() >= 3) break;
+        }
+
+        if (!tagsList.isEmpty()) {
+            tags = sanitizeAiTags(tagsList.join(QStringLiteral(", ")));
+        }
+    }
+
+    // Fallback: treat whole raw as summary + tags via legacy sanitizer
+    if (summary.isEmpty()) summary = qRaw.trimmed();
+    if (tags.empty()) {
+        // Fallback tags: still enforce hard limits to avoid long-sentence hallucinations.
+        const auto rawTags = sanitizeAiTags(qRaw);
+        std::vector<QString> filtered;
+        QSet<QString> seen;
+        for (const auto &t0 : rawTags) {
+            if (filtered.size() >= 3) break;
+            QString t = normalizeAiTag(t0);
+            if (t.isEmpty()) continue;
+            if (t == QStringLiteral("ai")) continue;
+            if (t.size() > 15) continue;
+            if (seen.contains(t)) continue;
+            seen.insert(t);
+            filtered.push_back(t);
+        }
+        tags = filtered;
+    }
+
     if (fp.isEmpty()) {
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成（無選取檔案）")));
         return;
@@ -2284,6 +2480,9 @@ void MainWindow::onAnalysisFinished() {
         for (const auto &t : tags) tagManager.addTag(fp, QStringLiteral("[AI] ") + t, false);
         tagManager.saveTags();
     }
+
+    m_aiSummaryByPath.insert(fp, summary);
+    if (m_aiSummaryEdit) m_aiSummaryEdit->setPlainText(summary);
 
     updateTagDisplayForFile(fp);
     updateTagList();

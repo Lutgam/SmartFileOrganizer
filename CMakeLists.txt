@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Network)
+find_package(Qt6 COMPONENTS Pdf QUIET)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -72,6 +73,19 @@ target_include_directories(SmartFileOrganizer PRIVATE
 )
 
 target_link_libraries(SmartFileOrganizer PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Network llama nlohmann_json::nlohmann_json)
+
+# --- Optional PDF text extraction support ---
+if (Qt6Pdf_FOUND)
+    target_link_libraries(SmartFileOrganizer PRIVATE Qt6::Pdf)
+    target_compile_definitions(SmartFileOrganizer PRIVATE HAVE_QT_PDF=1)
+else()
+    # Fallback: poppler-qt6 (if installed)
+    find_package(PopplerQt6 QUIET)
+    if (PopplerQt6_FOUND)
+        target_link_libraries(SmartFileOrganizer PRIVATE Poppler::Qt6)
+        target_compile_definitions(SmartFileOrganizer PRIVATE HAVE_POPPLER_QT6=1)
+    endif()
+endif()
 
 if(WIN32)
     set_property(TARGET SmartFileOrganizer PROPERTY WIN32_EXECUTABLE ON)

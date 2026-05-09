@@ -8,6 +8,7 @@ class DocumentParser
 {
 public:
     static std::string extractText(const std::string& filePath);
+    static QString extractPdfText(const QString& filePath);
 
 private:
     static std::string parsDocx(const std::string& filePath);

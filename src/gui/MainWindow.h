@@ -29,6 +29,7 @@
 #include <QMutex>
 #include <QTimer>
 #include <QVector>
+#include <QHash>
 
 #include <atomic>
 #include <string>
@@ -167,6 +168,8 @@ private:
     QTextEdit *txtPreviewText = nullptr;
     QLabel *lblTags = nullptr;
     QLabel *lblStatus = nullptr;
+    QLabel *m_lblSummaryTitle = nullptr;
+    QTextEdit *m_aiSummaryEdit = nullptr;
 
     QPushButton *btnAnalyzeFile = nullptr;
     QPushButton *btnCancelAnalysis = nullptr;
@@ -202,6 +205,7 @@ private:
 
     FileListMode fileListMode = FileListMode::PhysicalFolder;
     QString activeVirtualTag;
+    QHash<QString, QString> m_aiSummaryByPath;
 
     std::vector<QString> m_pendingFilesToDisplay;
     int m_currentLoadedCount = 0;

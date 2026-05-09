@@ -171,7 +171,11 @@ std::string LlamaEngine::generateResponse(const std::string &prompt) {
   InferenceGuard guard(this);
   if (!ensureModelLoaded()) return "Error: Model not loaded";
 
-  // Clear KV cache
+  // Clear context/KV cache to avoid cross-file leakage.
+  // Prefer llama_kv_cache_clear when available; keep legacy memory clear as a fallback.
+#if defined(LLAMA_API_VERSION)
+  llama_kv_cache_clear(ctx);
+#endif
   llama_memory_t mem = llama_get_memory(ctx);
   llama_memory_seq_rm(mem, -1, -1, -1);
 
@@ -251,7 +255,9 @@ std::string LlamaEngine::generateResponse(const std::string &prompt) {
 std::string LlamaEngine::suggestTags(const std::string &filename,
                                      const std::string &content,
                                      const std::string &rejectedTagsCsv,
-                                     const std::string &existingTags) {
+                                     const std::string &existingTags,
+                                     bool contentReadable,
+                                     const std::string &fileExt) {
   InferenceGuard guard(this);
   if (!ensureModelLoaded()) return "Error: Model not loaded";
 
@@ -263,18 +269,100 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
   }
   const bool en = (lang.compare(QStringLiteral("en_US"), Qt::CaseInsensitive) == 0);
 
-  // Minimal, non-threatening prompt — avoids parroting
-  std::string instruction = en
-                                ? "Output two short topic tags for this file, separated by a comma. Output tags only."
-                                : "請輸出兩個描述此檔案主題的詞彙，用逗號分隔，不要有任何其他文字。";
+  // If content is not readable (binary), do NOT hallucinate based on raw bytes.
+  if (!contentReadable) {
+    const std::string fixedSummaryEn =
+        "System cannot read the content of this file format. Classifying based on filename only.";
+    const std::string fixedSummaryZh =
+        "系統無法讀取此檔案格式的內容，僅依據檔名進行基礎分類。";
+
+    std::string prompt;
+    if (en) {
+      prompt =
+          "You are an expert file analyzer.\n"
+          "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n"
+          "Output format: {\"summary\":\"...\",\"tags\":[\"...\",\"...\"]}\n"
+          "\n"
+          "The file content is NOT readable (binary).\n"
+          "Filename: " +
+          filename + "\n" + "File extension: " + fileExt +
+          "\n\n"
+          "REQUIREMENTS:\n"
+          "1) The \"summary\" field MUST equal EXACTLY:\n"
+          "\"" +
+          fixedSummaryEn + "\"\n"
+          "2) The \"tags\" field MUST contain at most 2 tags describing the file type/topic inferred ONLY from filename and extension.\n"
+          "3) Tags must be concrete nouns or proper nouns. No long sentences.\n"
+          "\nONLY output the JSON object.\n";
+    } else {
+      prompt =
+          "你是專業的檔案分析助手。\n"
+          "你必須只輸出一個有效的 JSON 物件。不要 markdown、不要反引號、不要任何解釋文字。\n"
+          "輸出格式：{\"summary\":\"...\",\"tags\":[\"...\",\"...\"]}\n"
+          "\n"
+          "這是一個二進位檔案，內容無法讀取。\n"
+          "檔名: " +
+          filename + "\n" + "副檔名: " + fileExt +
+          "\n\n"
+          "要求：\n"
+          "1) \"summary\" 欄位必須完全等於：「" +
+          fixedSummaryZh + "」。\n"
+          "2) \"tags\" 欄位最多給出 2 個描述檔案類型或主題的標籤（只能依據檔名與副檔名推測）。\n"
+          "3) 標籤必須是名詞或專有名詞，不能是長句。\n"
+          "\n只能輸出 JSON 物件本體。\n";
+    }
+    return generateResponse(prompt);
+  }
+
+  // Force structured JSON output (summary + tags) with strict rules
+  std::string instruction;
+  if (en) {
+    instruction =
+        "You are an expert file analyzer.\n"
+        "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n"
+        "Output format: {\"summary\":\"...\",\"tags\":[\"...\",\"...\",\"...\"]}\n"
+        "\n"
+        "SUMMARY RULES:\n"
+        "- Write EXACTLY one sentence describing the core fact or topic.\n"
+        "- NEVER mention file format or type (e.g., do not say \"this is a document/file\").\n"
+        "- Do NOT use the words: document, file, contains, includes.\n"
+        "- NEVER describe structure (e.g., do not say \"it has 6 questions/sections\").\n"
+        "- Prefer a topic statement like: \"SQL scripts for a university database (departments, instructors, students).\"\n"
+        "\n"
+        "TAG RULES:\n"
+        "- Output at most 3 tags.\n"
+        "- Each tag MUST be a concrete noun or proper noun.\n"
+        "- Tags MUST NOT be long sentences.\n"
+        "- Tags MUST strictly describe the specific functional type of the document (e.g., 'Exam Paper', 'Resume', 'Receipt', 'Database SQL'). DO NOT use broad or generalized environment tags like 'School' or 'Work'.\n"
+        "- Tags MUST be in English.\n";
+  } else {
+    instruction =
+        "你是專業的檔案分析助手。\n"
+        "你必須只輸出一個有效的 JSON 物件。不要 markdown、不要反引號、不要任何解釋文字。\n"
+        "輸出格式：{\"summary\":\"...\",\"tags\":[\"...\",\"...\",\"...\"]}\n"
+        "\n"
+        "摘要規則：\n"
+        "- 必須只用一句話總結檔案的核心事實或主題。\n"
+        "- 絕對不要提及檔案格式或類型（例如：不要說「這是一份文件/檔案」）。\n"
+        "- 絕對不要使用「文件/檔案/包含/內容」等開頭句型。\n"
+        "- 絕對不要描述結構（例如：不要說「總共有 6 個問題/章節」）。\n"
+        "- 請直接用「主題句」描述，例如：「校務資料庫的 SQL 建表與資料填充腳本（系所、教師、學生）。」。\n"
+        "\n"
+        "標籤規則：\n"
+        "- 最多只能輸出 3 個標籤。\n"
+        "- 每個標籤必須是具體的名詞或專有名詞。\n"
+        "- 標籤絕不能是長句子。\n"
+        "- 標籤必須嚴格描述文件的「具體功能類型」（例如：「考卷」、「履歷」、「收據」、「資料庫 SQL」），禁止使用過度泛化的環境標籤（例如：「學校」、「工作」）。\n"
+        "- summary 與 tags 必須使用繁體中文。\n";
+  }
 
   std::string prompt;
   if (content.empty()) {
-    prompt = instruction + (en ? "\nFilename: " : "\n檔名: ") + filename + (en ? "\nOutput:" : "\n輸出:");
+    prompt = instruction + (en ? "\nFilename: " : "\n檔名: ") + filename + (en ? "\nOutput JSON:" : "\n請輸出 JSON：");
   } else {
-    std::string safeContent = content.substr(0, 600);
+    std::string safeContent = content.substr(0, 3000);
     prompt = instruction + (en ? "\nFilename: " : "\n檔名: ") + filename +
-             (en ? "\nContent snippet: " : "\n內容片段: ") + safeContent + (en ? "\nOutput:" : "\n輸出:");
+             (en ? "\nContent snippet: " : "\n內容片段: ") + safeContent + (en ? "\nOutput JSON:" : "\n請輸出 JSON：");
   }
 
   if (!rejectedTagsCsv.empty()) {
@@ -282,51 +370,16 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
                  : "\n【嚴格限制】：請絕對不要使用以下標籤進行分類：" + rejectedTagsCsv + "\n";
   }
 
-  prompt += en ? "\nIMPORTANT: The user interface is in English. You MUST output all tags, categories, and summaries entirely in English.\n"
-              : "\n請使用繁體中文輸出標籤與摘要。\n";
-
-  std::string rawResponse = generateResponse(prompt);
-
-  // --- C++ 端物理字串清洗 (Hardcoded Sanitization) ---
-  QString qRaw = QString::fromStdString(rawResponse);
-
-  // 0. 拔除常見前綴詞
-  qRaw.replace(QRegularExpression("System:", QRegularExpression::CaseInsensitiveOption), "");
-  qRaw.replace("標籤:", "").replace("標签:", "");
-  qRaw.replace("Assistant:", "").replace("User:", "").replace("輸出:", "");
-
-  if (en) {
-    // English: keep spaces, split by commas/newlines.
-    qRaw.replace("\r", " ");
-    QStringList parts = qRaw.split(QRegularExpression("[,\\n]"), Qt::SkipEmptyParts);
-    QStringList out;
-    for (const QString &p : parts) {
-      QString t = p.trimmed();
-      t.replace(QRegularExpression("^[-•\\s]+"), "");
-      t.replace(QRegularExpression("[\"'`]+"), "");
-      if (t.isEmpty()) continue;
-      if (t.size() > 24) continue;
-      out << t;
-    }
-    out.removeDuplicates();
-    while (out.size() > 2) out.removeLast();
-    return out.join(", ").toStdString();
+  if (!existingTags.empty()) {
+    prompt += en ? "\nExisting tags in library (avoid duplicates if possible): " + existingTags + "\n"
+                 : "\n系統既有標籤（盡量避免重複）： " + existingTags + "\n";
   }
 
-  // zh_TW: legacy cleanup
-  qRaw.replace("。", "").replace(".", "").replace("\n", "").replace(" ", "");
-  QStringList parts = qRaw.split(QRegularExpression("[,，、]"), Qt::SkipEmptyParts);
-  QStringList blacklist = {"文件", "圖片", "音訊", "影片", "壓縮檔", "專案"};
-  QStringList resultParts;
-  for (const QString &p : parts) {
-    QString t = p.trimmed();
-    if (t.isEmpty()) continue;
-    if (t.size() > 8) continue;
-    if (blacklist.contains(t)) continue;
-    resultParts << t;
-  }
-  resultParts.removeDuplicates();
-  while (resultParts.size() > 2) resultParts.removeLast();
-  return resultParts.join(", ").toStdString();
+  // Final hard reminder: JSON only.
+  prompt += en ? "\nONLY output the JSON object. NO markdown. NO backticks. NO extra text.\n"
+              : "\n只能輸出 JSON 物件本體，不要 markdown，不要反引號，不要任何額外文字。\n";
+
+  // Return raw model output (JSON expected). C++ side will sanitize/parse with fallback.
+  return generateResponse(prompt);
 }
 

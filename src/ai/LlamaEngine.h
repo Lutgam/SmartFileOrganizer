@@ -23,7 +23,9 @@ public:
     std::string suggestTags(const std::string& filename,
                             const std::string& content,
                             const std::string& rejectedTagsCsv = "",
-                            const std::string& existingTags = "");
+                            const std::string& existingTags = "",
+                            bool contentReadable = true,
+                            const std::string& fileExt = "");
     void setCancelFlag(std::atomic<bool>* flag) { m_cancelFlag = flag; } // Link to UI cancel flag
     void setOutputLanguage(const QString &lang);
 

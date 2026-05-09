@@ -3,10 +3,22 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QXmlStreamReader>
+#include <QStringList>
 #include <filesystem>
 #include <iostream>
 
+#if defined(HAVE_QT_PDF)
+#include <QPdfDocument>
+#endif
+
+#if defined(HAVE_POPPLER_QT6)
+#include <poppler-qt6.h>
+#endif
+
 namespace fs = std::filesystem;
+
+// Forward decl: helper defined below
+static std::string extractZipEntry(const std::string& zipPath, const std::string& entryName);
 
 std::string DocumentParser::extractText(const std::string& filePath)
 {
@@ -14,12 +26,87 @@ std::string DocumentParser::extractText(const std::string& filePath)
     std::string ext = p.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-    if (ext == ".docx") {
+    // Legacy binary formats: never try to unzip/parse.
+    if (ext == ".doc" || ext == ".xls" || ext == ".ppt") {
+        return "";
+    }
+
+    if (ext == ".docx" || ext == ".docm") {
         return parsDocx(filePath);
-    } else if (ext == ".xlsx") {
+    } else if (ext == ".xlsx" || ext == ".xlsm") {
         return parseXlsx(filePath);
+    } else if (ext == ".pptx" || ext == ".pptm") {
+        // Extract text from slides (ppt/slides/slide*.xml)
+        QFile file(QString::fromStdString(filePath));
+        if (!file.open(QIODevice::ReadOnly)) return "";
+        QByteArray fileData = file.readAll();
+        file.close();
+        if (fileData.isEmpty()) return "";
+
+        mz_zip_archive zip_archive;
+        memset(&zip_archive, 0, sizeof(zip_archive));
+        if (!mz_zip_reader_init_mem(&zip_archive, fileData.constData(), fileData.size(), 0)) {
+            return "";
+        }
+
+        QString text;
+        const int num_files = mz_zip_reader_get_num_files(&zip_archive);
+        for (int i = 0; i < num_files; i++) {
+            mz_zip_archive_file_stat st;
+            if (!mz_zip_reader_file_stat(&zip_archive, i, &st)) continue;
+            const QString name = QString::fromUtf8(st.m_filename);
+            if (!name.startsWith(QStringLiteral("ppt/slides/slide")) || !name.endsWith(QStringLiteral(".xml"))) continue;
+
+            size_t file_size = 0;
+            void *pHeap = mz_zip_reader_extract_to_heap(&zip_archive, i, &file_size, 0);
+            if (!pHeap || file_size == 0) {
+                if (pHeap) mz_free(pHeap);
+                continue;
+            }
+            const QString xmlContent = QString::fromUtf8(static_cast<const char*>(pHeap), static_cast<int>(file_size));
+            mz_free(pHeap);
+
+            QXmlStreamReader xml(xmlContent);
+            while (!xml.atEnd() && !xml.hasError()) {
+                const auto token = xml.readNext();
+                if (token == QXmlStreamReader::StartElement) {
+                    const QString n = xml.name().toString();
+                    if (n == QStringLiteral("t")) {
+                        text += xml.readElementText() + QStringLiteral(" ");
+                    } else if (n == QStringLiteral("p")) {
+                        text += QStringLiteral("\n");
+                    }
+                }
+            }
+            if (text.size() > 4000) break;
+        }
+
+        mz_zip_reader_end(&zip_archive);
+        return text.trimmed().toStdString();
+    } else if (ext == ".odt" || ext == ".ods" || ext == ".odp") {
+        // ODF formats store main content in content.xml
+        std::string xmlContent = extractZipEntry(filePath, "content.xml");
+        if (xmlContent.rfind("DEBUG:", 0) == 0) return "";
+        if (xmlContent.empty()) return "";
+
+        QString text;
+        QXmlStreamReader xml(QString::fromStdString(xmlContent));
+        while (!xml.atEnd() && !xml.hasError()) {
+            const auto token = xml.readNext();
+            if (token == QXmlStreamReader::StartElement) {
+                const QString n = xml.name().toString();
+                if (n == QStringLiteral("p")) {
+                    text += QStringLiteral("\n");
+                }
+            } else if (token == QXmlStreamReader::Characters && !xml.isWhitespace()) {
+                text += xml.text().toString();
+                text += QStringLiteral(" ");
+            }
+            if (text.size() > 4000) break;
+        }
+        return text.trimmed().toStdString();
     } else if (ext == ".pdf") {
-        return parsePdf(filePath);
+        return extractPdfText(QString::fromStdString(filePath)).toStdString();
     }
     return "";
 }
@@ -170,4 +257,62 @@ std::string DocumentParser::parsePdf(const std::string& filePath)
         .arg(fileInfo.birthTime().toString("yyyy-MM-dd"))
         .arg(fileInfo.size());
     return metadata.toStdString();
+}
+
+QString DocumentParser::extractPdfText(const QString& filePath)
+{
+    const QString clean = QFileInfo(filePath).absoluteFilePath();
+
+#if defined(HAVE_QT_PDF)
+    QPdfDocument doc;
+    const auto err = doc.load(clean);
+    if (err != QPdfDocument::Error::None) {
+        return QString();
+    }
+
+    const int pages = doc.pageCount();
+    const int takePages = std::min(5, pages);
+    QString out;
+    for (int i = 0; i < takePages; ++i) {
+        const QSizeF sz = doc.pagePointSize(i);
+        const QPdfSelection sel = doc.getSelection(i, QPointF(0, 0), QPointF(sz.width(), sz.height()));
+        const QString pageText = sel.text();
+        if (!pageText.trimmed().isEmpty()) {
+            out += pageText;
+            out += QStringLiteral("\n");
+        }
+        if (out.size() > 4000) break; // early stop before final truncation
+    }
+    if (out.size() > 3000) out = out.left(3000);
+    const QString trimmed = out.trimmed();
+    if (trimmed.isEmpty()) return QString();
+    if (trimmed.contains(QStringLiteral("No searchable text"), Qt::CaseInsensitive)) return QString();
+    if (trimmed.contains(QStringLiteral("no searchable text"), Qt::CaseInsensitive)) return QString();
+    return trimmed;
+#elif defined(HAVE_POPPLER_QT6)
+    std::unique_ptr<Poppler::Document> pdf(Poppler::Document::load(clean));
+    if (!pdf) return QString();
+    const int pages = pdf->numPages();
+    const int takePages = std::min(5, pages);
+    QString out;
+    for (int i = 0; i < takePages; ++i) {
+        std::unique_ptr<Poppler::Page> page(pdf->page(i));
+        if (!page) continue;
+        const QString pageText = page->text(QRectF());
+        if (!pageText.trimmed().isEmpty()) {
+            out += pageText;
+            out += QStringLiteral("\n");
+        }
+        if (out.size() > 4000) break;
+    }
+    if (out.size() > 3000) out = out.left(3000);
+    const QString trimmed = out.trimmed();
+    if (trimmed.isEmpty()) return QString();
+    if (trimmed.contains(QStringLiteral("No searchable text"), Qt::CaseInsensitive)) return QString();
+    if (trimmed.contains(QStringLiteral("no searchable text"), Qt::CaseInsensitive)) return QString();
+    return trimmed;
+#else
+    Q_UNUSED(clean);
+    return QString();
+#endif
 }
