@@ -333,7 +333,9 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
         "- Output at most 3 tags.\n"
         "- Each tag MUST be a concrete noun or proper noun.\n"
         "- Tags MUST NOT be long sentences.\n"
-        "- Tags MUST strictly describe the specific functional type of the document (e.g., 'Exam Paper', 'Resume', 'Receipt', 'Database SQL'). DO NOT use broad or generalized environment tags like 'School' or 'Work'.\n"
+        "- CRITICAL: Tags MUST strictly describe the functional type of the document (e.g., 'Score Sheet', 'Exam Paper', 'Financial Report', 'Resume', 'Receipt', 'Database SQL').\n"
+        "- DO NOT use broad environment tags (e.g., 'School', 'Work', 'Company').\n"
+        "- ABSOLUTELY DO NOT generate specific institution or university names (e.g., 'TCUS', 'Ministry of Education') unless it is the absolute core subject of the file.\n"
         "- Tags MUST be in English.\n";
   } else {
     instruction =
@@ -352,7 +354,8 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
         "- 最多只能輸出 3 個標籤。\n"
         "- 每個標籤必須是具體的名詞或專有名詞。\n"
         "- 標籤絕不能是長句子。\n"
-        "- 標籤必須嚴格描述文件的「具體功能類型」（例如：「考卷」、「履歷」、「收據」、「資料庫 SQL」），禁止使用過度泛化的環境標籤（例如：「學校」、「工作」）。\n"
+        "【極度重要】：標籤必須精確描述檔案的「實體功能或格式類型」（例如：計分表、測驗卷、財務報表、履歷）。\n"
+        "絕對禁止使用廣泛的場域標籤（如：學校、工作、公司），也【絕對禁止】擅自生成特定的機構、大學或專有名詞（如：台綜大、台大、教育部），除非該名詞是檔案的絕對核心主題。\n"
         "- summary 與 tags 必須使用繁體中文。\n";
   }
 

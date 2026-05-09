@@ -2256,7 +2256,9 @@ void MainWindow::analyzeFile() {
     lblStatus->setText(tr("Preparing…"));
 
     const QString filename = fi.fileName();
-    const QString existingTags = historicalTagsString();
+    // IMPORTANT: Do NOT feed full historical tags into the prompt.
+    // It causes "prompt contamination" where prior institution names get repeated.
+    const QString existingTags; // keep empty on purpose
     const QString rejectedTagsCsv = [this]() {
         QMutexLocker locker(&tagMutex);
         return tagManager.getRejectedTags().join(QStringLiteral(", "));
