@@ -1947,12 +1947,8 @@ void MainWindow::updateTagDisplayForFile(const QString &absPath) {
     };
     auto stripAiPrefix = [](const QString &t) {
         QString s = t.trimmed();
-        const QString low = s.toLower();
-        const QString pref = QStringLiteral("[ai]");
-        if (low.startsWith(pref)) {
-            s = s.mid(pref.size()).trimmed();
-        }
-        return s;
+        s.replace(QRegularExpression(QStringLiteral("^\\[ai\\]\\s*"), QRegularExpression::CaseInsensitiveOption), QString());
+        return s.trimmed();
     };
     auto normBase = [&](const QString &t) {
         return stripAiPrefix(t).trimmed().toLower();
@@ -2071,6 +2067,14 @@ std::vector<QString> MainWindow::sanitizeAiTags(const QString &raw) const {
 }
 
 void MainWindow::setUiBusy(bool busy) {
+    // In batch mode we keep UI interactive (non-blocking UX).
+    if (m_isBatchMode) {
+        if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(false); // avoid concurrent single-file analyze
+        if (btnCancelAnalysis) btnCancelAnalysis->setEnabled(busy);
+        if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(false);
+        return;
+    }
+
     btnAnalyzeFile->setEnabled(!busy && !currentFilePath().isEmpty());
     btnCancelAnalysis->setEnabled(busy);
     btnSaveTags->setEnabled(!busy && btnSaveTags->isEnabled());
@@ -2223,6 +2227,7 @@ void MainWindow::startBatchAnalysis() {
 
     m_analysisQueue.clear();
     m_totalBatchSize = 0;
+    m_pendingResults.clear();
 
     // Enqueue all files currently displayed in fileList
     for (int i = 0; i < fileList->count(); ++i) {
@@ -2243,6 +2248,7 @@ void MainWindow::startBatchAnalysis() {
     if (batchProgressBar) {
         batchProgressBar->setRange(0, m_totalBatchSize);
         batchProgressBar->setValue(0);
+        batchProgressBar->setFormat(QStringLiteral("%p%"));
         batchProgressBar->setVisible(true);
     }
     if (lblBatchStatus) {
@@ -2250,18 +2256,9 @@ void MainWindow::startBatchAnalysis() {
         lblBatchStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在批次分析")));
     }
 
-    // Disable potentially interfering controls
+    // Only protect against re-entry; keep the rest of the UI interactive.
     if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(false);
     if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(false);
-    if (folderTree) folderTree->setEnabled(false);
-    if (fileList) fileList->setEnabled(false);
-    if (tagListWidget) tagListWidget->setEnabled(false);
-    if (cmbTagFilter) cmbTagFilter->setEnabled(false);
-    if (txtSearch) txtSearch->setEnabled(false);
-    if (cmbSort) cmbSort->setEnabled(false);
-    if (btnHome) btnHome->setEnabled(false);
-    if (btnBack) btnBack->setEnabled(false);
-    if (btnForward) btnForward->setEnabled(false);
 
     processNextInQueue();
 }
@@ -2270,25 +2267,18 @@ void MainWindow::processNextInQueue() {
     if (!m_isBatchMode) return;
 
     const int done = m_totalBatchSize - m_analysisQueue.size();
-    if (batchProgressBar) batchProgressBar->setValue(done);
 
     if (m_analysisQueue.isEmpty()) {
         // Completed
         m_isBatchMode = false;
         m_currentAnalyzingFile.clear();
+        flushPendingBatchResults();
         if (batchProgressBar) batchProgressBar->setVisible(false);
         if (lblBatchStatus) lblBatchStatus->setVisible(false);
 
         // Restore UI
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
-        if (folderTree) folderTree->setEnabled(true);
-        if (fileList) fileList->setEnabled(true);
-        if (tagListWidget) tagListWidget->setEnabled(true);
-        if (cmbTagFilter) cmbTagFilter->setEnabled(true);
-        if (txtSearch) txtSearch->setEnabled(true);
-        if (cmbSort) cmbSort->setEnabled(true);
-        if (btnHome) btnHome->setEnabled(true);
-        syncNavigationButtons();
+        if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
 
         // Refresh once at end for UI correctness
         updateTagList();
@@ -2303,7 +2293,6 @@ void MainWindow::processNextInQueue() {
 
     const QString nextFile = m_analysisQueue.dequeue();
     const int nowDone = m_totalBatchSize - m_analysisQueue.size();
-    if (batchProgressBar) batchProgressBar->setValue(nowDone - 1);
     if (lblBatchStatus) {
         lblBatchStatus->setText(QStringLiteral("%1: %2 (%3/%4)")
                                     .arg(LanguageManager::instance().getText(QStringLiteral("正在批次分析")))
@@ -2313,6 +2302,33 @@ void MainWindow::processNextInQueue() {
     }
 
     analyzeFileForPath(nextFile);
+}
+
+void MainWindow::flushPendingBatchResults() {
+    if (m_pendingResults.isEmpty()) return;
+
+    QMutexLocker locker(&tagMutex);
+    for (auto it = m_pendingResults.constBegin(); it != m_pendingResults.constEnd(); ++it) {
+        const QString fp = it.key();
+        const QJsonObject obj = it.value();
+
+        const QString summary = obj.value(QStringLiteral("summary")).toString().trimmed();
+        if (!summary.isEmpty()) {
+            m_aiSummaryByPath.insert(fp, summary);
+        }
+
+        const QJsonValue tagsV = obj.value(QStringLiteral("tags"));
+        if (tagsV.isArray()) {
+            const QJsonArray arr = tagsV.toArray();
+            for (const auto &v : arr) {
+                const QString t = v.toString().trimmed();
+                if (t.isEmpty()) continue;
+                tagManager.addTag(fp, QStringLiteral("[AI] ") + t, false);
+            }
+        }
+    }
+    tagManager.saveTags();
+    m_pendingResults.clear();
 }
 
 void MainWindow::onAnalysisFinished() {
@@ -2443,23 +2459,41 @@ void MainWindow::onAnalysisFinished() {
         return;
     }
 
-    {
-        QMutexLocker locker(&tagMutex);
-        for (const auto &t : tags) tagManager.addTag(fp, QStringLiteral("[AI] ") + t, false);
-        tagManager.saveTags();
+    // Smooth progress update (on completion)
+    if (m_isBatchMode && batchProgressBar) {
+        const int completed = m_totalBatchSize - m_analysisQueue.size();
+        if (!m_batchProgressAnim) {
+            m_batchProgressAnim = new QPropertyAnimation(batchProgressBar, "value", this);
+            m_batchProgressAnim->setDuration(500);
+        }
+        m_batchProgressAnim->stop();
+        m_batchProgressAnim->setStartValue(batchProgressBar->value());
+        m_batchProgressAnim->setEndValue(completed);
+        m_batchProgressAnim->start();
     }
 
-    m_aiSummaryByPath.insert(fp, summary);
-    if (m_aiSummaryEdit) m_aiSummaryEdit->setPlainText(summary);
+    if (m_isBatchMode) {
+        // Buffer results and write once at the end.
+        QJsonObject obj;
+        obj.insert(QStringLiteral("summary"), summary);
+        QJsonArray arr;
+        for (const auto &t : tags) arr.append(t);
+        obj.insert(QStringLiteral("tags"), arr);
+        m_pendingResults.insert(fp, obj);
+    } else {
+        {
+            QMutexLocker locker(&tagMutex);
+            for (const auto &t : tags) tagManager.addTag(fp, QStringLiteral("[AI] ") + t, false);
+            tagManager.saveTags();
+        }
 
-    // In batch mode, avoid expensive rescans per file.
-    if (!m_isBatchMode) {
+        m_aiSummaryByPath.insert(fp, summary);
+        if (m_aiSummaryEdit) m_aiSummaryEdit->setPlainText(summary);
+
         updateTagDisplayForFile(fp);
         updateTagList();
         if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
         else populateVirtualTagFiles(activeVirtualTag);
-    } else {
-        updateTagListCountsOnly();
     }
 
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));

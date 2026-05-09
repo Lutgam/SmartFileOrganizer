@@ -32,6 +32,8 @@
 #include <QHash>
 #include <QQueue>
 #include <QProgressBar>
+#include <QMap>
+#include <QPropertyAnimation>
 
 #include <atomic>
 #include <string>
@@ -213,10 +215,13 @@ private:
     int m_totalBatchSize = 0;
     bool m_isBatchMode = false;
     QString m_currentAnalyzingFile;
+    QMap<QString, QJsonObject> m_pendingResults;
+    QPropertyAnimation *m_batchProgressAnim = nullptr;
 
     void startBatchAnalysis();
     void processNextInQueue();
     void analyzeFileForPath(const QString &absPath);
+    void flushPendingBatchResults();
 
     std::vector<QString> m_pendingFilesToDisplay;
     int m_currentLoadedCount = 0;
