@@ -288,6 +288,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     watcher = new QFutureWatcher<std::string>(this);
     connect(watcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onAnalysisFinished);
 
+    m_consolidateWatcher = new QFutureWatcher<std::string>(this);
+    connect(m_consolidateWatcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onConsolidateTagsFinished);
+
     modelLoadWatcher = new QFutureWatcher<bool>(this);
     connect(modelLoadWatcher, &QFutureWatcher<bool>::finished, this, [this]() {
         const bool ok = modelLoadWatcher->result();
@@ -471,6 +474,12 @@ void MainWindow::updateAllTexts() {
     if (btnAddTag) btnAddTag->setText(lm.getText(QStringLiteral("btn_add_tag")));
     if (btnRemoveTag) btnRemoveTag->setText(lm.getText(QStringLiteral("btn_remove_tag")));
     if (btnAddExistingTag) btnAddExistingTag->setText(lm.getText(QStringLiteral("btn_add_existing_tag")));
+    if (btnAutoMergeTags) {
+        const QString normalText = QStringLiteral("🤖 %1").arg(lm.getText(QStringLiteral("AI 自動收斂標籤")));
+        const QString busyText = QStringLiteral("🤖 %1").arg(lm.getText(QStringLiteral("AI 思考中…")));
+        btnAutoMergeTags->setText(m_isConsolidatingTags ? busyText : normalText);
+        btnAutoMergeTags->setEnabled(!m_isConsolidatingTags);
+    }
     if (btnPhysicalArchive) btnPhysicalArchive->setText(lm.getText(QStringLiteral("btn_physical_archive")));
     if (btnUndoPhysicalArchive) btnUndoPhysicalArchive->setText(lm.getText(QStringLiteral("btn_undo_archive")));
 
@@ -937,6 +946,30 @@ void MainWindow::setupFourColumnLayout() {
     btnAddExistingTag = new QPushButton(QStringLiteral("🏷️ 加入現有標籤"), this);
     tagGroupLayout->addWidget(btnAddExistingTag);
     rebuildAddExistingTagMenu();
+
+    btnAutoMergeTags = new QPushButton(QStringLiteral("🤖 AI 自動收斂標籤"), this);
+    btnAutoMergeTags->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    btnAutoMergeTags->setMinimumHeight(36);
+    btnAutoMergeTags->setStyleSheet(QStringLiteral(
+        "QPushButton {"
+        "  font-weight: 700;"
+        "  border-radius: 10px;"
+        "  padding: 8px 12px;"
+        "}"
+        "QPushButton:enabled {"
+        "  background: rgba(43,108,176,0.25);"
+        "  border: 1px solid rgba(43,108,176,0.55);"
+        "}"
+        "QPushButton:hover:enabled {"
+        "  background: rgba(43,108,176,0.35);"
+        "}"
+        "QPushButton:disabled {"
+        "  background: rgba(255,255,255,0.06);"
+        "  border: 1px solid rgba(255,255,255,0.10);"
+        "  color: rgba(255,255,255,0.55);"
+        "}"));
+    connect(btnAutoMergeTags, &QPushButton::clicked, this, &MainWindow::consolidateTagsWithAI);
+    tagGroupLayout->addWidget(btnAutoMergeTags);
     tagGroupLayout->addStretch(1);
 
     auto *fileGroupLayout = new QVBoxLayout(m_previewOpsTab);
@@ -2656,6 +2689,130 @@ void MainWindow::onAnalysisFinished() {
     if (m_isBatchMode) {
         QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
     }
+}
+
+void MainWindow::consolidateTagsWithAI() {
+    if (m_isConsolidatingTags) return;
+    if (!llamaEngine.isModelLoaded()) {
+        QMessageBox::warning(this,
+                             QStringLiteral("Smartflie"),
+                             LanguageManager::instance().getText(QStringLiteral("模型自動載入失敗 (Auto-load failed)")));
+        return;
+    }
+
+    std::vector<QString> rawTags;
+    {
+        QMutexLocker locker(&tagMutex);
+        rawTags = tagManager.getAllTags();
+    }
+
+    QStringList aiTags;
+    QSet<QString> aiTagSet;
+    for (const QString &t : rawTags) {
+        const QString tt = t.trimmed();
+        if (tt.toLower().startsWith(QStringLiteral("[ai]"))) {
+            if (!aiTagSet.contains(tt)) {
+                aiTagSet.insert(tt);
+                aiTags << tt;
+            }
+        }
+    }
+
+    if (aiTags.size() < 2) return;
+
+    m_isConsolidatingTags = true;
+    updateAllTexts();
+
+    auto &lm = LanguageManager::instance();
+
+    const QString systemPromptEn = QStringLiteral(
+        "You are an expert data taxonomist. I will give you a list of tags. "
+        "Your job is to find tags that have the EXACT SAME meaning or are highly redundant synonyms, and group them. "
+        "You MUST output ONLY a valid JSON dictionary where the Key is the redundant tag (to be removed), and the Value is the target tag (to keep). "
+        "Example: {\"[AI] Reports\": \"[AI] 報告\", \"[AI] SQL\": \"[AI] Database\"}. "
+        "If no merges are needed, output {}. DO NOT output markdown or explanations.");
+
+    const QString systemPromptZh = QStringLiteral(
+        "你是一位專業的資料分類（Taxonomy）專家。我會給你一份標籤清單。你的任務是找出「意義完全相同」或「高度冗餘的同義標籤」，並提出合併建議。"
+        "你必須只輸出一個合法的 JSON 字典：Key 是要被移除的冗餘標籤，Value 是要保留的目標標籤。"
+        "範例：{\"[AI] Reports\":\"[AI] 報告\",\"[AI] SQL\":\"[AI] Database\"}。"
+        "若不需要合併，輸出 {}。不要輸出 markdown 或任何解釋。");
+
+    const QString systemPrompt = (lm.language() == LanguageManager::Language::EN_US) ? systemPromptEn : systemPromptZh;
+
+    const QString userPrompt = QStringLiteral("Tags:\n- %1\n")
+                                   .arg(aiTags.join(QStringLiteral("\n- ")));
+
+    const QString fullPrompt = QStringLiteral("System:\n%1\n\nUser:\n%2")
+                                   .arg(systemPrompt, userPrompt);
+
+    if (!m_consolidateWatcher) {
+        m_isConsolidatingTags = false;
+        updateAllTexts();
+        return;
+    }
+
+    m_consolidateWatcher->setFuture(QtConcurrent::run([this, fullPrompt]() {
+        return llamaEngine.generateResponse(fullPrompt.toStdString());
+    }));
+}
+
+void MainWindow::onConsolidateTagsFinished() {
+    const QString raw = QString::fromStdString(m_consolidateWatcher ? m_consolidateWatcher->result() : std::string());
+
+    m_isConsolidatingTags = false;
+    updateAllTexts();
+
+    if (raw.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive)) {
+        QMessageBox::critical(this, QStringLiteral("Smartflie"), raw);
+        return;
+    }
+
+    QRegularExpression re(QStringLiteral("\\{.*\\}"));
+    re.setPatternOptions(QRegularExpression::DotMatchesEverythingOption);
+    const QRegularExpressionMatch m = re.match(raw);
+    const QString jsonText = m.hasMatch() ? m.captured(0).trimmed() : QStringLiteral("{}");
+
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("Invalid JSON: %1").arg(err.errorString()));
+        return;
+    }
+
+    // Snapshot current AI tags for validation
+    std::vector<QString> allTags;
+    {
+        QMutexLocker locker(&tagMutex);
+        allTags = tagManager.getAllTags();
+    }
+    QSet<QString> aiTagSet;
+    for (const QString &t : allTags) {
+        const QString tt = t.trimmed();
+        if (tt.toLower().startsWith(QStringLiteral("[ai]"))) aiTagSet.insert(tt);
+    }
+
+    int merged = 0;
+    const QJsonObject obj = doc.object();
+    for (auto it = obj.begin(); it != obj.end(); ++it) {
+        const QString key = it.key().trimmed();
+        const QString value = it.value().toString().trimmed();
+        if (key.isEmpty() || value.isEmpty()) continue;
+        if (key == value) continue;
+        if (!aiTagSet.contains(key) || !aiTagSet.contains(value)) continue;
+
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.mergeTag(key, value);
+        }
+        merged++;
+        aiTagSet.remove(key);
+    }
+
+    updateTagList();
+    QMessageBox::information(this,
+                             QStringLiteral("Smartflie"),
+                             LanguageManager::instance().getText(QStringLiteral("已自動合併 %1 組標籤")).arg(merged));
 }
 
 void MainWindow::saveTags() {

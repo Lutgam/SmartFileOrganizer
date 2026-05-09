@@ -202,6 +202,10 @@ QString LanguageManager::getText(const QString &key) const {
 
     if (key == QStringLiteral("合併標籤至...")) return en ? QStringLiteral("Merge Tag into...") : QStringLiteral("合併標籤至...");
     if (key == QStringLiteral("選擇目標標籤:")) return en ? QStringLiteral("Choose target tag:") : QStringLiteral("選擇目標標籤:");
+
+    if (key == QStringLiteral("AI 自動收斂標籤")) return en ? QStringLiteral("AI Auto-Consolidate Tags") : QStringLiteral("AI 自動收斂標籤");
+    if (key == QStringLiteral("AI 思考中…")) return en ? QStringLiteral("AI thinking…") : QStringLiteral("AI 思考中…");
+    if (key == QStringLiteral("已自動合併 %1 組標籤")) return en ? QStringLiteral("Auto-merged %1 tag groups") : QStringLiteral("已自動合併 %1 組標籤");
     if (key == QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？")) {
         return en ? QStringLiteral("The current folder contains too many files (total %1). Rendering the full graph may be cluttered or slow. Show only core tags and the first 50 related files?")
                   : QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？");

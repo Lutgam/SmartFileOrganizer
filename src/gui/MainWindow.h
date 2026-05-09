@@ -115,6 +115,8 @@ private slots:
 
     void onBackgroundScanProgress();
     void onBackgroundScanFinished();
+    void consolidateTagsWithAI();
+    void onConsolidateTagsFinished();
 
 private:
     enum class FileListMode { PhysicalFolder, VirtualTag };
@@ -187,6 +189,7 @@ private:
     QPushButton *btnAddTag = nullptr;
     QPushButton *btnRemoveTag = nullptr;
     QPushButton *btnAddExistingTag = nullptr;
+    QPushButton *btnAutoMergeTags = nullptr;
     QPushButton *btnPhysicalArchive = nullptr;
     QPushButton *btnUndoPhysicalArchive = nullptr;
     // Tabbed UI: no duplicate/graph buttons in Tab 1 preview panel
@@ -202,8 +205,11 @@ private:
     LlamaEngine llamaEngine;
 
     QFutureWatcher<std::string> *watcher = nullptr;
+    QFutureWatcher<std::string> *m_consolidateWatcher = nullptr;
     QFutureWatcher<bool> *modelLoadWatcher = nullptr;
     QFutureWatcher<void> *initialScanWatcher = nullptr;
+
+    bool m_isConsolidatingTags = false;
     std::atomic<bool> cancelFlag{false};
     std::atomic<int> backgroundScanProgress{0};
 
