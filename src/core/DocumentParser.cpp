@@ -139,15 +139,23 @@ QString DocumentParser::extractTextQString(const QString& filePath)
         return QString();
     }
 
-    if (suffix == QStringLiteral("docx") || suffix == QStringLiteral("docm") || suffix == QStringLiteral("dotx")) {
+    if (suffix == QStringLiteral("docx") || suffix == QStringLiteral("docm") || suffix == QStringLiteral("dotx")
+        || suffix == QStringLiteral("dotm")) {
         const QByteArray utf8 = abs.toUtf8();
-        return QString::fromStdString(parsDocx(std::string(utf8.constData(), static_cast<size_t>(utf8.size()))));
+        const QString s = QString::fromStdString(
+            parsDocx(std::string(utf8.constData(), static_cast<size_t>(utf8.size()))));
+        return cleanseXmlTagNoise(s).trimmed();
     }
-    if (suffix == QStringLiteral("xlsx") || suffix == QStringLiteral("xlsm") || suffix == QStringLiteral("xltx")) {
+    if (suffix == QStringLiteral("xlsx") || suffix == QStringLiteral("xlsm") || suffix == QStringLiteral("xltx")
+        || suffix == QStringLiteral("xltm")) {
         const QByteArray utf8 = abs.toUtf8();
-        return QString::fromStdString(parseXlsx(std::string(utf8.constData(), static_cast<size_t>(utf8.size()))));
+        const QString s = QString::fromStdString(
+            parseXlsx(std::string(utf8.constData(), static_cast<size_t>(utf8.size()))));
+        if (s.startsWith(QLatin1Char('(')) && s.contains(QStringLiteral("XLSX"))) return s;
+        return cleanseXmlTagNoise(s).trimmed();
     }
-    if (suffix == QStringLiteral("pptx") || suffix == QStringLiteral("pptm") || suffix == QStringLiteral("potx")) {
+    if (suffix == QStringLiteral("pptx") || suffix == QStringLiteral("pptm") || suffix == QStringLiteral("potx")
+        || suffix == QStringLiteral("potm")) {
         try {
             QFile file(abs);
             if (!file.open(QIODevice::ReadOnly)) {

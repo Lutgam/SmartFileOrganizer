@@ -9,7 +9,9 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QMutexLocker>
+#include <QQueue>
 #include <QRegularExpression>
+#include <QSet>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -172,6 +174,7 @@ void TagManager::loadTags(const std::string& directory) {
     m_rejectedTags.clear();
     m_pathToContentHash.clear();
     m_hashAnalysisCache.clear();
+    m_tagParents.clear();
 
     loadRejectedTags();
 
@@ -224,6 +227,15 @@ void TagManager::loadTags(const std::string& directory) {
                     m_hashAnalysisCache[hx] = it.value();
                 }
             }
+            if (root.contains("tag_parents") && root["tag_parents"].is_object()) {
+                for (auto it = root["tag_parents"].begin(); it != root["tag_parents"].end(); ++it) {
+                    if (!it.value().is_string()) continue;
+                    const QString child = normalizeTag(QString::fromStdString(it.key()));
+                    const QString parent = normalizeTag(QString::fromStdString(it.value().get<std::string>()));
+                    if (child.isEmpty() || parent.isEmpty()) continue;
+                    m_tagParents[child] = parent;
+                }
+            }
         } else {
             // Legacy: top-level keys are absolute paths → JSON array of tag strings.
             for (auto it = root.begin(); it != root.end(); ++it) {
@@ -274,6 +286,13 @@ void TagManager::saveTags() {
         }
         root["hash_analysis_cache"] = cache;
 
+        nlohmann::json tp = nlohmann::json::object();
+        for (const auto &[child, parent] : m_tagParents) {
+            if (child.isEmpty() || parent.isEmpty()) continue;
+            tp[child.toStdString()] = parent.toStdString();
+        }
+        root["tag_parents"] = tp;
+
         std::ofstream f(metadataFile);
         f << root.dump(4);
     } catch (const std::exception& e) {
@@ -315,6 +334,16 @@ void TagManager::renameTag(const QString& oldTag, const QString& newTag) {
     const QString nOld = normalizeTag(oldTag);
     const QString nNew = normalizeTag(newTag);
     if (nOld.isEmpty() || nNew.isEmpty()) return;
+    std::map<QString, QString> newParents;
+    for (const auto &pr : m_tagParents) {
+        QString c = pr.first;
+        QString p = pr.second;
+        if (c == nOld) c = nNew;
+        if (p == nOld) p = nNew;
+        if (c.isEmpty() || p.isEmpty()) continue;
+        newParents[c] = p;
+    }
+    m_tagParents = std::move(newParents);
     if (m_tagToFilePaths.count(nOld)) {
         std::set<QString> files = m_tagToFilePaths[nOld];
         m_tagToFilePaths.erase(nOld);
@@ -331,6 +360,12 @@ void TagManager::deleteTag(const QString& tag) {
     QMutexLocker locker(&m_mutex);
     const QString nt = normalizeTag(tag);
     if (nt.isEmpty()) return;
+    for (auto it = m_tagParents.begin(); it != m_tagParents.end();) {
+        if (it->first == nt || it->second == nt)
+            it = m_tagParents.erase(it);
+        else
+            ++it;
+    }
     if (m_tagToFilePaths.count(nt)) {
         std::set<QString> files = m_tagToFilePaths[nt];
         m_tagToFilePaths.erase(nt);
@@ -366,6 +401,19 @@ void TagManager::mergeTag(const QString& oldTag, const QString& newTag) {
 
     // remove old tag mapping entirely
     m_tagToFilePaths.erase(nOld);
+
+    {
+        std::map<QString, QString> newParents;
+        for (const auto &pr : m_tagParents) {
+            QString c = pr.first;
+            QString p = pr.second;
+            if (c == nOld) c = nNew;
+            if (p == nOld) p = nNew;
+            if (c.isEmpty() || p.isEmpty() || c == p) continue;
+            newParents[c] = p;
+        }
+        m_tagParents = std::move(newParents);
+    }
 
     // Remove from rejected tags if present (optional hygiene)
     if (m_rejectedTags.count(nOld)) {
@@ -673,6 +721,7 @@ void TagManager::clearAiTagsAndSummaries(bool save)
     m_fileToTags = std::move(newFileToTags);
     m_tagToFilePaths = std::move(newTagToFilePaths);
     m_hashAnalysisCache.clear();
+    m_tagParents.clear();
     if (save) saveTags();
 }
 
@@ -697,6 +746,7 @@ void TagManager::factoryResetWorkspaceData()
         m_pathToContentHash.clear();
         m_hashAnalysisCache.clear();
         m_rejectedTags.clear();
+        m_tagParents.clear();
     }
     try {
         if (!metaPath.empty() && fs::exists(metaPath)) fs::remove(metaPath);
@@ -706,4 +756,119 @@ void TagManager::factoryResetWorkspaceData()
     } catch (...) {
         qDebug() << "TagManager::factoryResetWorkspaceData remove unknown error";
     }
+}
+
+QString TagManager::tagParent(const QString &tag) const
+{
+    QMutexLocker locker(&m_mutex);
+    const QString nt = normalizeTag(tag);
+    const auto it = m_tagParents.find(nt);
+    if (it == m_tagParents.end()) return QString();
+    return it->second;
+}
+
+bool TagManager::setAiTagParent(const QString &childTag, const QString &parentTag, bool save)
+{
+    QMutexLocker locker(&m_mutex);
+    const QString child = normalizeTag(childTag);
+    const QString parent = normalizeTag(parentTag);
+    if (child.isEmpty() || !hasAiPrefix(child)) return false;
+    if (!parent.isEmpty()) {
+        if (!hasAiPrefix(parent)) return false;
+        if (parent == child) return false;
+        QString walk = parent;
+        QSet<QString> seen;
+        while (!walk.isEmpty()) {
+            if (walk == child) return false;
+            if (seen.contains(walk)) break;
+            seen.insert(walk);
+            const auto it = m_tagParents.find(walk);
+            walk = (it == m_tagParents.end()) ? QString() : it->second;
+        }
+    }
+    if (parent.isEmpty())
+        m_tagParents.erase(child);
+    else
+        m_tagParents[child] = parent;
+    if (save) saveTags();
+    return true;
+}
+
+std::vector<QString> TagManager::directChildTags(const QString &parentTag) const
+{
+    QMutexLocker locker(&m_mutex);
+    const QString p = normalizeTag(parentTag);
+    std::vector<QString> out;
+    for (const auto &pr : m_tagParents) {
+        if (pr.second == p) out.push_back(pr.first);
+    }
+    std::sort(out.begin(), out.end(), [](const QString &a, const QString &b) {
+        return a.localeAwareCompare(b) < 0;
+    });
+    return out;
+}
+
+void TagManager::deleteTagDissolveChildren(const QString &tag, bool save)
+{
+    QMutexLocker locker(&m_mutex);
+    const QString nt = normalizeTag(tag);
+    if (nt.isEmpty()) return;
+    for (auto it = m_tagParents.begin(); it != m_tagParents.end();) {
+        if (it->second == nt || it->first == nt)
+            it = m_tagParents.erase(it);
+        else
+            ++it;
+    }
+    if (m_tagToFilePaths.count(nt)) {
+        const std::set<QString> files = m_tagToFilePaths[nt];
+        m_tagToFilePaths.erase(nt);
+        for (const QString &file : files) {
+            if (m_fileToTags.count(file)) {
+                m_fileToTags[file].erase(nt);
+                if (m_fileToTags[file].empty()) m_fileToTags.erase(file);
+            }
+        }
+    }
+    if (save) saveTags();
+}
+
+void TagManager::deleteTagCascadeAi(const QString &tag, bool save)
+{
+    QMutexLocker locker(&m_mutex);
+    const QString root = normalizeTag(tag);
+    if (root.isEmpty() || !hasAiPrefix(root)) return;
+
+    QSet<QString> all;
+    QQueue<QString> q;
+    all.insert(root);
+    q.enqueue(root);
+    while (!q.isEmpty()) {
+        const QString u = q.dequeue();
+        for (const auto &pr : m_tagParents) {
+            if (pr.second == u && hasAiPrefix(pr.first) && !all.contains(pr.first)) {
+                all.insert(pr.first);
+                q.enqueue(pr.first);
+            }
+        }
+    }
+
+    for (auto it = m_tagParents.begin(); it != m_tagParents.end();) {
+        if (all.contains(it->first) || all.contains(it->second))
+            it = m_tagParents.erase(it);
+        else
+            ++it;
+    }
+
+    for (const QString &t : all) {
+        if (!m_tagToFilePaths.count(t)) continue;
+        const std::set<QString> files = m_tagToFilePaths[t];
+        m_tagToFilePaths.erase(t);
+        for (const QString &f : files) {
+            if (m_fileToTags.count(f)) {
+                m_fileToTags[f].erase(t);
+                if (m_fileToTags[f].empty()) m_fileToTags.erase(f);
+            }
+        }
+    }
+    if (save) saveTags();
 }

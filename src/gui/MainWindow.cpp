@@ -2,8 +2,10 @@
 #include "../core/DocumentParser.h"
 
 #include <QAbstractItemView>
+#include <QAbstractAnimation>
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
@@ -29,9 +31,14 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QTextCursor>
 #include <QMutexLocker>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
+#include <QHeaderView>
 #include <QSizePolicy>
 #include <QSpacerItem>
+#include <QSplitter>
 #include <QStyledItemDelegate>
 #include <QPainter>
 #include <QStyleOptionViewItem>
@@ -41,6 +48,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <functional>
 #include <map>
 
 #include "GraphWidget.h"
@@ -78,12 +86,15 @@ const QSet<QString> &zipOrPdfTextExtractSuffixes()
                                     QStringLiteral("docx"),
                                     QStringLiteral("docm"),
                                     QStringLiteral("dotx"),
+                                    QStringLiteral("dotm"),
                                     QStringLiteral("xlsx"),
                                     QStringLiteral("xlsm"),
                                     QStringLiteral("xltx"),
+                                    QStringLiteral("xltm"),
                                     QStringLiteral("pptx"),
                                     QStringLiteral("pptm"),
                                     QStringLiteral("potx"),
+                                    QStringLiteral("potm"),
                                     QStringLiteral("odt"),
                                     QStringLiteral("ods"),
                                     QStringLiteral("odp"),
@@ -94,10 +105,11 @@ const QSet<QString> &zipOrPdfTextExtractSuffixes()
 const QSet<QString> &officeZipPreviewSuffixes()
 {
     static const QSet<QString> k = {QStringLiteral("docx"), QStringLiteral("docm"), QStringLiteral("dotx"),
-                                     QStringLiteral("xlsx"), QStringLiteral("xlsm"), QStringLiteral("xltx"),
-                                     QStringLiteral("pptx"), QStringLiteral("pptm"), QStringLiteral("potx"),
-                                     QStringLiteral("odt"),  QStringLiteral("ods"),  QStringLiteral("odp"),
-                                     QStringLiteral("epub")};
+                                    QStringLiteral("dotm"), QStringLiteral("xlsx"), QStringLiteral("xlsm"),
+                                    QStringLiteral("xltx"), QStringLiteral("xltm"), QStringLiteral("pptx"),
+                                    QStringLiteral("pptm"), QStringLiteral("potx"), QStringLiteral("potm"),
+                                    QStringLiteral("odt"),  QStringLiteral("ods"),  QStringLiteral("odp"),
+                                    QStringLiteral("epub")};
     return k;
 }
 
@@ -333,6 +345,263 @@ void MainWindow::prioritizeAnalysisPaths(QStringList &paths, const QString &focu
     paths = under + other;
 }
 
+void MainWindow::prependUnanalyzedFromFolderToAnalysisQueue(const QString &folderAbs)
+{
+    const QString folder = QDir::cleanPath(folderAbs);
+    if (folder.isEmpty() || !m_isBatchMode) return;
+
+    const bool recursive = chkRecursive && chkRecursive->isChecked();
+    const QDirIterator::IteratorFlags flags =
+        recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags;
+
+    QStringList found;
+    QDirIterator it(folder, QDir::Files | QDir::NoDotAndDotDot, flags);
+    while (it.hasNext()) {
+        const QString p = QDir::cleanPath(it.next());
+        if (p.contains(QStringLiteral("/.smartfile")) || p.contains(QStringLiteral("\\.smartfile"))) continue;
+        const QFileInfo finfo(p);
+        if (!isAnalyzableFile(finfo)) continue;
+        if (m_aiSummaryByPath.contains(p)) continue;
+        found << p;
+    }
+    if (found.isEmpty()) return;
+    prioritizeAnalysisPaths(found, folder);
+
+    QSet<QString> existing;
+    for (const QString &q : m_analysisQueue) existing.insert(q);
+    if (!m_currentAnalyzingFile.isEmpty()) existing.insert(m_currentAnalyzingFile);
+    for (auto pit = m_pendingResults.constBegin(); pit != m_pendingResults.constEnd(); ++pit) existing.insert(pit.key());
+
+    QStringList prepend;
+    for (const QString &p : found) {
+        if (existing.contains(p)) continue;
+        prepend << p;
+        existing.insert(p);
+    }
+    if (prepend.isEmpty()) return;
+
+    QQueue<QString> newQueue;
+    for (const QString &p : prepend) newQueue.enqueue(p);
+    while (!m_analysisQueue.isEmpty()) newQueue.enqueue(m_analysisQueue.dequeue());
+    m_analysisQueue = std::move(newQueue);
+
+    const bool inFlight = (watcher && watcher->isRunning());
+    m_totalBatchSize = m_batchCompletedCount + m_analysisQueue.size() + (inFlight ? 1 : 0);
+    if (batchProgressBar) {
+        batchProgressBar->setMaximum(qMax(1, m_totalBatchSize));
+        syncBatchProgressBars();
+    }
+    updateBackgroundStatusLabel();
+}
+
+namespace {
+
+QString shortHashForUi(const QString &hex)
+{
+    if (hex.size() <= 16) return hex;
+    return hex.left(8) + QStringLiteral("…") + hex.right(6);
+}
+
+void collectCheckedPathsFromRedundancyGroup(QTreeWidgetItem *grp, QStringList *out)
+{
+    if (!grp || !out) return;
+    QTreeWidget *tw = grp->treeWidget();
+    if (!tw) return;
+    for (int ci = 0; ci < grp->childCount(); ++ci) {
+        QTreeWidgetItem *row = grp->child(ci);
+        if (!row) continue;
+        auto *cb = qobject_cast<QCheckBox *>(tw->itemWidget(row, 0));
+        if (!cb || !cb->isChecked()) continue;
+        const QString p = cb->property("absPath").toString();
+        if (!p.isEmpty()) *out << p;
+    }
+}
+
+} // namespace
+
+void MainWindow::mergeTaskCenterRedundancyBatch(int batchFilesAnalyzed,
+                                                int batchNewTagAdds,
+                                                const QMap<QString, QSet<QString>> &hashGroups,
+                                                const QMap<QString, QSet<QString>> &nameGroups)
+{
+    m_tcAccumFilesAnalyzed += batchFilesAnalyzed;
+    m_tcAccumTagAdds += batchNewTagAdds;
+    for (auto it = hashGroups.constBegin(); it != hashGroups.constEnd(); ++it) {
+        if (it.value().isEmpty()) continue;
+        m_persistRedundancyHash[it.key()].unite(it.value());
+    }
+    for (auto it = nameGroups.constBegin(); it != nameGroups.constEnd(); ++it) {
+        if (it.value().size() < 2) continue;
+        m_persistRedundancyName[it.key()].unite(it.value());
+    }
+    refreshTaskCenterRedundancyTreeUi();
+}
+
+void MainWindow::pruneTaskCenterPersistentRedundancy(const QStringList &removedPaths)
+{
+    QSet<QString> dead;
+    for (const QString &p : removedPaths) {
+        const QString c = QDir::cleanPath(p);
+        if (!c.isEmpty()) dead.insert(c);
+    }
+    if (dead.isEmpty()) return;
+
+    for (auto it = m_persistRedundancyHash.begin(); it != m_persistRedundancyHash.end();) {
+        for (const QString &p : dead) it.value().remove(p);
+        if (it.value().size() < 2) it = m_persistRedundancyHash.erase(it);
+        else ++it;
+    }
+    for (auto it = m_persistRedundancyName.begin(); it != m_persistRedundancyName.end();) {
+        for (const QString &p : dead) it.value().remove(p);
+        if (it.value().size() < 2) it = m_persistRedundancyName.erase(it);
+        else ++it;
+    }
+    if (m_persistRedundancyHash.isEmpty() && m_persistRedundancyName.isEmpty()) {
+        m_tcAccumFilesAnalyzed = 0;
+        m_tcAccumTagAdds = 0;
+    }
+    refreshTaskCenterRedundancyTreeUi();
+}
+
+void MainWindow::refreshTaskCenterRedundancyTreeUi()
+{
+    if (!m_taskCenterRedundancyTree) return;
+    m_taskCenterRedundancyTree->clear();
+
+    auto filterMultiPath = [](const QMap<QString, QSet<QString>> &in) {
+        QMap<QString, QSet<QString>> out;
+        for (auto it = in.constBegin(); it != in.constEnd(); ++it) {
+            if (it.value().size() >= 2) out.insert(it.key(), it.value());
+        }
+        return out;
+    };
+
+    const QMap<QString, QSet<QString>> hashToPaths = filterMultiPath(m_persistRedundancyHash);
+    const QMap<QString, QSet<QString>> baseNameToPaths = filterMultiPath(m_persistRedundancyName);
+
+    int hashDupCount = 0;
+    for (auto it = hashToPaths.constBegin(); it != hashToPaths.constEnd(); ++it) {
+        hashDupCount += static_cast<int>(it.value().size()) - 1;
+    }
+    int nameDupCount = 0;
+    for (auto it = baseNameToPaths.constBegin(); it != baseNameToPaths.constEnd(); ++it) {
+        nameDupCount += static_cast<int>(it.value().size()) - 1;
+    }
+
+    auto &lm = LanguageManager::instance();
+    auto *head = new QTreeWidgetItem(m_taskCenterRedundancyTree,
+                                     {lm.getText(QStringLiteral("redundancy_dialog_body_grouped"))
+                                          .arg(m_tcAccumFilesAnalyzed)
+                                          .arg(m_tcAccumTagAdds)
+                                          .arg(hashDupCount)
+                                          .arg(nameDupCount)});
+    head->setFlags(head->flags() & ~Qt::ItemIsSelectable);
+
+    if (!hashToPaths.isEmpty()) {
+        auto *section = new QTreeWidgetItem(m_taskCenterRedundancyTree,
+                                            {lm.getText(QStringLiteral("redundancy_section_hash"))});
+        section->setExpanded(true);
+        section->setFlags(section->flags() & ~Qt::ItemIsSelectable);
+        for (auto it = hashToPaths.constBegin(); it != hashToPaths.constEnd(); ++it) {
+            const QString hx = it.key();
+            const QSet<QString> paths = it.value();
+            if (paths.isEmpty()) continue;
+            const QString title = lm.getText(QStringLiteral("redundancy_group_hash_title"))
+                                      .arg(shortHashForUi(hx))
+                                      .arg(paths.size());
+            auto *grp = new QTreeWidgetItem(section, {title});
+            grp->setExpanded(true);
+            grp->setFlags(grp->flags() & ~Qt::ItemIsSelectable);
+            QStringList ordered;
+            for (const QString &p : paths) ordered << p;
+            std::sort(ordered.begin(), ordered.end(), [](const QString &a, const QString &b) {
+                return a.localeAwareCompare(b) < 0;
+            });
+            for (const QString &path : ordered) {
+                auto *row = new QTreeWidgetItem(grp, {QString()});
+                auto *cb = new QCheckBox(path, m_taskCenterRedundancyTree);
+                cb->setProperty("absPath", path);
+                cb->setChecked(false);
+                m_taskCenterRedundancyTree->setItemWidget(row, 0, cb);
+            }
+        }
+    }
+
+    if (!baseNameToPaths.isEmpty()) {
+        auto *section = new QTreeWidgetItem(m_taskCenterRedundancyTree,
+                                            {lm.getText(QStringLiteral("redundancy_section_name"))});
+        section->setExpanded(true);
+        section->setFlags(section->flags() & ~Qt::ItemIsSelectable);
+        QStringList keys = baseNameToPaths.keys();
+        std::sort(keys.begin(), keys.end(), [](const QString &a, const QString &b) {
+            return a.localeAwareCompare(b) < 0;
+        });
+        for (const QString &base : keys) {
+            const QSet<QString> paths = baseNameToPaths.value(base);
+            if (paths.size() < 2) continue;
+            const QString title =
+                lm.getText(QStringLiteral("redundancy_group_name_title")).arg(base).arg(paths.size());
+            auto *grp = new QTreeWidgetItem(section, {title});
+            grp->setExpanded(true);
+            grp->setFlags(grp->flags() & ~Qt::ItemIsSelectable);
+            QStringList ordered;
+            for (const QString &p : paths) ordered << p;
+            std::sort(ordered.begin(), ordered.end(), [](const QString &a, const QString &b) {
+                return a.localeAwareCompare(b) < 0;
+            });
+            for (const QString &path : ordered) {
+                auto *row = new QTreeWidgetItem(grp, {QString()});
+                auto *cb = new QCheckBox(path, m_taskCenterRedundancyTree);
+                cb->setProperty("absPath", path);
+                cb->setChecked(false);
+                m_taskCenterRedundancyTree->setItemWidget(row, 0, cb);
+            }
+        }
+    }
+}
+
+void MainWindow::onTaskCenterCleanClicked()
+{
+    if (!m_taskCenterRedundancyTree) return;
+    auto &lm = LanguageManager::instance();
+    QStringList toDelete;
+    for (int si = 0; si < m_taskCenterRedundancyTree->topLevelItemCount(); ++si) {
+        QTreeWidgetItem *top = m_taskCenterRedundancyTree->topLevelItem(si);
+        if (!top) continue;
+        for (int gi = 0; gi < top->childCount(); ++gi) {
+            QTreeWidgetItem *grp = top->child(gi);
+            if (!grp) continue;
+            collectCheckedPathsFromRedundancyGroup(grp, &toDelete);
+        }
+    }
+    if (toDelete.isEmpty()) {
+        QMessageBox::warning(this, lm.getText(QStringLiteral("redundancy_dialog_title")),
+                             lm.getText(QStringLiteral("redundancy_delete_select_first")));
+        return;
+    }
+    QStringList removed;
+    for (const QString &p : toDelete) {
+        if (QFile::remove(p)) removed << p;
+    }
+    if (!removed.isEmpty()) {
+        QString bulletLines;
+        for (const QString &p : removed) bulletLines += QStringLiteral("- %1\n").arg(p);
+        bulletLines = bulletLines.trimmed();
+        QMessageBox::information(this, lm.getText(QStringLiteral("redundancy_dialog_title")),
+                                 lm.getText(QStringLiteral("redundancy_delete_success")).arg(bulletLines));
+        {
+            QMutexLocker locker(&tagMutex);
+            for (const QString &p : removed) tagManager.removeFileMetadata(p, false);
+            tagManager.saveTags();
+        }
+        for (const QString &p : removed) m_aiSummaryByPath.remove(p);
+        scanFiles();
+        updateTagList();
+        if (m_bgAutoAnalyzeEnabled) ensureRecursiveWatchCoversWorkspace();
+        pruneTaskCenterPersistentRedundancy(removed);
+    }
+}
+
 void MainWindow::recordBatchPathForContentHash(const QString &hashHex, const QString &filePath)
 {
     if (hashHex.isEmpty() || filePath.isEmpty()) return;
@@ -368,28 +637,111 @@ void MainWindow::noteSameNameDifferentHashConflicts(const QString &filePath, con
     }
 }
 
+QString MainWindow::elideStatusLine(const QString &fullText, int pixelBudget) const
+{
+    if (fullText.isEmpty()) return fullText;
+    const int budget = qMax(48, pixelBudget);
+    if (!lblBackgroundStatus) return fullText;
+    return lblBackgroundStatus->fontMetrics().elidedText(fullText, Qt::ElideRight, budget);
+}
+
 void MainWindow::updateBackgroundStatusLabel()
 {
-    if (!lblBackgroundStatus) return;
     const int nRemaining = m_isBatchMode ? qMax(0, m_totalBatchSize - m_batchCompletedCount) : 0;
 
-    if (m_isBatchMode && nRemaining > 0) {
-        lblBackgroundStatus->setVisible(true);
-        lblBackgroundStatus->setStyleSheet(QStringLiteral(
-            "QLabel { color:#1d4ed8; font-weight:700; font-size:14px; padding-left:12px; }"));
-        lblBackgroundStatus->setText(
-            LanguageManager::instance().getText(QStringLiteral("bg_analyze_queue")).arg(nRemaining));
-        return;
+    const QString styleBusyLeft = QStringLiteral(
+        "QLabel { color:#1d4ed8; font-weight:700; font-size:14px; padding-left:12px; }");
+    static const QString kTaskCenterStatusSheet = QStringLiteral(
+        "QLabel { background-color: #2563eb; color: white; border-radius: 4px; padding: 4px; "
+        "font-weight: bold; }");
+
+    const bool manualBatchActive = m_isBatchMode && !m_batchTriggeredByBackgroundAuto && nRemaining > 0;
+    const bool bgBatchActive = m_isBatchMode && m_batchTriggeredByBackgroundAuto && nRemaining > 0;
+    const bool bgIdle = !m_isBatchMode && m_bgAutoAnalyzeEnabled && !rootPath.trimmed().isEmpty();
+
+    QString rawText;
+    if (manualBatchActive || bgBatchActive) {
+        const QString dirDisp = m_backgroundAnalyzeFolderLabel.isEmpty()
+                                    ? QStringLiteral("—")
+                                    : m_backgroundAnalyzeFolderLabel;
+        rawText = LanguageManager::instance()
+                      .getText(QStringLiteral("bg_analyze_queue_dir"))
+                      .arg(dirDisp)
+                      .arg(nRemaining);
+    } else if (bgIdle) {
+        rawText = LanguageManager::instance().getText(QStringLiteral("bg_idle_monitoring"));
+    } else {
+        rawText.clear();
     }
-    if (m_bgAutoAnalyzeEnabled && !rootPath.trimmed().isEmpty()) {
-        lblBackgroundStatus->setVisible(true);
-        lblBackgroundStatus->setStyleSheet(QStringLiteral(
-            "QLabel { color:#6b7280; font-weight:500; font-size:13px; padding-left:12px; }"));
-        lblBackgroundStatus->setText(
-            LanguageManager::instance().getText(QStringLiteral("bg_idle_monitoring")));
-        return;
+
+    if (lblBackgroundStatus) {
+        if (manualBatchActive) {
+            lblBackgroundStatus->setVisible(true);
+            lblBackgroundStatus->setStyleSheet(styleBusyLeft);
+            lblBackgroundStatus->setFixedWidth(220);
+            lblBackgroundStatus->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+            lblBackgroundStatus->setMinimumHeight(lblBackgroundStatus->fontMetrics().height() + 4);
+            lblBackgroundStatus->setText(elideStatusLine(rawText, 208));
+        } else {
+            lblBackgroundStatus->setVisible(false);
+            lblBackgroundStatus->clear();
+        }
     }
-    lblBackgroundStatus->setVisible(false);
+
+    if (m_taskCenterStatusLabel) {
+        const bool showTc = bgBatchActive || bgIdle;
+        m_taskCenterStatusLabel->setVisible(showTc);
+        if (!showTc || rawText.isEmpty()) {
+            if (!showTc) m_taskCenterStatusLabel->clear();
+        } else {
+            m_taskCenterStatusLabel->setStyleSheet(kTaskCenterStatusSheet);
+            m_taskCenterStatusLabel->setWordWrap(false);
+            m_taskCenterStatusLabel->setMinimumHeight(32);
+            int tw = 400;
+            if (m_taskCenterSplitter) {
+                QWidget *w = m_taskCenterSplitter->widget(0);
+                if (w && w->width() > 48) tw = qMax(120, w->width() - 24);
+            }
+            m_taskCenterStatusLabel->setText(
+                m_taskCenterStatusLabel->fontMetrics().elidedText(rawText, Qt::ElideRight, tw));
+        }
+    }
+
+    applyDualTrackBatchProgressVisibility();
+}
+
+void MainWindow::appendTaskCenterLog(const QString &text)
+{
+    if (!m_backgroundLogEdit) return;
+    QTextCursor c = m_backgroundLogEdit->textCursor();
+    c.movePosition(QTextCursor::End);
+    m_backgroundLogEdit->setTextCursor(c);
+    m_backgroundLogEdit->insertPlainText(text);
+    if (!text.endsWith(QLatin1Char('\n')))
+        m_backgroundLogEdit->insertPlainText(QStringLiteral("\n"));
+    m_backgroundLogEdit->insertPlainText(QStringLiteral("\n"));
+    c.movePosition(QTextCursor::End);
+    m_backgroundLogEdit->setTextCursor(c);
+}
+
+void MainWindow::syncBatchProgressBars()
+{
+    if (!batchProgressBar || !m_taskCenterBatchProgress) return;
+    m_taskCenterBatchProgress->setRange(batchProgressBar->minimum(), batchProgressBar->maximum());
+    m_taskCenterBatchProgress->setValue(batchProgressBar->value());
+    m_taskCenterBatchProgress->setFormat(batchProgressBar->format());
+    applyDualTrackBatchProgressVisibility();
+}
+
+void MainWindow::applyDualTrackBatchProgressVisibility()
+{
+    const bool manualTrack =
+        m_isBatchMode && !m_batchTriggeredByBackgroundAuto && m_totalBatchSize > 0;
+    const bool bgTrack = m_isBatchMode && m_batchTriggeredByBackgroundAuto && m_totalBatchSize > 0;
+
+    if (batchProgressBar) batchProgressBar->setVisible(manualTrack);
+    if (lblBatchStatus) lblBatchStatus->setVisible(manualTrack);
+    if (m_taskCenterBatchProgress) m_taskCenterBatchProgress->setVisible(bgTrack);
 }
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
@@ -411,6 +763,74 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_graphWidget = new GraphWidget(&tagManager, m_graphTab);
     graphLayout->addWidget(m_graphWidget, 1);
     m_mainTabWidget->addTab(m_graphTab, tr("關聯圖譜分析"));
+
+    m_taskCenterTab = new QWidget(this);
+    auto *tcLayout = new QVBoxLayout(m_taskCenterTab);
+    tcLayout->setContentsMargins(12, 12, 12, 12);
+
+    m_taskCenterSplitter = new QSplitter(Qt::Horizontal, m_taskCenterTab);
+    m_taskCenterSplitter->setChildrenCollapsible(false);
+
+    auto *tcLeftPane = new QWidget(m_taskCenterSplitter);
+    auto *tcLeftLayout = new QVBoxLayout(tcLeftPane);
+    tcLeftLayout->setContentsMargins(0, 0, 8, 0);
+
+    m_taskCenterStatusLabel = new QLabel(tcLeftPane);
+    m_taskCenterStatusLabel->setWordWrap(false);
+    m_taskCenterStatusLabel->setMinimumHeight(28);
+    m_taskCenterStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    tcLeftLayout->addWidget(m_taskCenterStatusLabel);
+
+    m_taskCenterBatchProgress = new QProgressBar(tcLeftPane);
+    m_taskCenterBatchProgress->setFixedHeight(36);
+    m_taskCenterBatchProgress->setTextVisible(true);
+    m_taskCenterBatchProgress->setVisible(false);
+    m_taskCenterBatchProgress->setFormat(QStringLiteral("%p%"));
+    m_taskCenterBatchProgress->setAlignment(Qt::AlignCenter);
+    m_taskCenterBatchProgress->setStyleSheet(QStringLiteral(
+        "QProgressBar {"
+        "  border: 1px solid rgba(255,255,255,70);"
+        "  border-radius: 8px;"
+        "  background: rgba(255,255,255,10);"
+        "  padding: 2px;"
+        "  color: rgba(255,255,255,230);"
+        "  font-weight: 600;"
+        "}"
+        "QProgressBar::chunk {"
+        "  background: #2b6cb0;"
+        "  border-radius: 6px;"
+        "  margin: 0px;"
+        "}"));
+    tcLeftLayout->addWidget(m_taskCenterBatchProgress);
+
+    m_backgroundLogEdit = new QTextEdit(tcLeftPane);
+    m_backgroundLogEdit->setReadOnly(true);
+    m_backgroundLogEdit->setAcceptRichText(false);
+    m_backgroundLogEdit->setMinimumHeight(120);
+    tcLeftLayout->addWidget(m_backgroundLogEdit, 1);
+
+    auto *tcRightPane = new QWidget(m_taskCenterSplitter);
+    auto *tcRightLayout = new QVBoxLayout(tcRightPane);
+    tcRightLayout->setContentsMargins(8, 0, 0, 0);
+
+    m_taskCenterRedundancyTree = new QTreeWidget(tcRightPane);
+    m_taskCenterRedundancyTree->setColumnCount(1);
+    m_taskCenterRedundancyTree->setHeaderHidden(true);
+    m_taskCenterRedundancyTree->header()->setStretchLastSection(true);
+    tcRightLayout->addWidget(m_taskCenterRedundancyTree, 1);
+
+    m_taskCenterCleanBtn = new QPushButton(QStringLiteral("清理勾選檔案"), tcRightPane);
+    connect(m_taskCenterCleanBtn, &QPushButton::clicked, this, &MainWindow::onTaskCenterCleanClicked);
+    tcRightLayout->addWidget(m_taskCenterCleanBtn);
+
+    m_taskCenterSplitter->addWidget(tcLeftPane);
+    m_taskCenterSplitter->addWidget(tcRightPane);
+    m_taskCenterSplitter->setStretchFactor(0, 55);
+    m_taskCenterSplitter->setStretchFactor(1, 45);
+
+    tcLayout->addWidget(m_taskCenterSplitter, 1);
+
+    m_mainTabWidget->addTab(m_taskCenterTab, tr("任務控制中心"));
 
     connect(m_mainTabWidget, &QTabWidget::currentChanged, this, [this](int) {
         if (!m_mainTabWidget || !m_graphWidget || !m_graphTab) return;
@@ -750,6 +1170,16 @@ void MainWindow::updateAllTexts() {
     if (m_previewTabWidget && m_previewOpsTab) {
         m_previewTabWidget->setTabText(m_previewTabWidget->indexOf(m_previewOpsTab), lm.getText(QStringLiteral("檔案操作")));
     }
+    if (m_mainTabWidget && m_taskCenterTab) {
+        m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_taskCenterTab),
+                                    lm.getText(QStringLiteral("tab_task_center")));
+    }
+    if (m_backgroundLogEdit) {
+        m_backgroundLogEdit->setPlaceholderText(lm.getText(QStringLiteral("bg_log_placeholder")));
+    }
+    if (m_taskCenterCleanBtn) {
+        m_taskCenterCleanBtn->setText(lm.getText(QStringLiteral("task_center_clean_selected")));
+    }
 
     if (cmbSort) {
         const int idx = cmbSort->currentIndex();
@@ -775,14 +1205,13 @@ void MainWindow::updateAllTexts() {
     }
 
     // Re-render tag list display names (system tags need presentation translation)
-    if (m_tagTabWidget && m_systemTagListWidget && m_aiTagListWidget) {
+    if (m_tagTabWidget && m_systemTagListWidget && m_aiTagTreeWidget) {
         m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_systemTagListWidget), lm.getText(QStringLiteral("預設分類 (System Tags)")));
-        m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_aiTagListWidget), lm.getText(QStringLiteral("AI 標籤 (AI Tags)")));
+        m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_aiTagTreeWidget), lm.getText(QStringLiteral("AI 標籤 (AI Tags)")));
     }
 
     auto refreshTagLibraryList = [&](QListWidget *activeList) {
         if (!activeList) return;
-        const bool stripAi = (activeList == m_aiTagListWidget);
         const QString allFilesText = lm.getText(QStringLiteral("All Files"));
         if (activeList->count() > 0) {
             auto *it0 = activeList->item(0);
@@ -803,12 +1232,35 @@ void MainWindow::updateAllTexts() {
                                       ? canon
                                       : QStringLiteral("%1 %2").arg(emoji, lm.getText(baseZh));
             displayName = displayName.trimmed();
-            if (stripAi) displayName = tagLibraryLabelStripAiBadge(displayName);
             it->setText(QStringLiteral("%1 (%2)").arg(displayName).arg(n));
         }
     };
+    auto refreshAiTagTreeLabels = [&](QTreeWidget *tree) {
+        if (!tree) return;
+        const QString allFilesText = lm.getText(QStringLiteral("All Files"));
+        std::function<void(QTreeWidgetItem *)> walk;
+        walk = [&](QTreeWidgetItem *node) {
+            if (!node) return;
+            const QString role = node->data(0, Qt::UserRole).toString();
+            if (role == QStringLiteral("ALL")) {
+                node->setText(0, allFilesText);
+            } else if (!role.isEmpty()) {
+                const int n = node->data(0, Qt::UserRole + 1).toInt();
+                const QString canon = normalizeDisplayTag(role);
+                const QString baseZh = node->data(0, Qt::UserRole + 2).toString();
+                const QString emoji = systemTagEmojiPrefix(canon);
+                QString displayName = baseZh.isEmpty()
+                                          ? canon
+                                          : QStringLiteral("%1 %2").arg(emoji, lm.getText(baseZh));
+                displayName = tagLibraryLabelStripAiBadge(displayName.trimmed());
+                node->setText(0, QStringLiteral("%1 (%2)").arg(displayName).arg(n));
+            }
+            for (int i = 0; i < node->childCount(); ++i) walk(node->child(i));
+        };
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) walk(tree->topLevelItem(i));
+    };
     refreshTagLibraryList(m_systemTagListWidget);
-    refreshTagLibraryList(m_aiTagListWidget);
+    refreshAiTagTreeLabels(m_aiTagTreeWidget);
 
     if (cmbTagFilter && cmbTagFilter->count() > 0) {
         cmbTagFilter->setItemText(0, lm.getText(QStringLiteral("All Files")));
@@ -897,13 +1349,17 @@ void MainWindow::setupFourColumnLayout() {
 
     m_tagTabWidget = new QTabWidget(this);
     m_systemTagListWidget = new QListWidget(this);
-    m_aiTagListWidget = new QListWidget(this);
     m_systemTagListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_aiTagListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_aiTagTreeWidget = new QTreeWidget(this);
+    m_aiTagTreeWidget->setColumnCount(1);
+    m_aiTagTreeWidget->setHeaderHidden(true);
+    m_aiTagTreeWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_aiTagTreeWidget->setRootIsDecorated(true);
+    m_aiTagTreeWidget->setUniformRowHeights(true);
     connect(m_systemTagListWidget, &QListWidget::itemClicked, this, &MainWindow::onTagSelected);
-    connect(m_aiTagListWidget, &QListWidget::itemClicked, this, &MainWindow::onTagSelected);
+    connect(m_aiTagTreeWidget, &QTreeWidget::itemClicked, this, &MainWindow::onAiTagTreeItemClicked);
     m_tagTabWidget->addTab(m_systemTagListWidget, LanguageManager::instance().getText(QStringLiteral("預設分類 (System Tags)")));
-    m_tagTabWidget->addTab(m_aiTagListWidget, LanguageManager::instance().getText(QStringLiteral("AI 標籤 (AI Tags)")));
+    m_tagTabWidget->addTab(m_aiTagTreeWidget, LanguageManager::instance().getText(QStringLiteral("AI 標籤 (AI Tags)")));
     tagsLayout->addWidget(m_tagTabWidget);
 
     auto *tagButtons = new QHBoxLayout();
@@ -991,6 +1447,7 @@ void MainWindow::setupFourColumnLayout() {
         fileListMode = FileListMode::PhysicalFolder;
         activeVirtualTag.clear();
         navigateToFolder(fi.absoluteFilePath(), true);
+        prependUnanalyzedFromFolderToAnalysisQueue(QDir::cleanPath(fi.absoluteFilePath()));
     });
 
     mainSplitter->addWidget(foldersPanel);
@@ -1007,7 +1464,8 @@ void MainWindow::setupFourColumnLayout() {
     lblBackgroundStatus->setVisible(false);
     lblBackgroundStatus->setWordWrap(false);
     lblBackgroundStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    lblBackgroundStatus->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+    lblBackgroundStatus->setFixedWidth(220);
+    lblBackgroundStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     lblBackgroundStatus->setStyleSheet(QStringLiteral(
         "QLabel { color:#1d4ed8; font-weight:700; font-size:14px; padding-left:12px; }"));
     fileTitleRow->addWidget(lblBackgroundStatus, 0, Qt::AlignRight | Qt::AlignVCenter);
@@ -1129,10 +1587,11 @@ void MainWindow::setupFourColumnLayout() {
         flushPendingBatchResults();
         m_totalBatchSize = 0;
         m_isBatchMode = false;
+        m_batchTriggeredByBackgroundAuto = false;
         m_currentAnalyzingFile.clear();
+        m_backgroundAnalyzeFolderLabel.clear();
         updateBackgroundStatusLabel();
-        if (batchProgressBar) batchProgressBar->setVisible(false);
-        if (lblBatchStatus) lblBatchStatus->setVisible(false);
+        syncBatchProgressBars();
         if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
         if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
@@ -1274,8 +1733,8 @@ void MainWindow::setupFourColumnLayout() {
 
 void MainWindow::setupContextMenus() {
     auto *systemList = m_systemTagListWidget;
-    auto *aiList = m_aiTagListWidget;
-    if (!systemList || !aiList) return;
+    auto *aiTree = m_aiTagTreeWidget;
+    if (!systemList || !aiTree) return;
 
     auto attachMenu = [this](QListWidget *list) {
         connect(list, &QListWidget::customContextMenuRequested, this, [this, list](const QPoint &pos) {
@@ -1368,8 +1827,163 @@ void MainWindow::setupContextMenus() {
     };
 
     attachMenu(systemList);
-    attachMenu(aiList);
 
+    connect(aiTree, &QTreeWidget::customContextMenuRequested, this, [this, aiTree](const QPoint &pos) {
+        QTreeWidgetItem *it = aiTree->itemAt(pos);
+        if (!it) return;
+        if (it->data(0, Qt::UserRole).toString() == QStringLiteral("ALL")) return;
+        const QString rawTag = it->data(0, Qt::UserRole).toString();
+        if (rawTag.isEmpty()) return;
+
+        auto isUnderTag = [this](QString walk, const QString &ancestor) -> bool {
+            QSet<QString> seen;
+            while (!walk.isEmpty()) {
+                if (walk == ancestor) return true;
+                if (seen.contains(walk)) break;
+                seen.insert(walk);
+                QString p;
+                {
+                    QMutexLocker locker(&tagMutex);
+                    p = tagManager.tagParent(walk);
+                }
+                walk = p;
+            }
+            return false;
+        };
+
+        QMenu menu(this);
+        auto &lm = LanguageManager::instance();
+        QAction *actRename = menu.addAction(lm.getText(QStringLiteral("重新命名")));
+        QAction *actGroup = menu.addAction(lm.getText(QStringLiteral("tag_group_under")));
+        QAction *actMerge = menu.addAction(lm.getText(QStringLiteral("合併標籤至...")));
+        QAction *actDelete = menu.addAction(lm.getText(QStringLiteral("刪除（全域）")));
+        QAction *chosen = menu.exec(aiTree->mapToGlobal(pos));
+        if (!chosen) return;
+
+        if (chosen == actRename) {
+            bool ok = false;
+            const QString newTag = QInputDialog::getText(this, QStringLiteral("Rename"), QStringLiteral("New name:"),
+                                                         QLineEdit::Normal, rawTag, &ok)
+                                     .trimmed();
+            if (!ok || newTag.isEmpty() || newTag == rawTag) return;
+            QMutexLocker locker(&tagMutex);
+            tagManager.renameTag(rawTag, newTag);
+            tagManager.saveTags();
+        } else if (chosen == actGroup) {
+            std::vector<QString> all;
+            {
+                QMutexLocker locker(&tagMutex);
+                all = tagManager.getAllTags();
+            }
+            QStringList parents;
+            for (const QString &t : all) {
+                if (!TagManager::hasAiPrefix(t) || t == rawTag) continue;
+                if (isUnderTag(t, rawTag)) continue;
+                parents << t;
+            }
+            parents.removeDuplicates();
+            if (parents.isEmpty()) {
+                QMessageBox::information(this, lm.getText(QStringLiteral("tag_group_under")),
+                                         lm.getText(QStringLiteral("tag_group_under_none")));
+                return;
+            }
+            std::sort(parents.begin(), parents.end(), [](const QString &a, const QString &b) {
+                return a.localeAwareCompare(b) < 0;
+            });
+            QStringList labels;
+            for (const QString &t : parents) labels << mergeTargetPickerLabel(t);
+            bool ok = false;
+            const QString picked = QInputDialog::getItem(this, lm.getText(QStringLiteral("tag_group_under")),
+                                                         lm.getText(QStringLiteral("tag_pick_parent")), labels, 0,
+                                                         false, &ok);
+            if (!ok) return;
+            const int ix = labels.indexOf(picked);
+            if (ix < 0 || ix >= parents.size()) return;
+            const QString parentTag = parents.at(ix);
+            {
+                QMutexLocker locker(&tagMutex);
+                if (!tagManager.setAiTagParent(rawTag, parentTag, true)) {
+                    QMessageBox::warning(this, lm.getText(QStringLiteral("tag_group_under")),
+                                         lm.getText(QStringLiteral("tag_group_under_invalid")));
+                }
+            }
+        } else if (chosen == actMerge) {
+            std::vector<QString> all;
+            {
+                QMutexLocker locker(&tagMutex);
+                all = tagManager.getAllTags();
+            }
+            QStringList realCandidates;
+            for (const QString &t : all) {
+                if (t == rawTag) continue;
+                realCandidates << t;
+            }
+            realCandidates.removeDuplicates();
+            realCandidates.sort(Qt::CaseInsensitive);
+            if (realCandidates.isEmpty()) return;
+            QStringList displayChoices;
+            std::vector<QString> realByRow;
+            QSet<QString> usedLabels;
+            for (const QString &real : realCandidates) {
+                const QString baseLabel = mergeTargetPickerLabel(real);
+                QString show = baseLabel;
+                if (usedLabels.contains(show)) show = QStringLiteral("%1  <%2>").arg(baseLabel, real);
+                usedLabels.insert(show);
+                displayChoices << show;
+                realByRow.push_back(real);
+            }
+            bool ok = false;
+            const QString picked = QInputDialog::getItem(this, lm.getText(QStringLiteral("合併標籤至...")),
+                                                         lm.getText(QStringLiteral("選擇目標標籤:")), displayChoices, 0,
+                                                         false, &ok);
+            if (!ok || picked.trimmed().isEmpty()) return;
+            const int ix = displayChoices.indexOf(picked);
+            if (ix < 0 || ix >= static_cast<int>(realByRow.size())) return;
+            const QString target = realByRow[static_cast<size_t>(ix)];
+            if (target.trimmed().isEmpty() || target == rawTag) return;
+            {
+                QMutexLocker locker(&tagMutex);
+                tagManager.mergeTag(rawTag, target);
+                tagManager.saveTags();
+            }
+        } else if (chosen == actDelete) {
+            std::vector<QString> ch;
+            {
+                QMutexLocker locker(&tagMutex);
+                ch = tagManager.directChildTags(rawTag);
+            }
+            if (!ch.empty()) {
+                QMessageBox box(this);
+                box.setIcon(QMessageBox::Question);
+                box.setWindowTitle(lm.getText(QStringLiteral("刪除（全域）")));
+                box.setText(lm.getText(QStringLiteral("tag_delete_parent_has_children")).arg(rawTag));
+                QPushButton *bDissolve =
+                    box.addButton(lm.getText(QStringLiteral("tag_delete_dissolve")), QMessageBox::AcceptRole);
+                QPushButton *bCascade =
+                    box.addButton(lm.getText(QStringLiteral("tag_delete_cascade")), QMessageBox::DestructiveRole);
+                box.addButton(QMessageBox::Cancel);
+                box.setDefaultButton(QMessageBox::Cancel);
+                box.exec();
+                if (box.clickedButton() == bDissolve) {
+                    QMutexLocker locker(&tagMutex);
+                    tagManager.deleteTagDissolveChildren(rawTag, true);
+                } else if (box.clickedButton() == bCascade) {
+                    QMutexLocker locker(&tagMutex);
+                    tagManager.deleteTagCascadeAi(rawTag, true);
+                } else {
+                    return;
+                }
+            } else {
+                QMutexLocker locker(&tagMutex);
+                tagManager.deleteTag(rawTag);
+                tagManager.saveTags();
+            }
+        }
+        fileListMode = FileListMode::PhysicalFolder;
+        activeVirtualTag.clear();
+        updateTagList();
+        scanFiles();
+    });
 }
 
 void MainWindow::showFileContextMenu(const QPoint &pos) {
@@ -1898,9 +2512,40 @@ QString MainWindow::currentFilePath() const {
     return selected.first()->data(Qt::UserRole).toString();
 }
 
+namespace {
+
+const QSet<QString> &junkFileSuffixes()
+{
+    static const QSet<QString> k = [] {
+        QSet<QString> s;
+        const QStringList parts = QStringLiteral(
+                                      "ds_store,ini,cfg,plist,dll,so,dylib,sys,cab,tmp,bak,log,o,obj,class,pyc")
+                                      .split(QLatin1Char(','));
+        for (const QString &p : parts) s.insert(p.trimmed().toLower());
+        return s;
+    }();
+    return k;
+}
+
+bool isJunkFilename(const QString &fileNameLower)
+{
+    static const QStringList kExact = {QStringLiteral("desktop.ini"), QStringLiteral("thumbs.db"),
+                                       QStringLiteral("license"), QStringLiteral("copying")};
+    return kExact.contains(fileNameLower);
+}
+
+} // namespace
+
 bool MainWindow::isAnalyzableFile(const QFileInfo &fi) const {
     if (!fi.exists()) return false;
     if (fi.isDir()) return false;
+
+    const QString fnLower = fi.fileName().toLower();
+    if (isJunkFilename(fnLower)) return false;
+
+    const QString sfx = fi.suffix().toLower();
+    if (!sfx.isEmpty() && junkFileSuffixes().contains(sfx)) return false;
+
     if (fi.isSymLink()) {
         const QString target = fi.symLinkTarget();
         if (!target.isEmpty() && QFileInfo(target).isDir()) return false;
@@ -1936,11 +2581,7 @@ void MainWindow::scanPhysicalFolder() {
         const QString filePath = it.next();
         const QFileInfo fileInfo(filePath);
         if (!fileInfo.exists()) continue;
-        if (fileInfo.isDir()) continue;
-        if (fileInfo.isSymLink()) {
-            const QString target = fileInfo.symLinkTarget();
-            if (!target.isEmpty() && QFileInfo(target).isDir()) continue;
-        }
+        if (!isAnalyzableFile(fileInfo)) continue;
         const QString fileName = fileInfo.fileName();
         m_pendingFilesToDisplay.push_back(filePath);
 
@@ -1994,7 +2635,14 @@ void MainWindow::populateVirtualTagFiles(const QString &tag) {
 
     {
         QMutexLocker locker(&tagMutex);
-        m_pendingFilesToDisplay = tagManager.getFilesByTag(tag);
+        const std::vector<QString> raw = tagManager.getFilesByTag(tag);
+        m_pendingFilesToDisplay.clear();
+        m_pendingFilesToDisplay.reserve(raw.size());
+        for (const QString &p : raw) {
+            const QFileInfo finfo(p);
+            if (!isAnalyzableFile(finfo)) continue;
+            m_pendingFilesToDisplay.push_back(p);
+        }
     }
 
     auto translateVirtualTagForDisplay = [&](const QString &raw) {
@@ -2061,11 +2709,7 @@ void MainWindow::renderFileListBatch(int count) {
         const QString filePath = m_pendingFilesToDisplay[static_cast<size_t>(i)];
         const QFileInfo fi(filePath);
         if (!fi.exists()) continue;
-        if (fi.isDir()) continue;
-        if (fi.isSymLink()) {
-            const QString target = fi.symLinkTarget();
-            if (!target.isEmpty() && QFileInfo(target).isDir()) continue;
-        }
+        if (!isAnalyzableFile(fi)) continue;
 
         if (fileListMode == FileListMode::VirtualTag) {
             QString parentPath = fi.absolutePath();
@@ -2116,7 +2760,7 @@ void MainWindow::updateTagListCountsOnly() {
             const QString displayName = baseZh.isEmpty()
                                             ? canon
                                             : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-            const QString rowLabel = (list == m_aiTagListWidget) ? tagLibraryLabelStripAiBadge(displayName) : displayName.trimmed();
+            const QString rowLabel = displayName.trimmed();
             it->setText(QStringLiteral("%1 (%2)").arg(rowLabel).arg(n));
             it->setData(Qt::UserRole, canon);
             it->setData(Qt::UserRole + 1, n);
@@ -2124,8 +2768,39 @@ void MainWindow::updateTagListCountsOnly() {
         }
     };
 
+    auto updateAiTree = [this](QTreeWidget *tree) {
+        if (!tree) return;
+        std::function<void(QTreeWidgetItem *)> walk;
+        walk = [&](QTreeWidgetItem *it) {
+            if (!it) return;
+            const QString role = it->data(0, Qt::UserRole).toString();
+            if (role.isEmpty() || role == QStringLiteral("ALL")) {
+                for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
+                return;
+            }
+            const QString canon = normalizeDisplayTag(role);
+            int n = 0;
+            {
+                QMutexLocker locker(&tagMutex);
+                n = static_cast<int>(tagManager.getFilesByTag(canon).size());
+            }
+            const QString baseZh = systemTagBaseZh(canon);
+            const QString emoji = systemTagEmojiPrefix(canon);
+            const QString displayName = baseZh.isEmpty()
+                                            ? canon
+                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+            const QString rowLabel = tagLibraryLabelStripAiBadge(displayName);
+            it->setText(0, QStringLiteral("%1 (%2)").arg(rowLabel).arg(n));
+            it->setData(0, Qt::UserRole, canon);
+            it->setData(0, Qt::UserRole + 1, n);
+            it->setData(0, Qt::UserRole + 2, baseZh);
+            for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
+        };
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) walk(tree->topLevelItem(i));
+    };
+
     updateList(m_systemTagListWidget);
-    updateList(m_aiTagListWidget);
+    updateAiTree(m_aiTagTreeWidget);
     syncTagFilterFromTagList();
 }
 
@@ -2133,11 +2808,17 @@ void MainWindow::updateTagList() {
     tagManager.repairMalformedTagKeys();
 
     if (m_systemTagListWidget) m_systemTagListWidget->clear();
-    if (m_aiTagListWidget) m_aiTagListWidget->clear();
+    if (m_aiTagTreeWidget) m_aiTagTreeWidget->clear();
 
     if (m_systemTagListWidget) {
         auto *allItem = new QListWidgetItem(LanguageManager::instance().getText(QStringLiteral("All Files")), m_systemTagListWidget);
         allItem->setData(Qt::UserRole, QStringLiteral("ALL"));
+    }
+
+    if (m_aiTagTreeWidget) {
+        auto *allAi = new QTreeWidgetItem(QStringList{LanguageManager::instance().getText(QStringLiteral("All Files"))});
+        allAi->setData(0, Qt::UserRole, QStringLiteral("ALL"));
+        m_aiTagTreeWidget->addTopLevelItem(allAi);
     }
 
     std::vector<QString> rawTags;
@@ -2194,13 +2875,78 @@ void MainWindow::updateTagList() {
                                         ? canon
                                         : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
         const bool isAi = TagManager::hasAiPrefix(canon);
-        QListWidget *target = isAi ? m_aiTagListWidget : m_systemTagListWidget;
+        if (isAi) continue;
+
+        QListWidget *target = m_systemTagListWidget;
         if (!target) continue;
-        const QString rowLabel = isAi ? tagLibraryLabelStripAiBadge(displayName) : displayName.trimmed();
+        const QString rowLabel = displayName.trimmed();
         auto *it = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(rowLabel).arg(n), target);
         it->setData(Qt::UserRole, canon);
         it->setData(Qt::UserRole + 1, n);
         it->setData(Qt::UserRole + 2, baseZh);
+    }
+
+    if (m_aiTagTreeWidget) {
+        QList<QString> aiOrdered;
+        for (const QString &c : ordered) {
+            if (TagManager::hasAiPrefix(c)) aiOrdered.append(c);
+        }
+        QSet<QString> aiSet;
+        for (const QString &c : aiOrdered) aiSet.insert(c);
+
+        QHash<QString, QVector<QString>> childMap;
+        QVector<QString> roots;
+        for (const QString &t : aiOrdered) {
+            QString p;
+            {
+                QMutexLocker locker(&tagMutex);
+                p = tagManager.tagParent(t);
+            }
+            if (!p.isEmpty() && aiSet.contains(p))
+                childMap[p].append(t);
+            else
+                roots.append(t);
+        }
+        auto countFor = [&](const QString &c) -> int {
+            if (normToFiles.count(c)) return static_cast<int>(normToFiles[c].size());
+            QMutexLocker locker(&tagMutex);
+            return static_cast<int>(tagManager.getFilesByTag(c).size());
+        };
+        std::sort(roots.begin(), roots.end(), [&](const QString &a, const QString &b) {
+            const int na = countFor(a);
+            const int nb = countFor(b);
+            if (na != nb) return na > nb;
+            return a.localeAwareCompare(b) < 0;
+        });
+
+        std::function<void(QTreeWidgetItem *, const QString &)> addAiNode;
+        addAiNode = [&](QTreeWidgetItem *parentItem, const QString &canon) {
+            const int n = countFor(canon);
+            const QString baseZh = systemTagBaseZh(canon);
+            const QString emoji = systemTagEmojiPrefix(canon);
+            const QString displayName = baseZh.isEmpty()
+                                            ? canon
+                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+            const QString rowLabel = tagLibraryLabelStripAiBadge(displayName);
+            QTreeWidgetItem *it = parentItem ? new QTreeWidgetItem(parentItem)
+                                             : new QTreeWidgetItem();
+            it->setText(0, QStringLiteral("%1 (%2)").arg(rowLabel).arg(n));
+            it->setData(0, Qt::UserRole, canon);
+            it->setData(0, Qt::UserRole + 1, n);
+            it->setData(0, Qt::UserRole + 2, baseZh);
+            if (!parentItem)
+                m_aiTagTreeWidget->addTopLevelItem(it);
+            QVector<QString> ch = childMap.value(canon);
+            std::sort(ch.begin(), ch.end(), [&](const QString &a, const QString &b) {
+                const int na = countFor(a);
+                const int nb = countFor(b);
+                if (na != nb) return na > nb;
+                return a.localeAwareCompare(b) < 0;
+            });
+            for (const QString &c : ch) addAiNode(it, c);
+        };
+
+        for (const QString &r : roots) addAiNode(nullptr, r);
     }
 
     syncTagFilterFromTagList();
@@ -2214,7 +2960,6 @@ void MainWindow::syncTagFilterFromTagList() {
     cmbTagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("All Files")), QStringLiteral("ALL"));
     auto addFromList = [this](QListWidget *list) {
         if (!list) return;
-        const bool stripAi = (list == m_aiTagListWidget);
         for (int i = 0; i < list->count(); ++i) {
             const auto *it = list->item(i);
             if (!it) continue;
@@ -2228,12 +2973,33 @@ void MainWindow::syncTagFilterFromTagList() {
                                             ? canon
                                             : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
             displayName = displayName.trimmed();
-            if (stripAi) displayName = tagLibraryLabelStripAiBadge(displayName);
             cmbTagFilter->addItem(displayName, rawTag);
         }
     };
+    auto addFromAiTree = [this](QTreeWidget *tree) {
+        if (!tree) return;
+        std::function<void(QTreeWidgetItem *)> walk;
+        walk = [&](QTreeWidgetItem *node) {
+            if (!node) return;
+            const QString rawTag = node->data(0, Qt::UserRole).toString();
+            if (rawTag == QStringLiteral("ALL") || rawTag.isEmpty()) {
+                for (int i = 0; i < node->childCount(); ++i) walk(node->child(i));
+                return;
+            }
+            const QString baseZh = node->data(0, Qt::UserRole + 2).toString();
+            const QString canon = normalizeDisplayTag(rawTag);
+            const QString emoji = systemTagEmojiPrefix(canon);
+            QString displayName = baseZh.isEmpty()
+                                            ? canon
+                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+            displayName = tagLibraryLabelStripAiBadge(displayName.trimmed());
+            cmbTagFilter->addItem(displayName, rawTag);
+            for (int i = 0; i < node->childCount(); ++i) walk(node->child(i));
+        };
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) walk(tree->topLevelItem(i));
+    };
     addFromList(m_systemTagListWidget);
-    addFromList(m_aiTagListWidget);
+    addFromAiTree(m_aiTagTreeWidget);
     const int idx = cmbTagFilter->findData(prevData);
     cmbTagFilter->setCurrentIndex(idx >= 0 ? idx : 0);
     cmbTagFilter->blockSignals(false);
@@ -2264,8 +3030,28 @@ void MainWindow::syncTagListFromTagFilter() {
         }
         return false;
     };
+    auto selectInTree = [&](QTreeWidget *tree) -> bool {
+        if (!tree) return false;
+        std::function<bool(QTreeWidgetItem *)> walk;
+        walk = [&](QTreeWidgetItem *node) -> bool {
+            if (!node) return false;
+            if (node->data(0, Qt::UserRole).toString() == selected) {
+                tree->setCurrentItem(node);
+                tree->scrollToItem(node);
+                return true;
+            }
+            for (int i = 0; i < node->childCount(); ++i) {
+                if (walk(node->child(i))) return true;
+            }
+            return false;
+        };
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            if (walk(tree->topLevelItem(i))) return true;
+        }
+        return false;
+    };
     if (selectIn(m_systemTagListWidget)) return;
-    (void)selectIn(m_aiTagListWidget);
+    (void)selectInTree(m_aiTagTreeWidget);
 }
 
 void MainWindow::filterFiles() {
@@ -2333,7 +3119,15 @@ void MainWindow::onFileSelected(QListWidgetItem *item) {
 
 void MainWindow::onTagSelected(QListWidgetItem *item) {
     if (!item) return;
-    const QString data = item->data(Qt::UserRole).toString();
+    applyTagSelectionData(item->data(Qt::UserRole).toString());
+}
+
+void MainWindow::onAiTagTreeItemClicked(QTreeWidgetItem *item, int) {
+    if (!item) return;
+    applyTagSelectionData(item->data(0, Qt::UserRole).toString());
+}
+
+void MainWindow::applyTagSelectionData(const QString &data) {
     if (data == QStringLiteral("ALL")) {
         fileListMode = FileListMode::PhysicalFolder;
         activeVirtualTag.clear();
@@ -2346,7 +3140,7 @@ void MainWindow::onTagSelected(QListWidgetItem *item) {
     const QString tag = normalizeDisplayTag(data);
     fileListMode = FileListMode::VirtualTag;
     activeVirtualTag = tag;
-    const int idx = cmbTagFilter->findText(tag);
+    const int idx = cmbTagFilter->findData(tag);
     if (idx >= 0) cmbTagFilter->setCurrentIndex(idx);
     populateVirtualTagFiles(tag);
 }
@@ -2571,7 +3365,7 @@ void MainWindow::setUiBusy(bool busy) {
     fileList->setEnabled(!busy);
     folderTree->setEnabled(!busy);
     if (m_systemTagListWidget) m_systemTagListWidget->setEnabled(!busy);
-    if (m_aiTagListWidget) m_aiTagListWidget->setEnabled(!busy);
+    if (m_aiTagTreeWidget) m_aiTagTreeWidget->setEnabled(!busy);
     cmbTagFilter->setEnabled(!busy);
     txtSearch->setEnabled(!busy);
     cmbSort->setEnabled(!busy);
@@ -2625,6 +3419,7 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
             if (batchProgressBar && m_totalBatchSize > 0) {
                 batchProgressBar->setValue(qMin(m_totalBatchSize, m_batchCompletedCount));
             }
+            syncBatchProgressBars();
             lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成（重複內容：已套用快取）")));
             updateBackgroundStatusLabel();
             QTimer::singleShot(0, this, &MainWindow::processNextInQueue);
@@ -2766,12 +3561,13 @@ void MainWindow::processNextInQueue() {
 
     if (m_analysisQueue.isEmpty()) {
         // Completed
+        const bool finishedBgBatch = m_batchTriggeredByBackgroundAuto;
         m_isBatchMode = false;
         m_currentAnalyzingFile.clear();
+        m_backgroundAnalyzeFolderLabel.clear();
         updateBackgroundStatusLabel();
         flushPendingBatchResults();
-        if (batchProgressBar) batchProgressBar->setVisible(false);
-        if (lblBatchStatus) lblBatchStatus->setVisible(false);
+        syncBatchProgressBars();
 
         // Restore UI
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
@@ -2784,13 +3580,32 @@ void MainWindow::processNextInQueue() {
         else populateVirtualTagFiles(activeVirtualTag);
 
         showFolderAnalysisReport();
-        if (m_bgAutoAnalyzeEnabled && m_bgAutoAnalyzeDebounce && !rootPath.trimmed().isEmpty())
-            m_bgAutoAnalyzeDebounce->start();
+        if (m_bgAutoAnalyzeEnabled && m_bgAutoAnalyzeDebounce && !rootPath.trimmed().isEmpty()) {
+            if (finishedBgBatch) {
+                QTimer::singleShot(1500, this, [this]() {
+                    if (!m_bgAutoAnalyzeDebounce || !m_bgAutoAnalyzeEnabled || rootPath.trimmed().isEmpty()
+                        || m_isBatchMode)
+                        return;
+                    m_bgAutoAnalyzeDebounce->start();
+                });
+            } else {
+                m_bgAutoAnalyzeDebounce->start();
+            }
+        }
         return;
     }
 
     const QString nextFile = m_analysisQueue.dequeue();
     m_currentAnalyzingFile = nextFile;
+    {
+        const QFileInfo nfi(nextFile);
+        QString dname = nfi.dir().dirName();
+        if (dname.isEmpty())
+            dname = QFileInfo(nfi.absolutePath()).fileName();
+        if (dname.isEmpty() || dname == QLatin1String(".") || dname == QLatin1String("/"))
+            dname = nfi.absolutePath();
+        m_backgroundAnalyzeFolderLabel = dname;
+    }
     updateBackgroundStatusLabel();
     const int nowDone = m_totalBatchSize - m_analysisQueue.size();
     if (lblBatchStatus) {
@@ -2854,6 +3669,28 @@ bool MainWindow::trySystemBypassPreset(const QFileInfo &fi, QString *summaryOut,
     const QString sfx = fi.suffix().toLower();
     auto &lm = LanguageManager::instance();
 
+    QString absNorm = QDir::cleanPath(fi.absoluteFilePath());
+    absNorm.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    const QString lp = absNorm.toLower();
+
+    auto pathHitsDevHeuristic = [&lp]() -> bool {
+        static const QStringList markers = {QStringLiteral("/node_modules/"), QStringLiteral("/.git/"),
+                                              QStringLiteral("/venv/"),      QStringLiteral("/build/"),
+                                              QStringLiteral("/.idea/")};
+        for (const QString &m : markers) {
+            if (lp.contains(m, Qt::CaseInsensitive)) return true;
+        }
+        if (lp.contains(QStringLiteral("/appdata"), Qt::CaseInsensitive)) return true;
+        return false;
+    };
+
+    const bool inDevPath = pathHitsDevHeuristic();
+    if (inDevPath) {
+        *summaryOut = lm.getText(QStringLiteral("bypass_summary_dev_dependency"));
+        *tagsOut << lm.getText(QStringLiteral("bypass_tag_dev_system_file"));
+        return true;
+    }
+
     if (name.contains(QStringLiteral("替身")) || sfx == QStringLiteral("lnk") || sfx == QStringLiteral("alias")) {
         *summaryOut = lm.getText(QStringLiteral("bypass_summary_shortcut"));
         *tagsOut << lm.getText(QStringLiteral("bypass_tag_shortcut"));
@@ -2892,6 +3729,7 @@ void MainWindow::applyPresetBypassAnalysis(const QString &fp, const QString &sum
         if (batchProgressBar && m_totalBatchSize > 0) {
             batchProgressBar->setValue(qMin(m_totalBatchSize, m_batchCompletedCount));
         }
+        syncBatchProgressBars();
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
         updateBackgroundStatusLabel();
         QTimer::singleShot(0, this, &MainWindow::processNextInQueue);
@@ -3035,7 +3873,7 @@ void MainWindow::onBackgroundAutoAnalyzeDebounce()
     if (watcher && watcher->isRunning()) {
         if (m_bgAnalyzeQueueRetries < 50) {
             ++m_bgAnalyzeQueueRetries;
-            QTimer::singleShot(300, this, &MainWindow::onBackgroundAutoAnalyzeDebounce);
+            QTimer::singleShot(1500, this, &MainWindow::onBackgroundAutoAnalyzeDebounce);
         } else {
             m_bgAnalyzeQueueRetries = 0;
         }
@@ -3045,7 +3883,7 @@ void MainWindow::onBackgroundAutoAnalyzeDebounce()
     if (m_consolidateWatcher && m_consolidateWatcher->isRunning()) return;
 
     QStringList paths;
-    collectUnanalyzedPathsFromWorkspace(200, &paths);
+    collectUnanalyzedPathsFromWorkspace(10, &paths);
     if (paths.isEmpty()) return;
 
     const QString focus = (fileListMode == FileListMode::PhysicalFolder) ? QDir::cleanPath(currentPath) : QString();
@@ -3076,20 +3914,18 @@ void MainWindow::beginBatchAnalysisUi()
         batchProgressBar->setRange(0, m_totalBatchSize);
         batchProgressBar->setValue(0);
         batchProgressBar->setFormat(QStringLiteral("%p%"));
-        batchProgressBar->setVisible(true);
-        batchProgressBar->show();
         batchProgressBar->update();
         batchProgressBar->repaint();
         QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     }
     if (lblBatchStatus) {
-        lblBatchStatus->setVisible(true);
         lblBatchStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在資料夾分析")));
     }
     if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(false);
     if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(false);
     if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(true);
     updateBackgroundStatusLabel();
+    syncBatchProgressBars();
 }
 
 void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached, const QString &contentHashHex)
@@ -3155,6 +3991,8 @@ void MainWindow::showFolderAnalysisReport()
     const bool showTree = !hashGroups.isEmpty() || !nameGroups.isEmpty();
     const int yTotal = hashDupCount + nameDupCount;
 
+    const bool silentBackground = m_batchTriggeredByBackgroundAuto;
+
     if (n <= 0 && x <= 0 && yTotal <= 0 && !showTree) {
         m_batchHashToPaths.clear();
         m_batchNameConflictPaths.clear();
@@ -3164,7 +4002,40 @@ void MainWindow::showFolderAnalysisReport()
         return;
     }
 
+    if (silentBackground) {
+        QStringList block;
+        const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        block << lm.getText(QStringLiteral("bg_log_completion")).arg(ts).arg(x).arg(yTotal);
+        if (yTotal > 0) {
+            QSet<QString> pathsOut;
+            for (auto it = hashGroups.constBegin(); it != hashGroups.constEnd(); ++it) {
+                for (const QString &p : it.value()) pathsOut.insert(p);
+            }
+            for (auto it = nameGroups.constBegin(); it != nameGroups.constEnd(); ++it) {
+                for (const QString &p : it.value()) pathsOut.insert(p);
+            }
+            QStringList sorted;
+            sorted.reserve(static_cast<int>(pathsOut.size()));
+            for (const QString &p : pathsOut) sorted.append(p);
+            std::sort(sorted.begin(), sorted.end(), [](const QString &a, const QString &b) {
+                return a.localeAwareCompare(b) < 0;
+            });
+            for (const QString &p : sorted) block << p;
+        }
+        appendTaskCenterLog(block.join(QStringLiteral("\n")));
+        mergeTaskCenterRedundancyBatch(n, x, showTree ? hashGroups : QMap<QString, QSet<QString>>(),
+                                       showTree ? nameGroups : QMap<QString, QSet<QString>>());
+
+        m_batchHashToPaths.clear();
+        m_batchNameConflictPaths.clear();
+        m_batchCompletedCount = 0;
+        m_folderReportAiTagAdds = 0;
+        m_batchTriggeredByBackgroundAuto = false;
+        return;
+    }
+
     if (showTree) {
+        mergeTaskCenterRedundancyBatch(n, x, hashGroups, nameGroups);
         RedundancyReportDialog dlg(this, n, x, hashDupCount, nameDupCount, hashGroups, nameGroups);
         connect(&dlg, &RedundancyReportDialog::redundantFilesRemoved, this, [this](const QStringList &paths) {
             {
@@ -3176,9 +4047,11 @@ void MainWindow::showFolderAnalysisReport()
             scanFiles();
             updateTagList();
             if (m_bgAutoAnalyzeEnabled) ensureRecursiveWatchCoversWorkspace();
+            pruneTaskCenterPersistentRedundancy(paths);
         });
         dlg.exec();
     } else {
+        mergeTaskCenterRedundancyBatch(n, x, QMap<QString, QSet<QString>>(), QMap<QString, QSet<QString>>());
         const QString body = lm.getText(QStringLiteral("folder_report_body")).arg(n).arg(x).arg(yTotal);
         QMessageBox::information(this, lm.getText(QStringLiteral("folder_report_title")), body);
     }
@@ -3429,6 +4302,11 @@ void MainWindow::onAnalysisFinished() {
         if (!m_batchProgressAnim) {
             m_batchProgressAnim = new QPropertyAnimation(batchProgressBar, "value", this);
             m_batchProgressAnim->setDuration(500);
+            connect(m_batchProgressAnim, &QAbstractAnimation::finished, this, &MainWindow::syncBatchProgressBars);
+            connect(m_batchProgressAnim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+                if (m_taskCenterBatchProgress && m_isBatchMode && m_batchTriggeredByBackgroundAuto)
+                    m_taskCenterBatchProgress->setValue(v.toInt());
+            });
         }
         m_batchProgressAnim->stop();
         m_batchProgressAnim->setStartValue(batchProgressBar->value());
@@ -3666,35 +4544,87 @@ void MainWindow::removeTag() {
 }
 
 void MainWindow::removeGlobalTag() {
-    QList<QListWidgetItem*> selected;
+    QString data;
     if (m_tagTabWidget && m_tagTabWidget->currentIndex() == 1) {
-        if (m_aiTagListWidget) selected = m_aiTagListWidget->selectedItems();
+        if (!m_aiTagTreeWidget) return;
+        const QList<QTreeWidgetItem *> sel = m_aiTagTreeWidget->selectedItems();
+        if (sel.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇標籤"));
+            return;
+        }
+        data = sel.first()->data(0, Qt::UserRole).toString();
     } else {
-        if (m_systemTagListWidget) selected = m_systemTagListWidget->selectedItems();
-    }
-    if (selected.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇標籤"));
-        return;
+        if (!m_systemTagListWidget) return;
+        const QList<QListWidgetItem *> sel = m_systemTagListWidget->selectedItems();
+        if (sel.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇標籤"));
+            return;
+        }
+        data = sel.first()->data(Qt::UserRole).toString();
     }
 
-    const QString data = selected.first()->data(Qt::UserRole).toString();
     if (data == QStringLiteral("ALL")) {
         QMessageBox::warning(this, tr("Warning"), tr("Cannot delete All Files"));
         return;
     }
 
     const QString tag = normalizeDisplayTag(data);
-    const auto reply = QMessageBox::question(this, QStringLiteral("Delete"),
-                                            QStringLiteral("確定刪除標籤「%1」？").arg(tag),
-                                            QMessageBox::Yes | QMessageBox::No);
-    if (reply != QMessageBox::Yes) return;
+    auto &lm = LanguageManager::instance();
 
-    {
-        QMutexLocker locker(&tagMutex);
-        tagManager.deleteTag(tag);
-        tagManager.addRejectedTag(tag);
-        tagManager.saveTags();
+    if (m_tagTabWidget && m_tagTabWidget->currentIndex() == 1 && TagManager::hasAiPrefix(tag)) {
+        std::vector<QString> ch;
+        {
+            QMutexLocker locker(&tagMutex);
+            ch = tagManager.directChildTags(tag);
+        }
+        if (!ch.empty()) {
+            QMessageBox box(this);
+            box.setIcon(QMessageBox::Question);
+            box.setWindowTitle(lm.getText(QStringLiteral("刪除（全域）")));
+            box.setText(lm.getText(QStringLiteral("tag_delete_parent_has_children")).arg(tag));
+            QPushButton *bDissolve =
+                box.addButton(lm.getText(QStringLiteral("tag_delete_dissolve")), QMessageBox::AcceptRole);
+            QPushButton *bCascade =
+                box.addButton(lm.getText(QStringLiteral("tag_delete_cascade")), QMessageBox::DestructiveRole);
+            box.addButton(QMessageBox::Cancel);
+            box.setDefaultButton(QMessageBox::Cancel);
+            box.exec();
+            if (box.clickedButton() == bDissolve) {
+                QMutexLocker locker(&tagMutex);
+                tagManager.deleteTagDissolveChildren(tag, true);
+                tagManager.addRejectedTag(tag);
+            } else if (box.clickedButton() == bCascade) {
+                QMutexLocker locker(&tagMutex);
+                tagManager.deleteTagCascadeAi(tag, true);
+                tagManager.addRejectedTag(tag);
+            } else {
+                return;
+            }
+        } else {
+            const auto reply = QMessageBox::question(this, QStringLiteral("Delete"),
+                                                     QStringLiteral("確定刪除標籤「%1」？").arg(tag),
+                                                     QMessageBox::Yes | QMessageBox::No);
+            if (reply != QMessageBox::Yes) return;
+            {
+                QMutexLocker locker(&tagMutex);
+                tagManager.deleteTag(tag);
+                tagManager.addRejectedTag(tag);
+                tagManager.saveTags();
+            }
+        }
+    } else {
+        const auto reply = QMessageBox::question(this, QStringLiteral("Delete"),
+                                                 QStringLiteral("確定刪除標籤「%1」？").arg(tag),
+                                                 QMessageBox::Yes | QMessageBox::No);
+        if (reply != QMessageBox::Yes) return;
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.deleteTag(tag);
+            tagManager.addRejectedTag(tag);
+            tagManager.saveTags();
+        }
     }
+
     fileListMode = FileListMode::PhysicalFolder;
     activeVirtualTag.clear();
     updateTagList();
@@ -3798,9 +4728,10 @@ QStringList MainWindow::getFastPathTags(const QString &filename) {
     if (lower.endsWith(QStringLiteral(".cpp")) || lower.endsWith(QStringLiteral(".h")) || lower.endsWith(QStringLiteral(".hpp")) || lower.endsWith(QStringLiteral(".c")) || lower.endsWith(QStringLiteral(".rs")) || lower.endsWith(QStringLiteral(".go")) || lower.endsWith(QStringLiteral(".py")) || lower.endsWith(QStringLiteral(".js")) || lower.endsWith(QStringLiteral(".ts")) || lower.endsWith(QStringLiteral(".java")) || lower.endsWith(QStringLiteral(".cs")))
         tags << QStringLiteral("⌨️程式碼");
     if (lower.endsWith(QStringLiteral(".pdf")) || lower.endsWith(QStringLiteral(".docx")) || lower.endsWith(QStringLiteral(".docm"))
-        || lower.endsWith(QStringLiteral(".dotx")) || lower.endsWith(QStringLiteral(".xlsx")) || lower.endsWith(QStringLiteral(".xlsm"))
-        || lower.endsWith(QStringLiteral(".xltx")) || lower.endsWith(QStringLiteral(".pptx")) || lower.endsWith(QStringLiteral(".pptm"))
-        || lower.endsWith(QStringLiteral(".potx")) || lower.endsWith(QStringLiteral(".odt")) || lower.endsWith(QStringLiteral(".ods"))
+        || lower.endsWith(QStringLiteral(".dotx")) || lower.endsWith(QStringLiteral(".dotm")) || lower.endsWith(QStringLiteral(".xlsx"))
+        || lower.endsWith(QStringLiteral(".xlsm")) || lower.endsWith(QStringLiteral(".xltx")) || lower.endsWith(QStringLiteral(".xltm"))
+        || lower.endsWith(QStringLiteral(".pptx")) || lower.endsWith(QStringLiteral(".pptm")) || lower.endsWith(QStringLiteral(".potx"))
+        || lower.endsWith(QStringLiteral(".potm")) || lower.endsWith(QStringLiteral(".odt")) || lower.endsWith(QStringLiteral(".ods"))
         || lower.endsWith(QStringLiteral(".odp")) || lower.endsWith(QStringLiteral(".epub")) || lower.endsWith(QStringLiteral(".txt"))
         || lower.endsWith(QStringLiteral(".md")) || lower.endsWith(QStringLiteral(".rtf")))
         tags << kTagDoc;

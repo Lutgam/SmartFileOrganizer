@@ -61,6 +61,12 @@ public:
     std::vector<QString> getAllTags() const;
     std::vector<QString> getFilesByTag(const QString& tag) const;
 
+    QString tagParent(const QString &tag) const;
+    bool setAiTagParent(const QString &childTag, const QString &parentTag, bool save = true);
+    std::vector<QString> directChildTags(const QString &parentTag) const;
+    void deleteTagDissolveChildren(const QString &tag, bool save = true);
+    void deleteTagCascadeAi(const QString &tag, bool save = true);
+
     void addRejectedTag(const QString& tag);
     QStringList getRejectedTags() const;
 
@@ -81,6 +87,8 @@ private:
     std::set<QString> m_rejectedTags;
     std::map<QString, QString> m_pathToContentHash;
     std::map<QString, nlohmann::json> m_hashAnalysisCache;
+    /// Child tag (canonical) → parent tag (canonical). Only meaningful edges are stored.
+    std::map<QString, QString> m_tagParents;
     mutable QRecursiveMutex m_mutex;
     
     QString normalizeTag(const QString &tag) const;

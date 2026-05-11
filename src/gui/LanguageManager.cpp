@@ -244,8 +244,45 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("bg_analyze_running")) return en ? QStringLiteral("🔄 Background analysis… (%1)") : QStringLiteral("🔄 背景分析中… (%1)");
     if (key == QStringLiteral("bg_analyze_queue"))
         return en ? QStringLiteral("🔄 Analyzing… (%1 file(s) remaining)") : QStringLiteral("🔄 分析中… (剩餘 %1 個檔案)");
+    if (key == QStringLiteral("bg_analyze_queue_dir"))
+        return en ? QStringLiteral("🔄 Analyzing… [folder: %1] (%2 remaining)")
+                  : QStringLiteral("🔄 分析中… [目錄: %1] (剩餘 %2)");
+    if (key == QStringLiteral("tab_task_center"))
+        return en ? QStringLiteral("Task Center") : QStringLiteral("任務控制中心");
+    if (key == QStringLiteral("task_center_clean_selected"))
+        return en ? QStringLiteral("Delete checked files") : QStringLiteral("清理勾選檔案");
+    if (key == QStringLiteral("tag_group_under"))
+        return en ? QStringLiteral("Group under…") : QStringLiteral("收納至…");
+    if (key == QStringLiteral("tag_pick_parent"))
+        return en ? QStringLiteral("Pick parent tag:") : QStringLiteral("選擇父標籤：");
+    if (key == QStringLiteral("tag_group_under_none"))
+        return en ? QStringLiteral("No other AI tag can be a parent.") : QStringLiteral("沒有可作為父節點的其他 AI 標籤。");
+    if (key == QStringLiteral("tag_group_under_invalid"))
+        return en ? QStringLiteral("Cannot set parent (cycle or invalid).") : QStringLiteral("無法設定父節點（可能造成循環或無效）。");
+    if (key == QStringLiteral("tag_delete_parent_has_children")) {
+        return en ? QStringLiteral("Tag \"%1\" has child tags in the library. Dissolve group (children move to top level) or delete this tag and all descendants?")
+                  : QStringLiteral("標籤「%1」在標籤庫中仍有子標籤。要解散群組（子標籤移至頂層），或連同子樹一併刪除？");
+    }
+    if (key == QStringLiteral("tag_delete_dissolve"))
+        return en ? QStringLiteral("Dissolve group") : QStringLiteral("解散群組");
+    if (key == QStringLiteral("tag_delete_cascade"))
+        return en ? QStringLiteral("Delete with subtree") : QStringLiteral("一併刪除子標籤");
+    if (key == QStringLiteral("bg_log_completion")) {
+        return en ? QStringLiteral("[%1] Background batch finished: +%2 tag(s), %3 redundant file(s) detected.")
+                  : QStringLiteral("[%1] 背景分析完成：新增 %2 個標籤，發現 %3 個冗餘檔案。");
+    }
+    if (key == QStringLiteral("bg_log_placeholder")) {
+        return en ? QStringLiteral("When a background batch finishes, a summary is appended here (no pop-up).")
+                  : QStringLiteral("背景批次完成後，摘要將附加於此（不會彈出阻斷視窗）。");
+    }
     if (key == QStringLiteral("bg_idle_monitoring"))
         return en ? QStringLiteral("👀 Monitoring & crawler idle…") : QStringLiteral("👀 系統監控與爬蟲待命中…");
+    if (key == QStringLiteral("bypass_tag_dev_system_file"))
+        return en ? QStringLiteral("Development & system files") : QStringLiteral("[開發與系統檔]");
+    if (key == QStringLiteral("bypass_summary_dev_dependency")) {
+        return en ? QStringLiteral("System-generated development configuration or dependency artifact.")
+                  : QStringLiteral("系統產生的開發設定或依賴檔案。");
+    }
     if (key == QStringLiteral("bypass_tag_shortcut"))
         return en ? QStringLiteral("System shortcut") : QStringLiteral("系統捷徑");
     if (key == QStringLiteral("bypass_summary_shortcut")) {

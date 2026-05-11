@@ -17,6 +17,7 @@
 #include <QTextEdit>
 #include <QToolBar>
 #include <QTreeView>
+#include <QTreeWidget>
 #include <QtConcurrent>
 
 #include <QFileSystemModel>
@@ -92,6 +93,7 @@ private slots:
     void showFileContextMenu(const QPoint &pos);
     void onFileSelected(QListWidgetItem *item);
     void onTagSelected(QListWidgetItem *item);
+    void onAiTagTreeItemClicked(QTreeWidgetItem *item, int column);
 
     void physicalArchiveFiles();
     void undoLastPhysicalArchive();
@@ -130,6 +132,7 @@ private:
     QTabWidget *m_mainTabWidget = nullptr;
     QWidget *m_workspaceTab = nullptr;
     QWidget *m_graphTab = nullptr;
+    QWidget *m_taskCenterTab = nullptr;
     GraphWidget *m_graphWidget = nullptr;
 
     QAction *m_actOpenFolder = nullptr;
@@ -142,7 +145,7 @@ private:
     QLabel *lblTagLibraryTitle = nullptr;
     QTabWidget *m_tagTabWidget = nullptr;
     QListWidget *m_systemTagListWidget = nullptr;
-    QListWidget *m_aiTagListWidget = nullptr;
+    QTreeWidget *m_aiTagTreeWidget = nullptr;
     QPushButton *btnLeftAddTag = nullptr;
     QPushButton *btnLeftRemoveTag = nullptr;
 
@@ -184,6 +187,19 @@ private:
     QTabWidget *m_previewTabWidget = nullptr;
     QWidget *m_previewTagTab = nullptr;
     QWidget *m_previewOpsTab = nullptr;
+
+    QSplitter *m_taskCenterSplitter = nullptr;
+    QLabel *m_taskCenterStatusLabel = nullptr;
+    QProgressBar *m_taskCenterBatchProgress = nullptr;
+    QTextEdit *m_backgroundLogEdit = nullptr;
+    QTreeWidget *m_taskCenterRedundancyTree = nullptr;
+    QPushButton *m_taskCenterCleanBtn = nullptr;
+
+    /// Task Center: cumulative redundancy (never cleared on new background batches until user cleans).
+    QMap<QString, QSet<QString>> m_persistRedundancyHash;
+    QMap<QString, QSet<QString>> m_persistRedundancyName;
+    int m_tcAccumFilesAnalyzed = 0;
+    int m_tcAccumTagAdds = 0;
 
     QPushButton *btnAnalyzeFile = nullptr;
     QPushButton *btnCancelAnalysis = nullptr;
@@ -236,6 +252,8 @@ private:
     int m_batchCompletedCount = 0;
     int m_folderReportAiTagAdds = 0;
     bool m_batchTriggeredByBackgroundAuto = false;
+    /// Immediate parent folder name for the file currently processed in batch (status label).
+    QString m_backgroundAnalyzeFolderLabel;
     bool m_bgAutoAnalyzeEnabled = false;
     QTimer *m_bgAutoAnalyzeDebounce = nullptr;
     int m_bgAnalyzeQueueRetries = 0;
@@ -258,7 +276,19 @@ private:
     void recordBatchPathForContentHash(const QString &hashHex, const QString &filePath);
     void noteSameNameDifferentHashConflicts(const QString &filePath, const QString &hashHex);
     void updateBackgroundStatusLabel();
-    static void prioritizeAnalysisPaths(QStringList &paths, const QString &focusFolderAbs);
+    void appendTaskCenterLog(const QString &text);
+    void mergeTaskCenterRedundancyBatch(int batchFilesAnalyzed,
+                                        int batchNewTagAdds,
+                                        const QMap<QString, QSet<QString>> &hashGroups,
+                                        const QMap<QString, QSet<QString>> &nameGroups);
+    void refreshTaskCenterRedundancyTreeUi();
+    void pruneTaskCenterPersistentRedundancy(const QStringList &removedPaths);
+    void onTaskCenterCleanClicked();
+    void syncBatchProgressBars();
+    void applyDualTrackBatchProgressVisibility();
+    QString elideStatusLine(const QString &fullText, int pixelBudget) const;
+    void prependUnanalyzedFromFolderToAnalysisQueue(const QString &folderAbs);
+    void prioritizeAnalysisPaths(QStringList &paths, const QString &focusFolderAbs);
 
     void collectUnanalyzedPathsFromWorkspace(int maxFiles, QStringList *out);
     bool trySystemBypassPreset(const QFileInfo &fi, QString *summaryOut, QStringList *tagsOut) const;
@@ -300,6 +330,7 @@ private:
 
     void updateTagList();
     void updateTagListCountsOnly();
+    void applyTagSelectionData(const QString &userRoleData);
     void syncTagFilterFromTagList();
     void syncTagListFromTagFilter();
     void setUiBusy(bool busy);
