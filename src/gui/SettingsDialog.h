@@ -18,9 +18,14 @@ public:
     int selectedLanguageIndex() const; // 0: ZH_TW, 1: EN_US
     QString modelPath() const;
     bool backgroundAutoAnalysis() const;
+    /// When true, skip LLM for shortcuts / executables / archives (workspace/system_file_bypass_filter).
+    bool systemFileBypassFilter() const;
 
 signals:
     void settingsApplied();
+    void clearAiCacheRequested();
+    void clearHashCacheRequested();
+    void factoryResetRequested();
 
 private:
     void loadFromSettings();
@@ -34,7 +39,11 @@ private:
     QLineEdit *m_modelPathEdit = nullptr;
     QPushButton *m_browseBtn = nullptr;
     QCheckBox *m_bgAutoAnalyze = nullptr;
+    QCheckBox *m_systemFileBypass = nullptr;
+
+    QPushButton *m_btnClearAi = nullptr;
+    QPushButton *m_btnClearHash = nullptr;
+    QPushButton *m_btnFactoryReset = nullptr;
 };
 
 #endif
-

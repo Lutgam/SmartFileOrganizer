@@ -636,3 +636,74 @@ QStringList TagManager::getRejectedTags() const {
     out.sort(Qt::CaseInsensitive);
     return out;
 }
+
+void TagManager::clearAiTagsAndSummaries(bool save)
+{
+    QMutexLocker locker(&m_mutex);
+    std::set<QString> allPaths;
+    for (const auto &e : m_fileToTags) allPaths.insert(e.first);
+    for (const auto &e : m_pathToContentHash) allPaths.insert(e.first);
+
+    std::map<QString, std::set<QString>> newFileToTags;
+    std::map<QString, std::set<QString>> newTagToFilePaths;
+
+    for (const QString &path : allPaths) {
+        std::set<QString> kept;
+        const auto itOld = m_fileToTags.find(path);
+        if (itOld != m_fileToTags.end()) {
+            for (const QString &t : itOld->second) {
+                if (hasAiPrefix(t)) continue;
+                const QString nt = normalizeTag(t);
+                if (nt.isEmpty()) continue;
+                kept.insert(nt);
+            }
+        }
+        if (!kept.empty()) {
+            newFileToTags[path] = kept;
+            for (const QString &t : kept) newTagToFilePaths[t].insert(path);
+        } else if (m_pathToContentHash.count(path) || itOld != m_fileToTags.end()) {
+            newFileToTags[path] = {};
+        }
+    }
+
+    for (const auto &e : m_pathToContentHash) {
+        if (!newFileToTags.count(e.first)) newFileToTags[e.first] = {};
+    }
+
+    m_fileToTags = std::move(newFileToTags);
+    m_tagToFilePaths = std::move(newTagToFilePaths);
+    m_hashAnalysisCache.clear();
+    if (save) saveTags();
+}
+
+void TagManager::clearHashCaches(bool save)
+{
+    QMutexLocker locker(&m_mutex);
+    m_pathToContentHash.clear();
+    m_hashAnalysisCache.clear();
+    if (save) saveTags();
+}
+
+void TagManager::factoryResetWorkspaceData()
+{
+    std::string metaPath;
+    std::string rejPath;
+    {
+        QMutexLocker locker(&m_mutex);
+        metaPath = getMetadataPath();
+        rejPath = getRejectedTagsPath();
+        m_tagToFilePaths.clear();
+        m_fileToTags.clear();
+        m_pathToContentHash.clear();
+        m_hashAnalysisCache.clear();
+        m_rejectedTags.clear();
+    }
+    try {
+        if (!metaPath.empty() && fs::exists(metaPath)) fs::remove(metaPath);
+        if (!rejPath.empty() && fs::exists(rejPath)) fs::remove(rejPath);
+    } catch (const std::exception &e) {
+        qDebug() << "TagManager::factoryResetWorkspaceData remove error:" << e.what();
+    } catch (...) {
+        qDebug() << "TagManager::factoryResetWorkspaceData remove unknown error";
+    }
+}

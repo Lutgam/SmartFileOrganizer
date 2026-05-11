@@ -76,7 +76,6 @@ protected:
 };
 
 class GraphWidget;
-class DuplicateCleanerWidget;
 class SettingsDialog;
 
 class MainWindow : public QMainWindow {
@@ -97,8 +96,6 @@ private slots:
     void physicalArchiveFiles();
     void undoLastPhysicalArchive();
     void onDirectoryChanged(const QString &path);
-    void showDuplicateCleanerTab();
-    void onDuplicateCleanupCompleted(const QList<QPair<QString, QString>> &movedHistory);
     void openSettings();
 
     void goBack();
@@ -121,6 +118,10 @@ private slots:
     void onConsolidateTagsFinished();
     void onBackgroundAutoAnalyzeDebounce();
 
+    void onWorkspaceClearAiCache();
+    void onWorkspaceClearHashCache();
+    void onWorkspaceFactoryReset();
+
 private:
     enum class FileListMode { PhysicalFolder, VirtualTag };
 
@@ -128,13 +129,10 @@ private:
     QSplitter *mainSplitter = nullptr;
     QTabWidget *m_mainTabWidget = nullptr;
     QWidget *m_workspaceTab = nullptr;
-    QWidget *m_duplicateCleanerTab = nullptr;
     QWidget *m_graphTab = nullptr;
-    DuplicateCleanerWidget *m_duplicateCleanerWidget = nullptr;
     GraphWidget *m_graphWidget = nullptr;
 
     QAction *m_actOpenFolder = nullptr;
-    QAction *m_actFindDuplicates = nullptr;
     QAction *m_actSettings = nullptr;
 
     void updateAllTexts();
@@ -240,6 +238,8 @@ private:
     bool m_batchTriggeredByBackgroundAuto = false;
     bool m_bgAutoAnalyzeEnabled = false;
     QTimer *m_bgAutoAnalyzeDebounce = nullptr;
+    int m_bgAnalyzeQueueRetries = 0;
+    bool m_systemFileBypassEnabled = true;
 
     void startBatchAnalysis();
     void processNextInQueue();
@@ -259,6 +259,10 @@ private:
     void noteSameNameDifferentHashConflicts(const QString &filePath, const QString &hashHex);
     void updateBackgroundStatusLabel();
     static void prioritizeAnalysisPaths(QStringList &paths, const QString &focusFolderAbs);
+
+    void collectUnanalyzedPathsFromWorkspace(int maxFiles, QStringList *out);
+    bool trySystemBypassPreset(const QFileInfo &fi, QString *summaryOut, QStringList *tagsOut) const;
+    void applyPresetBypassAnalysis(const QString &fp, const QString &summary, const QStringList &tags);
 
     std::vector<QString> m_pendingFilesToDisplay;
     int m_currentLoadedCount = 0;

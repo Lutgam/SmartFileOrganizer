@@ -7,9 +7,11 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
 #include <QVBoxLayout>
@@ -17,12 +19,13 @@
 namespace {
 static constexpr const char *kSettingsModelPathKey = "ai/model_path";
 static constexpr const char *kSettingsBgAutoAnalyze = "workspace/background_auto_analysis";
+static constexpr const char *kSettingsSystemFileBypass = "workspace/system_file_bypass_filter";
 } // namespace
 
 SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
     : QDialog(parent), m_rootPath(currentRootPath) {
     setWindowTitle(tr("⚙️ Settings"));
-    resize(640, 280);
+    resize(640, 420);
 
     auto *root = new QVBoxLayout(this);
 
@@ -52,6 +55,58 @@ SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
     {
         m_bgAutoAnalyze = new QCheckBox(tr("Enable background auto-analysis (debounced folder watch)"), this);
         root->addWidget(m_bgAutoAnalyze);
+    }
+
+    {
+        m_systemFileBypass = new QCheckBox(
+            LanguageManager::instance().getText(QStringLiteral("settings_system_file_bypass")), this);
+        m_systemFileBypass->setChecked(true);
+        root->addWidget(m_systemFileBypass);
+    }
+
+    {
+        auto *grp = new QGroupBox(tr("資料與快取管理"), this);
+        auto *gv = new QVBoxLayout(grp);
+        m_btnClearAi = new QPushButton(tr("清除 AI 分析快取（保留路徑與 Hash）"), grp);
+        m_btnClearHash = new QPushButton(tr("清除雜湊紀錄（強制重新計算 SHA-256）"), grp);
+        m_btnFactoryReset = new QPushButton(tr("徹底重置工作區（刪除 metadata）"), grp);
+        gv->addWidget(m_btnClearAi);
+        gv->addWidget(m_btnClearHash);
+        gv->addWidget(m_btnFactoryReset);
+        root->addWidget(grp);
+
+        const bool allowData = !m_rootPath.trimmed().isEmpty();
+        m_btnClearAi->setEnabled(allowData);
+        m_btnClearHash->setEnabled(allowData);
+        m_btnFactoryReset->setEnabled(allowData);
+
+        connect(m_btnClearAi, &QPushButton::clicked, this, [this]() {
+            const int r = QMessageBox::warning(this,
+                                                 tr("確認清除"),
+                                                 tr("將移除帶有 [AI] 前綴的標籤與 AI 摘要／雜湊分析快取，並保留其他系統／手動標籤；各檔案路徑與已儲存的 content SHA-256 仍會保留。\n\n確定要執行嗎？"),
+                                                 QMessageBox::Yes | QMessageBox::No,
+                                                 QMessageBox::No);
+            if (r != QMessageBox::Yes) return;
+            emit clearAiCacheRequested();
+        });
+        connect(m_btnClearHash, &QPushButton::clicked, this, [this]() {
+            const int r = QMessageBox::warning(this,
+                                                 tr("確認清除"),
+                                                 tr("將清除所有檔案的 SHA-256 紀錄與雜湊分析快取。下次分析會重新計算雜湊。\n\n確定要執行嗎？"),
+                                                 QMessageBox::Yes | QMessageBox::No,
+                                                 QMessageBox::No);
+            if (r != QMessageBox::Yes) return;
+            emit clearHashCacheRequested();
+        });
+        connect(m_btnFactoryReset, &QPushButton::clicked, this, [this]() {
+            const int r = QMessageBox::warning(this,
+                                                 tr("危險操作"),
+                                                 tr("將徹底清空標籤、雜湊、快取與拒絕標籤清單，並刪除磁碟上的 metadata.json。\n此動作無法復原。\n\n確定要執行嗎？"),
+                                                 QMessageBox::Yes | QMessageBox::No,
+                                                 QMessageBox::No);
+            if (r != QMessageBox::Yes) return;
+            emit factoryResetRequested();
+        });
     }
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
@@ -84,6 +139,10 @@ bool SettingsDialog::backgroundAutoAnalysis() const {
     return m_bgAutoAnalyze && m_bgAutoAnalyze->isChecked();
 }
 
+bool SettingsDialog::systemFileBypassFilter() const {
+    return m_systemFileBypass && m_systemFileBypass->isChecked();
+}
+
 void SettingsDialog::loadFromSettings() {
     QSettings s;
     // Language from LanguageManager (already persisted)
@@ -96,6 +155,9 @@ void SettingsDialog::loadFromSettings() {
     }
     if (m_bgAutoAnalyze) {
         m_bgAutoAnalyze->setChecked(s.value(QString::fromLatin1(kSettingsBgAutoAnalyze), false).toBool());
+    }
+    if (m_systemFileBypass) {
+        m_systemFileBypass->setChecked(s.value(QString::fromLatin1(kSettingsSystemFileBypass), true).toBool());
     }
 }
 
@@ -119,6 +181,13 @@ void SettingsDialog::saveToSettings() {
     const bool newBg = backgroundAutoAnalysis();
     if (prevBg != newBg) {
         s.setValue(QString::fromLatin1(kSettingsBgAutoAnalyze), newBg);
+        m_changed = true;
+    }
+
+    const bool prevBypass = s.value(QString::fromLatin1(kSettingsSystemFileBypass), true).toBool();
+    const bool newBypass = systemFileBypassFilter();
+    if (prevBypass != newBypass) {
+        s.setValue(QString::fromLatin1(kSettingsSystemFileBypass), newBypass);
         m_changed = true;
     }
 }

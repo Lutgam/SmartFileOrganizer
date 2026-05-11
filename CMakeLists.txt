@@ -47,8 +47,6 @@ add_executable(SmartFileOrganizer
     src/main.cpp
     src/gui/MainWindow.cpp
     src/gui/MainWindow.h
-    src/gui/DuplicateCleanerWidget.cpp
-    src/gui/DuplicateCleanerDialog.h
     src/gui/SettingsDialog.cpp
     src/gui/SettingsDialog.h
     src/gui/RedundancyReportDialog.cpp

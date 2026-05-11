@@ -64,6 +64,13 @@ public:
     void addRejectedTag(const QString& tag);
     QStringList getRejectedTags() const;
 
+    /// Clear all tags + hash-analysis JSON cache; keep per-file paths and content_sha256 map.
+    void clearAiTagsAndSummaries(bool save = true);
+    /// Clear persisted SHA-256 per file and hash_analysis_cache (forces re-hash / re-analysis).
+    void clearHashCaches(bool save = true);
+    /// In-memory wipe + delete metadata.json and rejected_tags.json on disk (does not recreate files).
+    void factoryResetWorkspaceData();
+
 private:
     std::string currentDirectory;
     std::string metadataFile;

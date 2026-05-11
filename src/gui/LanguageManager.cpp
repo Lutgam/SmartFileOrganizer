@@ -244,6 +244,31 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("bg_analyze_running")) return en ? QStringLiteral("🔄 Background analysis… (%1)") : QStringLiteral("🔄 背景分析中… (%1)");
     if (key == QStringLiteral("bg_analyze_queue"))
         return en ? QStringLiteral("🔄 Analyzing… (%1 file(s) remaining)") : QStringLiteral("🔄 分析中… (剩餘 %1 個檔案)");
+    if (key == QStringLiteral("bg_idle_monitoring"))
+        return en ? QStringLiteral("👀 Monitoring & crawler idle…") : QStringLiteral("👀 系統監控與爬蟲待命中…");
+    if (key == QStringLiteral("bypass_tag_shortcut"))
+        return en ? QStringLiteral("System shortcut") : QStringLiteral("系統捷徑");
+    if (key == QStringLiteral("bypass_summary_shortcut")) {
+        return en ? QStringLiteral("System shortcut pointing to another file or folder.")
+                  : QStringLiteral("指向其他檔案或目錄的系統捷徑。");
+    }
+    if (key == QStringLiteral("bypass_tag_app"))
+        return en ? QStringLiteral("Application") : QStringLiteral("應用程式");
+    if (key == QStringLiteral("bypass_summary_app")) {
+        return en ? QStringLiteral("Executable application or script file.")
+                  : QStringLiteral("可執行的應用程式或腳本檔案。");
+    }
+    if (key == QStringLiteral("bypass_tag_archive"))
+        return en ? QStringLiteral("Archive") : QStringLiteral("壓縮檔");
+    if (key == QStringLiteral("bypass_summary_archive")) {
+        return en ? QStringLiteral("Compressed archive containing multiple files.")
+                  : QStringLiteral("包含多個檔案的壓縮封裝檔。");
+    }
+    if (key == QStringLiteral("settings_system_file_bypass")) {
+        return en ? QStringLiteral("Filter system files (skip shortcuts & executables to save compute)")
+                  : QStringLiteral("啟用系統檔案過濾（略過捷徑與執行檔以節省算力）");
+    }
+
     if (key == QStringLiteral("redundancy_delete_none")) {
         return en ? QStringLiteral("No files were deleted. Check permissions or that paths still exist.")
                   : QStringLiteral("沒有檔案被刪除。請確認路徑仍存在且具備寫入／刪除權限。");
@@ -261,6 +286,27 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？")) {
         return en ? QStringLiteral("The current folder contains too many files (total %1). Rendering the full graph may be cluttered or slow. Show only core tags and the first 50 related files?")
                   : QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？");
+    }
+
+    if (key == QStringLiteral("workspace_clear_busy")) {
+        return en ? QStringLiteral("Please wait until the current AI analysis finishes, then try again.")
+                  : QStringLiteral("請等待目前 AI 分析完成後再執行資料清除。");
+    }
+    if (key == QStringLiteral("workspace_clear_ai_done")) {
+        return en ? QStringLiteral("AI tags and analysis cache cleared (paths and content hashes kept).")
+                  : QStringLiteral("已清除 AI 標籤與分析快取（已保留檔案路徑與內容雜湊）。");
+    }
+    if (key == QStringLiteral("workspace_clear_hash_done")) {
+        return en ? QStringLiteral("SHA-256 and hash analysis cache cleared. Next analysis will re-hash files.")
+                  : QStringLiteral("已清除雜湊紀錄與雜湊分析快取，下次分析將重新計算 SHA-256。");
+    }
+    if (key == QStringLiteral("workspace_factory_stop_batch")) {
+        return en ? QStringLiteral("Stop folder batch analysis before resetting the workspace.")
+                  : QStringLiteral("請先停止資料夾分析，再執行工作區重置。");
+    }
+    if (key == QStringLiteral("workspace_factory_done")) {
+        return en ? QStringLiteral("Workspace metadata was reset.")
+                  : QStringLiteral("工作區 metadata 已重置。");
     }
 
     return key;
