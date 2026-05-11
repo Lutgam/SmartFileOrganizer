@@ -26,10 +26,12 @@
 #include <QFileSystemWatcher>
 #include <QTabWidget>
 #include <QStringList>
+#include <QSet>
 #include <QMutex>
 #include <QTimer>
 #include <QVector>
 #include <QHash>
+#include <QJsonObject>
 #include <QQueue>
 #include <QProgressBar>
 #include <QMap>
@@ -117,6 +119,7 @@ private slots:
     void onBackgroundScanFinished();
     void consolidateTagsWithAI();
     void onConsolidateTagsFinished();
+    void onBackgroundAutoAnalyzeDebounce();
 
 private:
     enum class FileListMode { PhysicalFolder, VirtualTag };
@@ -227,10 +230,28 @@ private:
     QMap<QString, QJsonObject> m_pendingResults;
     QPropertyAnimation *m_batchProgressAnim = nullptr;
 
+    /// SHA-256 (hex) → last successful analysis JSON { summary, tags[] } for duplicate-file fast path.
+    QHash<QString, QJsonObject> m_analysisByContentHash;
+    QStringList m_currentBatchRedundantFiles;
+    int m_batchCompletedCount = 0;
+    int m_folderReportAiTagAdds = 0;
+    bool m_batchTriggeredByBackgroundAuto = false;
+    bool m_bgAutoAnalyzeEnabled = false;
+    QTimer *m_bgAutoAnalyzeDebounce = nullptr;
+
     void startBatchAnalysis();
     void processNextInQueue();
     void analyzeFileForPath(const QString &absPath);
     void flushPendingBatchResults();
+    void showFolderAnalysisReport();
+    void applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached);
+    void beginBatchAnalysisUi();
+    void loadBackgroundAutoAnalyzeSetting();
+
+    void watchDirectoryRecursively(const QString &rootPath);
+    void applyFilesystemWatchPolicy();
+    void ensureRecursiveWatchCoversWorkspace();
+    void primeAnalysisCacheFromDisk(const QString &sha256Hex);
 
     std::vector<QString> m_pendingFilesToDisplay;
     int m_currentLoadedCount = 0;
@@ -245,6 +266,7 @@ private:
     QFileSystemWatcher *m_dirWatcher = nullptr;
     QTimer *m_dirDebounceTimer = nullptr;
     QString m_lastDirChangePath;
+    QSet<QString> m_recursiveWatchPaths;
 
     // Graph is embedded as Tab 3 (no standalone window)
 

@@ -4,6 +4,9 @@
 #include <iostream>
 #include <QDebug>
 #include <QHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QMutexLocker>
 #include <QRegularExpression>
 
@@ -166,9 +169,71 @@ void TagManager::loadTags(const std::string& directory) {
     m_tagToFilePaths.clear();
     m_fileToTags.clear();
     m_rejectedTags.clear();
-    
-    // We start fresh (user request)
+    m_pathToContentHash.clear();
+    m_hashAnalysisCache.clear();
+
     loadRejectedTags();
+
+    if (currentDirectory.empty() || metadataFile.empty()) return;
+    if (!fs::exists(metadataFile)) return;
+
+    try {
+        std::ifstream f(metadataFile);
+        nlohmann::json root;
+        f >> root;
+        if (!root.is_object()) return;
+
+        const bool isV2 = root.contains("schema_version") && root["schema_version"].is_number_integer()
+                          && root["schema_version"].get<int>() == 2 && root.contains("files")
+                          && root["files"].is_object();
+
+        auto ingestTagsForPath = [this](const QString &path, const nlohmann::json &tagsArr) {
+            if (!tagsArr.is_array()) return;
+            for (const auto &tv : tagsArr) {
+                if (!tv.is_string()) continue;
+                const QString nt = normalizeTag(QString::fromStdString(tv.get<std::string>()));
+                if (nt.isEmpty()) continue;
+                m_fileToTags[path].insert(nt);
+                m_tagToFilePaths[nt].insert(path);
+            }
+        };
+
+        if (isV2) {
+            const auto &filesObj = root["files"];
+            for (auto it = filesObj.begin(); it != filesObj.end(); ++it) {
+                const QString path = QString::fromStdString(it.key());
+                const auto &val = it.value();
+                if (val.is_array()) {
+                    ingestTagsForPath(path, val);
+                    continue;
+                }
+                if (!val.is_object()) continue;
+                const auto &obj = val;
+                if (obj.contains("content_sha256") && obj["content_sha256"].is_string()) {
+                    const QString hx = QString::fromStdString(obj["content_sha256"].get<std::string>());
+                    if (!hx.isEmpty()) m_pathToContentHash[path] = hx;
+                }
+                if (obj.contains("tags") && obj["tags"].is_array()) ingestTagsForPath(path, obj["tags"]);
+            }
+            if (root.contains("hash_analysis_cache") && root["hash_analysis_cache"].is_object()) {
+                for (auto it = root["hash_analysis_cache"].begin(); it != root["hash_analysis_cache"].end();
+                     ++it) {
+                    const QString hx = QString::fromStdString(it.key());
+                    if (hx.isEmpty()) continue;
+                    m_hashAnalysisCache[hx] = it.value();
+                }
+            }
+        } else {
+            // Legacy: top-level keys are absolute paths → JSON array of tag strings.
+            for (auto it = root.begin(); it != root.end(); ++it) {
+                if (!it.value().is_array()) continue;
+                const QString path = QString::fromStdString(it.key());
+                ingestTagsForPath(path, it.value());
+            }
+        }
+    } catch (const std::exception &e) {
+        qDebug() << "Error loading metadata.json:" << e.what();
+    }
 }
 
 void TagManager::saveTags() {
@@ -185,13 +250,28 @@ void TagManager::saveTags() {
 
     try {
         nlohmann::json root = nlohmann::json::object();
-        for (const auto& [file, tags] : m_fileToTags) {
+        root["schema_version"] = 2;
+        nlohmann::json files = nlohmann::json::object();
+        for (const auto &[file, tags] : m_fileToTags) {
+            nlohmann::json obj = nlohmann::json::object();
             nlohmann::json arr = nlohmann::json::array();
-            for (const QString& tag : tags) {
+            for (const QString &tag : tags) {
                 arr.push_back(tag.toStdString());
             }
-            root[file.toStdString()] = arr;
+            obj["tags"] = arr;
+            const auto hit = m_pathToContentHash.find(file);
+            if (hit != m_pathToContentHash.end() && !hit->second.isEmpty()) {
+                obj["content_sha256"] = hit->second.toStdString();
+            }
+            files[file.toStdString()] = obj;
         }
+        root["files"] = files;
+
+        nlohmann::json cache = nlohmann::json::object();
+        for (const auto &[h, j] : m_hashAnalysisCache) {
+            cache[h.toStdString()] = j;
+        }
+        root["hash_analysis_cache"] = cache;
 
         std::ofstream f(metadataFile);
         f << root.dump(4);
@@ -313,21 +393,103 @@ void TagManager::relocateFilePath(const QString& oldPath, const QString& newPath
     if (oldPath == newPath) {
         return;
     }
+
+    bool changed = false;
     auto it = m_fileToTags.find(oldPath);
-    if (it == m_fileToTags.end()) {
+    if (it != m_fileToTags.end()) {
+        std::set<QString> tags = std::move(it->second);
+        m_fileToTags.erase(it);
+        m_fileToTags[newPath] = std::move(tags);
+
+        for (const QString& t : m_fileToTags[newPath]) {
+            m_tagToFilePaths[t].erase(oldPath);
+            m_tagToFilePaths[t].insert(newPath);
+        }
+        changed = true;
+    }
+
+    {
+        auto hIt = m_pathToContentHash.find(oldPath);
+        if (hIt != m_pathToContentHash.end()) {
+            m_pathToContentHash[newPath] = hIt->second;
+            m_pathToContentHash.erase(hIt);
+            changed = true;
+        }
+    }
+
+    if (changed && saveMetadata) {
+        saveTags();
+    }
+}
+
+void TagManager::removeFileMetadata(const QString &path, bool save) {
+    QMutexLocker locker(&m_mutex);
+    m_pathToContentHash.erase(path);
+    if (!m_fileToTags.count(path)) {
+        if (save) saveTags();
         return;
     }
-    std::set<QString> tags = std::move(it->second);
-    m_fileToTags.erase(it);
-    m_fileToTags[newPath] = std::move(tags);
-
-    for (const QString& t : m_fileToTags[newPath]) {
-        m_tagToFilePaths[t].erase(oldPath);
-        m_tagToFilePaths[t].insert(newPath);
+    for (const QString &t : m_fileToTags[path]) {
+        m_tagToFilePaths[t].erase(path);
+        if (m_tagToFilePaths[t].empty()) m_tagToFilePaths.erase(t);
     }
+    m_fileToTags.erase(path);
+    if (save) saveTags();
+}
 
-    if (saveMetadata) {
-        saveTags();
+void TagManager::setFileContentHash(const QString &path, const QString &sha256Hex, bool save) {
+    QMutexLocker locker(&m_mutex);
+    if (path.isEmpty()) return;
+    if (sha256Hex.isEmpty()) {
+        m_pathToContentHash.erase(path);
+    } else {
+        m_pathToContentHash[path] = sha256Hex;
+    }
+    if (save) saveTags();
+}
+
+QString TagManager::fileContentHash(const QString &path) const {
+    QMutexLocker locker(&m_mutex);
+    const auto it = m_pathToContentHash.find(path);
+    if (it == m_pathToContentHash.end()) return {};
+    return it->second;
+}
+
+void TagManager::recordHashAnalysis(const QString &sha256Hex, const QJsonObject &analysis, bool save) {
+    QMutexLocker locker(&m_mutex);
+    if (sha256Hex.isEmpty()) return;
+    const QByteArray raw = QJsonDocument(analysis).toJson(QJsonDocument::Compact);
+    try {
+        m_hashAnalysisCache[sha256Hex] = nlohmann::json::parse(std::string(raw.constData(), static_cast<size_t>(raw.size())));
+    } catch (const std::exception &) {
+        return;
+    }
+    if (save) saveTags();
+}
+
+bool TagManager::tryGetHashAnalysis(const QString &sha256Hex, QJsonObject *out) const {
+    QMutexLocker locker(&m_mutex);
+    if (!out || sha256Hex.isEmpty()) return false;
+    const auto it = m_hashAnalysisCache.find(sha256Hex);
+    if (it == m_hashAnalysisCache.end()) return false;
+    QJsonParseError err{};
+    const QByteArray raw = QByteArray::fromStdString(it->second.dump());
+    const QJsonDocument d = QJsonDocument::fromJson(raw, &err);
+    if (err.error != QJsonParseError::NoError || !d.isObject()) return false;
+    *out = d.object();
+    return true;
+}
+
+void TagManager::exportHashAnalysisCache(QHash<QString, QJsonObject> *dst) const {
+    if (!dst) return;
+    QMutexLocker locker(&m_mutex);
+    dst->clear();
+    for (const auto &[h, j] : m_hashAnalysisCache) {
+        QJsonParseError err{};
+        const QByteArray raw = QByteArray::fromStdString(j.dump());
+        const QJsonDocument d = QJsonDocument::fromJson(raw, &err);
+        if (err.error != QJsonParseError::NoError || !d.isObject()) continue;
+        dst->insert(h, d.object());
     }
 }
 

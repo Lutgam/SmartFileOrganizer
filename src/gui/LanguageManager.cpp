@@ -206,6 +206,28 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("AI 自動收斂標籤")) return en ? QStringLiteral("AI Auto-Consolidate Tags") : QStringLiteral("AI 自動收斂標籤");
     if (key == QStringLiteral("AI 思考中…")) return en ? QStringLiteral("AI thinking…") : QStringLiteral("AI 思考中…");
     if (key == QStringLiteral("已自動合併 %1 組標籤")) return en ? QStringLiteral("Auto-merged %1 tag groups") : QStringLiteral("已自動合併 %1 組標籤");
+    if (key == QStringLiteral("folder_report_title")) return en ? QStringLiteral("Folder analysis report") : QStringLiteral("資料夾分析報告");
+    if (key == QStringLiteral("folder_report_body")) {
+        return en ? QStringLiteral("Completed analysis for %1 file(s).\nGenerated %2 AI tag assignment(s).\nFound %3 redundant file(s) (identical content).")
+                    : QStringLiteral("已完成 %1 個檔案分析。\n生成了 %2 個 AI 標籤。\n發現 %3 個冗餘檔案（內容完全重複）。");
+    }
+    if (key == QStringLiteral("分析完成（重複內容：已套用快取）")) {
+        return en ? QStringLiteral("Done (duplicate content — applied cached result)") : QStringLiteral("分析完成（重複內容：已套用快取）");
+    }
+
+    if (key == QStringLiteral("redundancy_dialog_title")) return en ? QStringLiteral("Redundant files report") : QStringLiteral("冗餘檔案報告");
+    if (key == QStringLiteral("redundancy_dialog_body")) {
+        return en ? QStringLiteral("Analysis finished.\nCompleted %1 file(s).\n%2 new tag assignment(s). Found %3 redundant file(s) (identical content).")
+                    : QStringLiteral("分析完成。\n已完成 %1 個檔案分析。\n共新增 %2 個標籤，發現 %3 個冗餘檔案（內容完全重複）。");
+    }
+    if (key == QStringLiteral("redundancy_delete_checked"))
+        return en ? QStringLiteral("Delete checked redundant files") : QStringLiteral("刪除勾選的冗餘檔案");
+    if (key == QStringLiteral("redundancy_delete_none")) {
+        return en ? QStringLiteral("No files were deleted. Check permissions or that paths still exist.")
+                  : QStringLiteral("沒有檔案被刪除。請確認路徑仍存在且具備寫入／刪除權限。");
+    }
+    if (key == QStringLiteral("dialog_close")) return en ? QStringLiteral("Close") : QStringLiteral("關閉");
+
     if (key == QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？")) {
         return en ? QStringLiteral("The current folder contains too many files (total %1). Rendering the full graph may be cluttered or slow. Show only core tags and the first 50 related files?")
                   : QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？");

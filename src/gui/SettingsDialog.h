@@ -4,6 +4,7 @@
 #include <QDialog>
 
 class QComboBox;
+class QCheckBox;
 class QLineEdit;
 class QPushButton;
 
@@ -16,6 +17,7 @@ public:
     bool settingsChanged() const;
     int selectedLanguageIndex() const; // 0: ZH_TW, 1: EN_US
     QString modelPath() const;
+    bool backgroundAutoAnalysis() const;
 
 signals:
     void settingsApplied();
@@ -31,6 +33,7 @@ private:
     QComboBox *m_languageCombo = nullptr;
     QLineEdit *m_modelPathEdit = nullptr;
     QPushButton *m_browseBtn = nullptr;
+    QCheckBox *m_bgAutoAnalyze = nullptr;
 };
 
 #endif

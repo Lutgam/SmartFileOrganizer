@@ -9,6 +9,8 @@
 #include <QString>
 #include <QStringList>
 #include <QRecursiveMutex>
+#include <QJsonObject>
+#include <QHash>
 #include <nlohmann/json.hpp>
 
 class TagManager {
@@ -41,6 +43,18 @@ public:
     /// Move all tag associations from oldPath to newPath (after QFile::rename).
     void relocateFilePath(const QString& oldPath, const QString& newPath, bool saveMetadata = true);
 
+    /// Remove all tag rows and per-file hash for \a path (e.g. after deleting the file on disk).
+    void removeFileMetadata(const QString& path, bool save = true);
+
+    /// Persisted SHA-256 (hex) of file bytes for dedup across restarts.
+    void setFileContentHash(const QString& path, const QString& sha256Hex, bool save = true);
+    QString fileContentHash(const QString& path) const;
+
+    /// Content-hash → last successful AI JSON { summary, tags[] }.
+    void recordHashAnalysis(const QString& sha256Hex, const QJsonObject& analysis, bool save = true);
+    bool tryGetHashAnalysis(const QString& sha256Hex, QJsonObject* out) const;
+    void exportHashAnalysisCache(QHash<QString, QJsonObject>* dst) const;
+
     std::vector<QString> getAllTags() const;
     std::vector<QString> getFilesByTag(const QString& tag) const;
 
@@ -55,6 +69,8 @@ private:
     std::map<QString, std::set<QString>> m_fileToTags;
 
     std::set<QString> m_rejectedTags;
+    std::map<QString, QString> m_pathToContentHash;
+    std::map<QString, nlohmann::json> m_hashAnalysisCache;
     mutable QRecursiveMutex m_mutex;
     
     QString normalizeTag(const QString &tag) const;

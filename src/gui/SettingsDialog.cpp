@@ -2,6 +2,7 @@
 
 #include "LanguageManager.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
@@ -15,12 +16,13 @@
 
 namespace {
 static constexpr const char *kSettingsModelPathKey = "ai/model_path";
+static constexpr const char *kSettingsBgAutoAnalyze = "workspace/background_auto_analysis";
 } // namespace
 
 SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
     : QDialog(parent), m_rootPath(currentRootPath) {
     setWindowTitle(tr("⚙️ Settings"));
-    resize(640, 220);
+    resize(640, 280);
 
     auto *root = new QVBoxLayout(this);
 
@@ -45,6 +47,11 @@ SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
         m_browseBtn = new QPushButton(tr("Browse..."), this);
         row->addWidget(m_browseBtn);
         root->addLayout(row);
+    }
+
+    {
+        m_bgAutoAnalyze = new QCheckBox(tr("Enable background auto-analysis (debounced folder watch)"), this);
+        root->addWidget(m_bgAutoAnalyze);
     }
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
@@ -73,6 +80,10 @@ QString SettingsDialog::modelPath() const {
     return m_modelPathEdit ? m_modelPathEdit->text().trimmed() : QString();
 }
 
+bool SettingsDialog::backgroundAutoAnalysis() const {
+    return m_bgAutoAnalyze && m_bgAutoAnalyze->isChecked();
+}
+
 void SettingsDialog::loadFromSettings() {
     QSettings s;
     // Language from LanguageManager (already persisted)
@@ -82,6 +93,9 @@ void SettingsDialog::loadFromSettings() {
     }
     if (m_modelPathEdit) {
         m_modelPathEdit->setText(s.value(QString::fromLatin1(kSettingsModelPathKey)).toString());
+    }
+    if (m_bgAutoAnalyze) {
+        m_bgAutoAnalyze->setChecked(s.value(QString::fromLatin1(kSettingsBgAutoAnalyze), false).toBool());
     }
 }
 
@@ -98,6 +112,13 @@ void SettingsDialog::saveToSettings() {
     const auto newLang = (selectedLanguageIndex() == 1) ? LanguageManager::Language::EN_US : LanguageManager::Language::ZH_TW;
     if (prevLang != newLang) {
         LanguageManager::instance().setLanguage(newLang);
+        m_changed = true;
+    }
+
+    const bool prevBg = s.value(QString::fromLatin1(kSettingsBgAutoAnalyze), false).toBool();
+    const bool newBg = backgroundAutoAnalysis();
+    if (prevBg != newBg) {
+        s.setValue(QString::fromLatin1(kSettingsBgAutoAnalyze), newBg);
         m_changed = true;
     }
 }
