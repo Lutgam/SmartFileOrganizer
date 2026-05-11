@@ -14,7 +14,16 @@
 class TagManager {
 public:
     TagManager();
-    
+
+    /// Removes a leading case-insensitive `[AI]` marker and following whitespace.
+    /// Never uses fixed character indices (avoids corrupting CJK / surrogate pairs).
+    static QString stripAiPrefix(const QString &tag);
+    /// True when \a tag (after trim) begins with `[AI]` (case-insensitive).
+    static bool hasAiPrefix(const QString &tag);
+
+    /// Renormalize in-memory tag keys (e.g. legacy `[ 資料庫` → `資料庫`) and persist once if changed.
+    void repairMalformedTagKeys();
+
     void loadTags(const std::string& directory);
     void saveTags();
     

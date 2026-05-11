@@ -25,6 +25,11 @@ static QString translateVirtualTagForDisplay(const QString &tag) {
     QString t = tag.trimmed();
     if (t.isEmpty()) return t;
 
+    if (TagManager::hasAiPrefix(t)) {
+        t = TagManager::stripAiPrefix(t);
+        if (t.isEmpty()) return tag.trimmed();
+    }
+
     // Emoji prefixes can be multiple QChars (surrogates + variation selectors).
     // Parse a "non-letter/number" prefix (excluding spaces) and translate the remainder.
     QString prefix;

@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <iostream>
 #include <QDebug>
+#include <QHash>
 #include <QMutexLocker>
 #include <QRegularExpression>
 
@@ -12,11 +13,82 @@
 
 namespace fs = std::filesystem;
 
+namespace {
+
+// Leading `[` … `AI` … `]` with optional internal/outer whitespace (handles "[ AI ]", "[AI]資料庫", etc.).
+// Anchored, case-insensitive. Used only with QString::remove.
+const QRegularExpression &aiPrefixStripRegex()
+{
+    static const QRegularExpression re(QStringLiteral("^\\[\\s*AI\\s*\\]\\s*"),
+                                       QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+
+} // namespace
+
+QString TagManager::stripAiPrefix(const QString &tag)
+{
+    QString s = tag.trimmed();
+    s.remove(aiPrefixStripRegex());
+    return s.trimmed();
+}
+
+bool TagManager::hasAiPrefix(const QString &tag)
+{
+    const auto m = aiPrefixStripRegex().match(tag.trimmed());
+    return m.hasMatch() && m.capturedStart() == 0;
+}
+
+void TagManager::repairMalformedTagKeys()
+{
+    QMutexLocker locker(&m_mutex);
+    std::vector<QString> keys;
+    keys.reserve(m_tagToFilePaths.size());
+    for (const auto &p : m_tagToFilePaths) keys.push_back(p.first);
+
+    bool changed = false;
+    for (const QString &oldK : keys) {
+        if (!m_tagToFilePaths.count(oldK)) continue;
+        const QString newK = normalizeTag(oldK);
+        if (newK.isEmpty() || newK == oldK) continue;
+
+        auto it = m_tagToFilePaths.find(oldK);
+        if (it == m_tagToFilePaths.end()) continue;
+        const std::set<QString> files = it->second;
+        for (const QString &fp : files) {
+            if (m_fileToTags.count(fp)) {
+                m_fileToTags[fp].erase(oldK);
+                m_fileToTags[fp].insert(newK);
+            } else {
+                m_fileToTags[fp].insert(newK);
+            }
+            m_tagToFilePaths[newK].insert(fp);
+        }
+        m_tagToFilePaths.erase(oldK);
+        if (m_rejectedTags.count(oldK)) {
+            m_rejectedTags.erase(oldK);
+        }
+        changed = true;
+    }
+    if (changed) saveTags();
+}
+
 TagManager::TagManager() {
 }
 
 QString TagManager::normalizeTag(const QString &tag) const {
     QString t = tag.trimmed();
+    if (t.isEmpty()) return QString();
+
+    // Repair legacy corruption: "[ 資料庫" (only "[" + spaces left after bad stripping of "AI]").
+    if (!hasAiPrefix(t)) {
+        static const QRegularExpression corruptedOpenBracket(QStringLiteral("^\\[\\s+"));
+        if (corruptedOpenBracket.match(t).hasMatch()) {
+            QString u = t;
+            u.remove(corruptedOpenBracket);
+            t = u.trimmed();
+        }
+    }
     if (t.isEmpty()) return QString();
 
     auto resolveSynonym = [](const QString &lowerOrZh) -> QString {
@@ -64,21 +136,27 @@ QString TagManager::normalizeTag(const QString &tag) const {
         return it.value();
     };
 
-    // Preserve standardized AI prefix, normalize only the payload.
-    // Avoid hard-coded slicing; use regex capture for safety.
-    const QRegularExpression aiRe(QStringLiteral("^\\s*\\[ai\\]\\s*(.*)$"), QRegularExpression::CaseInsensitiveOption);
-    const auto m = aiRe.match(t);
-    if (m.hasMatch()) {
-        QString rest = m.captured(1).trimmed().toLower();
-        const QString mapped = resolveSynonym(rest);
-        if (!mapped.isEmpty()) return mapped; // merge into system preset tag
-        if (rest.isEmpty()) return QString();
-        return QStringLiteral("[AI] ") + rest;
+    // Order: trim -> fold case for matching -> strip `[AI]` via regex (never index-based mid/remove)
+    // -> synonym map on clean payload -> if AI-tagged and no synonym, re-attach `[AI] ` prefix.
+    const QString folded = t.toLower();
+    QString core = folded;
+    core.remove(aiPrefixStripRegex());
+    core = core.trimmed();
+
+    const bool hadAiPrefix = hasAiPrefix(folded);
+
+    if (hadAiPrefix) {
+        const QString mapped = resolveSynonym(core);
+        if (!mapped.isEmpty())
+            return mapped; // system preset: no [AI] prefix
+        if (core.isEmpty())
+            return QString();
+        return QStringLiteral("[AI] ") + core;
     }
 
-    const QString mapped = resolveSynonym(t.toLower());
+    const QString mapped = resolveSynonym(core);
     if (!mapped.isEmpty()) return mapped;
-    return t.toLower();
+    return folded;
 }
 
 void TagManager::loadTags(const std::string& directory) {

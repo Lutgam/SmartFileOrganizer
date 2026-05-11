@@ -118,6 +118,7 @@ static const QString kTagImage = QStringLiteral("🖼️ 圖片");
 static const QString kTagVideo = QStringLiteral("🎬 影片");
 static const QString kTagDoc = QStringLiteral("📄 文件");
 static const QString kTagAudio = QStringLiteral("🎵 音檔");
+static const QString kTagDb = QStringLiteral("🗃️ 資料庫");
 
 static QString normalizeDisplayTag(const QString &t) {
     const QString s = t.trimmed();
@@ -126,11 +127,13 @@ static QString normalizeDisplayTag(const QString &t) {
     if (s == QStringLiteral("影片")) return kTagVideo;
     if (s == QStringLiteral("文件")) return kTagDoc;
     if (s == QStringLiteral("音檔") || s == QStringLiteral("音訊")) return kTagAudio;
+    if (s == QStringLiteral("資料庫")) return kTagDb;
 
     if (s == QStringLiteral("🖼️圖片") || s == kTagImage) return kTagImage;
     if (s == QStringLiteral("🎬影片") || s == kTagVideo) return kTagVideo;
     if (s == QStringLiteral("📄文件") || s == kTagDoc) return kTagDoc;
     if (s == QStringLiteral("🎧音訊") || s == QStringLiteral("🎵音檔") || s == kTagAudio) return kTagAudio;
+    if (s == QStringLiteral("🗃️資料庫") || s == QStringLiteral("🗄️資料庫") || s == kTagDb) return kTagDb;
     return s;
 }
 
@@ -139,6 +142,7 @@ static QString systemTagBaseZh(const QString &canon) {
     if (canon == kTagVideo) return QStringLiteral("影片");
     if (canon == kTagDoc) return QStringLiteral("文件");
     if (canon == kTagAudio) return QStringLiteral("音檔");
+    if (canon == kTagDb) return QStringLiteral("資料庫");
     if (canon.contains(QStringLiteral("壓縮檔"))) return QStringLiteral("壓縮檔");
     if (canon.contains(QStringLiteral("程式碼"))) return QStringLiteral("程式碼");
     if (canon.contains(QStringLiteral("安裝檔"))) return QStringLiteral("安裝檔");
@@ -172,6 +176,35 @@ static QString systemTagEmojiPrefix(const QString &canon) {
         if (out.size() >= 6) break;
     }
     return out.trimmed();
+}
+
+// Left-panel “AI 標籤” tab already implies AI — hide “[AI] …” in labels only (data keys unchanged).
+static QString tagLibraryLabelStripAiBadge(const QString &displayName)
+{
+    QString d = displayName.trimmed();
+    d = TagManager::stripAiPrefix(d).trimmed();
+    static const QRegularExpression corruptOpen(QStringLiteral("^\\[\\s+"));
+    if (corruptOpen.match(d).hasMatch()) {
+        QString u = d;
+        u.remove(corruptOpen);
+        d = u.trimmed();
+    }
+    return d.trimmed();
+}
+
+// Same presentation rules as tag filter / AI list, for merge-target picker (display only).
+static QString mergeTargetPickerLabel(const QString &rawTag)
+{
+    const QString canon = normalizeDisplayTag(rawTag);
+    const QString baseZh = systemTagBaseZh(canon);
+    const QString emoji = systemTagEmojiPrefix(canon);
+    QString displayName = baseZh.isEmpty()
+                              ? canon
+                              : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+    displayName = displayName.trimmed();
+    if (TagManager::hasAiPrefix(canon))
+        displayName = tagLibraryLabelStripAiBadge(displayName);
+    return displayName;
 }
 
 static QString emojiForMime(const QMimeType &mt) {
@@ -532,10 +565,9 @@ void MainWindow::updateAllTexts() {
         m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_aiTagListWidget), lm.getText(QStringLiteral("AI 標籤 (AI Tags)")));
     }
 
-    auto *activeList = m_systemTagListWidget;
-    if (m_tagTabWidget && m_tagTabWidget->currentIndex() == 1) activeList = m_aiTagListWidget;
-
-    if (activeList) {
+    auto refreshTagLibraryList = [&](QListWidget *activeList) {
+        if (!activeList) return;
+        const bool stripAi = (activeList == m_aiTagListWidget);
         const QString allFilesText = lm.getText(QStringLiteral("All Files"));
         if (activeList->count() > 0) {
             auto *it0 = activeList->item(0);
@@ -552,12 +584,16 @@ void MainWindow::updateAllTexts() {
             const QString canon = normalizeDisplayTag(role);
             const QString baseZh = it->data(Qt::UserRole + 2).toString();
             const QString emoji = systemTagEmojiPrefix(canon);
-            const QString displayName = baseZh.isEmpty()
-                                            ? canon
-                                            : QStringLiteral("%1 %2").arg(emoji, lm.getText(baseZh));
-            it->setText(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n));
+            QString displayName = baseZh.isEmpty()
+                                      ? canon
+                                      : QStringLiteral("%1 %2").arg(emoji, lm.getText(baseZh));
+            displayName = displayName.trimmed();
+            if (stripAi) displayName = tagLibraryLabelStripAiBadge(displayName);
+            it->setText(QStringLiteral("%1 (%2)").arg(displayName).arg(n));
         }
-    }
+    };
+    refreshTagLibraryList(m_systemTagListWidget);
+    refreshTagLibraryList(m_aiTagListWidget);
 
     if (cmbTagFilter && cmbTagFilter->count() > 0) {
         cmbTagFilter->setItemText(0, lm.getText(QStringLiteral("All Files")));
@@ -1042,32 +1078,53 @@ void MainWindow::setupContextMenus() {
             tagManager.renameTag(rawTag, newTag);
             tagManager.saveTags();
         } else if (chosen == actMerge) {
-            // Pick a target tag (exclude current)
+            // Pick a target tag (exclude current). Show labels without “[AI] ”; map back to real keys for mergeTag.
             std::vector<QString> all;
             {
                 QMutexLocker locker(&tagMutex);
                 all = tagManager.getAllTags();
             }
-            QStringList items;
-            items.reserve(static_cast<int>(all.size()));
+            QStringList realCandidates;
+            realCandidates.reserve(static_cast<int>(all.size()));
             for (const auto &t : all) {
                 if (t == rawTag) continue;
-                items << t;
+                realCandidates << t;
             }
-            items.removeDuplicates();
-            items.sort(Qt::CaseInsensitive);
-            if (items.isEmpty()) return;
+            realCandidates.removeDuplicates();
+            realCandidates.sort(Qt::CaseInsensitive);
+            if (realCandidates.isEmpty()) return;
+
+            QStringList displayChoices;
+            displayChoices.reserve(realCandidates.size());
+            std::vector<QString> realByRow;
+            realByRow.reserve(static_cast<size_t>(realCandidates.size()));
+            QSet<QString> usedLabels;
+            for (const QString &real : realCandidates) {
+                const QString baseLabel = mergeTargetPickerLabel(real);
+                QString show = baseLabel;
+                if (usedLabels.contains(show)) {
+                    show = QStringLiteral("%1  <%2>").arg(baseLabel, real);
+                }
+                usedLabels.insert(show);
+                displayChoices << show;
+                realByRow.push_back(real);
+            }
 
             bool ok = false;
-            const QString target = QInputDialog::getItem(
+            const QString picked = QInputDialog::getItem(
                 this,
                 lm.getText(QStringLiteral("合併標籤至...")),
                 lm.getText(QStringLiteral("選擇目標標籤:")),
-                items,
+                displayChoices,
                 0,
                 false,
                 &ok);
-            if (!ok || target.trimmed().isEmpty()) return;
+            if (!ok || picked.trimmed().isEmpty()) return;
+
+            const int ix = displayChoices.indexOf(picked);
+            if (ix < 0 || ix >= static_cast<int>(realByRow.size())) return;
+            const QString target = realByRow[static_cast<size_t>(ix)];
+            if (target.trimmed().isEmpty() || target == rawTag) return;
 
             {
                 QMutexLocker locker(&tagMutex);
@@ -1710,6 +1767,11 @@ void MainWindow::populateVirtualTagFiles(const QString &tag) {
         QString t = raw.trimmed();
         if (t.isEmpty()) return t;
 
+        if (TagManager::hasAiPrefix(t)) {
+            t = TagManager::stripAiPrefix(t);
+            if (t.isEmpty()) return raw.trimmed();
+        }
+
         // Emoji prefixes can be multiple QChars (surrogates + variation selectors).
         QString prefix;
         int i = 0;
@@ -1819,7 +1881,8 @@ void MainWindow::updateTagListCountsOnly() {
             const QString displayName = baseZh.isEmpty()
                                             ? canon
                                             : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-            it->setText(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n));
+            const QString rowLabel = (list == m_aiTagListWidget) ? tagLibraryLabelStripAiBadge(displayName) : displayName.trimmed();
+            it->setText(QStringLiteral("%1 (%2)").arg(rowLabel).arg(n));
             it->setData(Qt::UserRole, canon);
             it->setData(Qt::UserRole + 1, n);
             it->setData(Qt::UserRole + 2, baseZh);
@@ -1832,6 +1895,8 @@ void MainWindow::updateTagListCountsOnly() {
 }
 
 void MainWindow::updateTagList() {
+    tagManager.repairMalformedTagKeys();
+
     if (m_systemTagListWidget) m_systemTagListWidget->clear();
     if (m_aiTagListWidget) m_aiTagListWidget->clear();
 
@@ -1857,15 +1922,15 @@ void MainWindow::updateTagList() {
         for (const QString &fp : files) normToFiles[canon].insert(fp);
     }
 
-    const QStringList defaults = {kTagImage, kTagVideo, kTagDoc, kTagAudio};
+    const QStringList defaults = {kTagImage, kTagVideo, kTagDoc, kTagAudio, kTagDb};
     QSet<QString> keys;
     for (const auto &kv : normToFiles) keys.insert(kv.first);
     for (const QString &d : defaults) keys.insert(normalizeDisplayTag(d));
 
     QList<QString> ordered = keys.values();
     std::sort(ordered.begin(), ordered.end(), [this, &normToFiles](const QString &a, const QString &b) {
-        const bool aAi = a.trimmed().toLower().startsWith(QStringLiteral("[ai]"));
-        const bool bAi = b.trimmed().toLower().startsWith(QStringLiteral("[ai]"));
+        const bool aAi = TagManager::hasAiPrefix(a);
+        const bool bAi = TagManager::hasAiPrefix(b);
 
         // Frequency sorting for AI tags: count desc, then name
         if (aAi && bAi) {
@@ -1893,10 +1958,11 @@ void MainWindow::updateTagList() {
         const QString displayName = baseZh.isEmpty()
                                         ? canon
                                         : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-        const bool isAi = canon.trimmed().toLower().startsWith(QStringLiteral("[ai]"));
+        const bool isAi = TagManager::hasAiPrefix(canon);
         QListWidget *target = isAi ? m_aiTagListWidget : m_systemTagListWidget;
         if (!target) continue;
-        auto *it = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n), target);
+        const QString rowLabel = isAi ? tagLibraryLabelStripAiBadge(displayName) : displayName.trimmed();
+        auto *it = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(rowLabel).arg(n), target);
         it->setData(Qt::UserRole, canon);
         it->setData(Qt::UserRole + 1, n);
         it->setData(Qt::UserRole + 2, baseZh);
@@ -1913,6 +1979,7 @@ void MainWindow::syncTagFilterFromTagList() {
     cmbTagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("All Files")), QStringLiteral("ALL"));
     auto addFromList = [this](QListWidget *list) {
         if (!list) return;
+        const bool stripAi = (list == m_aiTagListWidget);
         for (int i = 0; i < list->count(); ++i) {
             const auto *it = list->item(i);
             if (!it) continue;
@@ -1922,10 +1989,12 @@ void MainWindow::syncTagFilterFromTagList() {
             const QString baseZh = it->data(Qt::UserRole + 2).toString();
             const QString canon = normalizeDisplayTag(rawTag);
             const QString emoji = systemTagEmojiPrefix(canon);
-            const QString displayName = baseZh.isEmpty()
+            QString displayName = baseZh.isEmpty()
                                             ? canon
                                             : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-            cmbTagFilter->addItem(displayName.trimmed(), rawTag);
+            displayName = displayName.trimmed();
+            if (stripAi) displayName = tagLibraryLabelStripAiBadge(displayName);
+            cmbTagFilter->addItem(displayName, rawTag);
         }
     };
     addFromList(m_systemTagListWidget);
@@ -2123,16 +2192,9 @@ void MainWindow::updateTagDisplayForFile(const QString &absPath) {
         tags = tagManager.getTags(absPath);
     }
 
-    auto isAiTag = [](const QString &t) {
-        return t.trimmed().toLower().startsWith(QStringLiteral("[ai]"));
-    };
-    auto stripAiPrefix = [](const QString &t) {
-        QString s = t.trimmed();
-        s.replace(QRegularExpression(QStringLiteral("^\\[ai\\]\\s*"), QRegularExpression::CaseInsensitiveOption), QString());
-        return s.trimmed();
-    };
+    auto isAiTag = [](const QString &t) { return TagManager::hasAiPrefix(t); };
     auto normBase = [&](const QString &t) {
-        return stripAiPrefix(t).trimmed().toLower();
+        return TagManager::stripAiPrefix(t).trimmed().toLower();
     };
 
     QSet<QString> manualBases;
@@ -2232,11 +2294,13 @@ std::vector<QString> MainWindow::sanitizeAiTags(const QString &raw) const {
     QSet<QString> seen;
     std::vector<QString> out;
     const bool en = (LanguageManager::instance().language() == LanguageManager::Language::EN_US);
-    const int maxLen = en ? 24 : 8;
+    const int maxLen = en ? 24 : 15;
 
     for (const QString &p0 : parts) {
-        QString p = p0.trimmed();
-        p.replace(QRegularExpression(QStringLiteral("[\\s\\.。;；:：\\[\\]\\(\\)<>\"'`~!@#$%^&*+=\\|\\\\/?]+")), QString());
+        QString p = TagManager::stripAiPrefix(p0.trimmed());
+        // Do NOT strip '[' / ']' here — that mangles "[AI] …" into "AI] …" / "[ …" garbage. Only trim punctuation/symbols.
+        p.replace(QRegularExpression(QStringLiteral("[\\s\\.。;；:：\\(\\)<>\"'`~!@#$%^&*+=\\|\\\\/?]+")), QString());
+        p = p.trimmed();
         if (p.isEmpty()) continue;
         if (p.size() > maxLen) continue;
         if (seen.contains(p)) continue;
@@ -2618,7 +2682,19 @@ void MainWindow::onAnalysisFinished() {
         }
 
         if (!tagsList.isEmpty()) {
-            tags = sanitizeAiTags(tagsList.join(QStringLiteral(", ")));
+            QSet<QString> seen;
+            tags.clear();
+            for (const QString &raw : tagsList) {
+                if (tags.size() >= 3) break;
+                QString t = TagManager::stripAiPrefix(raw.trimmed());
+                t = normalizeAiTag(t);
+                if (t.isEmpty()) continue;
+                if (t == QStringLiteral("ai")) continue;
+                if (t.size() > 15) continue;
+                if (seen.contains(t)) continue;
+                seen.insert(t);
+                tags.push_back(t);
+            }
         }
     }
 
@@ -2710,7 +2786,7 @@ void MainWindow::consolidateTagsWithAI() {
     QSet<QString> aiTagSet;
     for (const QString &t : rawTags) {
         const QString tt = t.trimmed();
-        if (tt.toLower().startsWith(QStringLiteral("[ai]"))) {
+        if (TagManager::hasAiPrefix(tt)) {
             if (!aiTagSet.contains(tt)) {
                 aiTagSet.insert(tt);
                 aiTags << tt;
@@ -2789,7 +2865,7 @@ void MainWindow::onConsolidateTagsFinished() {
     QSet<QString> aiTagSet;
     for (const QString &t : allTags) {
         const QString tt = t.trimmed();
-        if (tt.toLower().startsWith(QStringLiteral("[ai]"))) aiTagSet.insert(tt);
+        if (TagManager::hasAiPrefix(tt)) aiTagSet.insert(tt);
     }
 
     int merged = 0;
@@ -2962,10 +3038,12 @@ void MainWindow::rebuildAddExistingTagMenu() {
                 const QString canon = normalizeDisplayTag(t);
                 const QString baseZh = systemTagBaseZh(canon).isEmpty() ? canon : systemTagBaseZh(canon);
                 const QString emoji = systemTagEmojiPrefix(canon);
-                const QString display = (LanguageManager::instance().getText(baseZh) == baseZh)
+                QString display = (LanguageManager::instance().getText(baseZh) == baseZh)
                                             ? canon
                                             : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-                QAction *a = sub->addAction(display.trimmed());
+                display = display.trimmed();
+                if (TagManager::hasAiPrefix(canon)) display = tagLibraryLabelStripAiBadge(display);
+                QAction *a = sub->addAction(display);
                 a->setData(canon);
                 connect(a, &QAction::triggered, this, [this, a]() {
                     const QString fp = currentFilePath();
