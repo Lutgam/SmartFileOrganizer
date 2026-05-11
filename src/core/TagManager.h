@@ -55,6 +55,9 @@ public:
     bool tryGetHashAnalysis(const QString& sha256Hex, QJsonObject* out) const;
     void exportHashAnalysisCache(QHash<QString, QJsonObject>* dst) const;
 
+    QStringList filePathsWithFileName(const QString &baseFileName) const;
+    QStringList filePathsWithContentHash(const QString &sha256Hex) const;
+
     std::vector<QString> getAllTags() const;
     std::vector<QString> getFilesByTag(const QString& tag) const;
 

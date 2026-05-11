@@ -1,10 +1,15 @@
 #include "DocumentParser.h"
 #include "miniz.h"
+#include <QCoreApplication>
+#include <QDebug>
+#include <QEventLoop>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
-#include <QXmlStreamReader>
 #include <QStringList>
+#include <QThread>
+#include <QXmlStreamReader>
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
@@ -19,84 +24,156 @@
 
 namespace fs = std::filesystem;
 
-// Forward decl: helper defined below
-static std::string extractZipEntry(const std::string& zipPath, const std::string& entryName);
+// Forward decl: helpers defined below
+static std::string extractZipEntryQ(const QString &zipPath, const std::string &entryName);
+static std::string extractZipEntry(const std::string &zipPath, const std::string &entryName);
+
+/// Strip XML/HTML-like tags and collapse whitespace; removes stray '<' '>' for AI-safe plain text.
+static QString cleanseXmlTagNoise(const QString &raw)
+{
+    QString s = raw;
+    static const QRegularExpression tagRe(QStringLiteral("<[^>]*>"));
+    s.replace(tagRe, QStringLiteral(" "));
+    static const QRegularExpression wsRe(QStringLiteral("\\s+"));
+    s.replace(wsRe, QStringLiteral(" "));
+    s = s.trimmed();
+    s.remove(QLatin1Char('<'));
+    s.remove(QLatin1Char('>'));
+    return s.trimmed();
+}
 
 std::string DocumentParser::extractText(const std::string& filePath)
 {
-    fs::path p(filePath);
-    std::string ext = p.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return extractTextQString(QString::fromStdString(filePath)).toStdString();
+}
+
+QString DocumentParser::extractTextQString(const QString& filePath)
+{
+    const QFileInfo fi(filePath);
+    if (!fi.exists() || !fi.isFile()) return QString();
+
+    const QString suffix = fi.suffix().toLower();
+    const QString abs = fi.absoluteFilePath();
 
     // Legacy binary formats: never try to unzip/parse.
-    if (ext == ".doc" || ext == ".xls" || ext == ".ppt") {
-        return "";
+    if (suffix == QStringLiteral("doc") || suffix == QStringLiteral("xls") || suffix == QStringLiteral("ppt")) {
+        return QString();
     }
 
-    if (ext == ".docx" || ext == ".docm") {
-        return parsDocx(filePath);
-    } else if (ext == ".xlsx" || ext == ".xlsm") {
-        return parseXlsx(filePath);
-    } else if (ext == ".pptx" || ext == ".pptm") {
+    if (suffix == QStringLiteral("docx") || suffix == QStringLiteral("docm")) {
+        const QByteArray utf8 = abs.toUtf8();
+        return QString::fromStdString(parsDocx(std::string(utf8.constData(), static_cast<size_t>(utf8.size()))));
+    }
+    if (suffix == QStringLiteral("xlsx") || suffix == QStringLiteral("xlsm")) {
+        const QByteArray utf8 = abs.toUtf8();
+        return QString::fromStdString(parseXlsx(std::string(utf8.constData(), static_cast<size_t>(utf8.size()))));
+    }
+    if (suffix == QStringLiteral("pptx") || suffix == QStringLiteral("pptm")) {
         try {
-            QFile file(QString::fromStdString(filePath));
-            if (!file.open(QIODevice::ReadOnly)) return "";
+            QFile file(abs);
+            if (!file.open(QIODevice::ReadOnly)) {
+                qDebug() << "PPTX Error: cannot open file" << abs;
+                return QString();
+            }
             const QByteArray fileData = file.readAll();
             file.close();
-            if (fileData.isEmpty()) return "";
+            if (fileData.isEmpty()) {
+                qDebug() << "PPTX Error: empty file" << abs;
+                return QString();
+            }
 
             mz_zip_archive zip_archive;
             memset(&zip_archive, 0, sizeof(zip_archive));
-            if (!mz_zip_reader_init_mem(&zip_archive, fileData.constData(), fileData.size(), 0)) {
-                return "";
+            if (!mz_zip_reader_init_mem(&zip_archive, fileData.constData(), static_cast<mz_uint>(fileData.size()), 0)) {
+                qDebug() << "PPTX Error: mz_zip_reader_init_mem failed" << abs << "size" << fileData.size();
+                return QString();
             }
 
             QString text;
             static const QRegularExpression atRe(
                 QStringLiteral("<[a-zA-Z0-9]+:t[^>]*>(.*?)</[a-zA-Z0-9]+:t>"),
                 QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+            static const QRegularExpression legacyAtRe(
+                QStringLiteral("<a:t[^>]*>([\\s\\S]*?)</a:t>"),
+                QRegularExpression::CaseInsensitiveOption);
+
+            auto appendMatches = [&](const QString &xmlContent) {
+                const QRegularExpression *patterns[] = {&atRe, &legacyAtRe};
+                for (const QRegularExpression *re : patterns) {
+                    auto git = re->globalMatch(xmlContent);
+                    while (git.hasNext()) {
+                        const auto m = git.next();
+                        if (!m.hasMatch()) continue;
+                        const QString chunk = m.captured(1).trimmed();
+                        if (!chunk.isEmpty()) {
+                            text += chunk;
+                            text += QLatin1Char(' ');
+                        }
+                        if (text.size() > 8000) return;
+                    }
+                }
+            };
+
+            bool anyXml = false;
+            QString strippedSlides;
             const int num_files = mz_zip_reader_get_num_files(&zip_archive);
             for (int i = 0; i < num_files; ++i) {
                 mz_zip_archive_file_stat st{};
                 if (!mz_zip_reader_file_stat(&zip_archive, i, &st)) continue;
                 const QString name = QString::fromUtf8(st.m_filename);
-                if (!name.startsWith(QStringLiteral("ppt/slides/slide")) || !name.endsWith(QStringLiteral(".xml"))) continue;
+                const bool inSlides = name.contains(QStringLiteral("/slides/"), Qt::CaseInsensitive)
+                                      && name.endsWith(QStringLiteral(".xml"), Qt::CaseInsensitive)
+                                      && !name.contains(QStringLiteral("/_rels/"), Qt::CaseInsensitive);
+                const bool inNotes = name.contains(QStringLiteral("/notesSlides/"), Qt::CaseInsensitive)
+                                     && name.endsWith(QStringLiteral(".xml"), Qt::CaseInsensitive)
+                                     && !name.contains(QStringLiteral("/_rels/"), Qt::CaseInsensitive);
+                if (!inSlides && !inNotes) continue;
 
+                anyXml = true;
                 size_t file_size = 0;
                 void *pHeap = mz_zip_reader_extract_to_heap(&zip_archive, i, &file_size, 0);
                 if (!pHeap || file_size == 0) {
                     if (pHeap) mz_free(pHeap);
                     continue;
                 }
-                const QString xmlContent = QString::fromUtf8(static_cast<const char *>(pHeap), static_cast<int>(file_size));
+                const QString xmlContent =
+                    QString::fromUtf8(static_cast<const char *>(pHeap), static_cast<int>(file_size));
                 mz_free(pHeap);
 
-                auto git = atRe.globalMatch(xmlContent);
-                while (git.hasNext()) {
-                    const auto m = git.next();
-                    if (!m.hasMatch()) continue;
-                    const QString chunk = m.captured(1).trimmed();
-                    if (!chunk.isEmpty()) {
-                        text += chunk;
-                        text += QLatin1Char(' ');
+                appendMatches(xmlContent);
+                {
+                    const QString slidePlain = cleanseXmlTagNoise(xmlContent);
+                    if (!slidePlain.isEmpty()) {
+                        strippedSlides += slidePlain;
+                        strippedSlides += QLatin1Char(' ');
                     }
-                    if (text.size() > 8000) break;
+                    if (strippedSlides.size() > 12000)
+                        strippedSlides = strippedSlides.left(12000);
                 }
                 if (text.size() > 8000) break;
             }
 
             mz_zip_reader_end(&zip_archive);
-            return text.trimmed().toStdString();
-        } catch (const std::exception &) {
-            return "";
+
+            if (!anyXml) {
+                qDebug() << "PPTX Error: no slide/notesSlide xml found in archive" << abs;
+            } else if (text.trimmed().isEmpty()) {
+                qDebug() << "PPTX Error: regex found no text in matched slides" << abs;
+            }
+            const QString primary = text.trimmed().isEmpty() ? strippedSlides.trimmed() : text;
+            return cleanseXmlTagNoise(primary).trimmed();
+        } catch (const std::exception &e) {
+            qDebug() << "PPTX Error: exception" << e.what() << filePath;
+            return QString();
         } catch (...) {
-            return "";
+            qDebug() << "PPTX Error: unknown exception" << filePath;
+            return QString();
         }
-    } else if (ext == ".odt" || ext == ".ods" || ext == ".odp") {
-        // ODF formats store main content in content.xml
-        std::string xmlContent = extractZipEntry(filePath, "content.xml");
-        if (xmlContent.rfind("DEBUG:", 0) == 0) return "";
-        if (xmlContent.empty()) return "";
+    }
+    if (suffix == QStringLiteral("odt") || suffix == QStringLiteral("ods") || suffix == QStringLiteral("odp")) {
+        std::string xmlContent = extractZipEntryQ(abs, "content.xml");
+        if (xmlContent.rfind("DEBUG:", 0) == 0) return QString();
+        if (xmlContent.empty()) return QString();
 
         QString text;
         QXmlStreamReader xml(QString::fromStdString(xmlContent));
@@ -113,35 +190,34 @@ std::string DocumentParser::extractText(const std::string& filePath)
             }
             if (text.size() > 4000) break;
         }
-        return text.trimmed().toStdString();
-    } else if (ext == ".pdf") {
-        return extractPdfText(QString::fromStdString(filePath)).toStdString();
+        return text.trimmed();
     }
-    return "";
+    if (suffix == QStringLiteral("pdf")) {
+        return extractPdfText(abs);
+    }
+    return QString();
 }
 
 
 
 // Helper to unzip specific file from archive to string
-static std::string extractZipEntry(const std::string& zipPath, const std::string& entryName) {
-    // Use QFile to handle Unicode paths on Windows correctly
-    QFile file(QString::fromStdString(zipPath));
+static std::string extractZipEntryQ(const QString& zipPath, const std::string& entryName) {
+    QFile file(zipPath);
     if (!file.open(QIODevice::ReadOnly)) {
-        return "DEBUG: Failed to open file via Qt (Unicode check): " + zipPath;
+        return "DEBUG: Failed to open file via Qt (Unicode check): " + zipPath.toStdString();
     }
     QByteArray fileData = file.readAll();
     file.close();
 
     if (fileData.isEmpty()) {
-        return "DEBUG: File is empty: " + zipPath;
+        return "DEBUG: File is empty: " + zipPath.toStdString();
     }
 
     mz_zip_archive zip_archive;
     memset(&zip_archive, 0, sizeof(zip_archive));
 
-    // Initialize zip reader from memory buffer instead of file path
-    if (!mz_zip_reader_init_mem(&zip_archive, fileData.constData(), fileData.size(), 0)) {
-        return "DEBUG: Failed to parse zip structure from memory: " + zipPath;
+    if (!mz_zip_reader_init_mem(&zip_archive, fileData.constData(), static_cast<mz_uint>(fileData.size()), 0)) {
+        return "DEBUG: Failed to parse zip structure from memory: " + zipPath.toStdString();
     }
 
     int file_index = mz_zip_reader_locate_file(&zip_archive, entryName.c_str(), NULL, 0);
@@ -169,6 +245,10 @@ static std::string extractZipEntry(const std::string& zipPath, const std::string
     mz_free(p);
     mz_zip_reader_end(&zip_archive);
     return content;
+}
+
+static std::string extractZipEntry(const std::string& zipPath, const std::string& entryName) {
+    return extractZipEntryQ(QString::fromStdString(zipPath), entryName);
 }
 
 std::string DocumentParser::parsDocx(const std::string& filePath)
@@ -276,49 +356,92 @@ QString DocumentParser::extractPdfText(const QString& filePath)
     QPdfDocument doc;
     const auto err = doc.load(clean);
     if (err != QPdfDocument::Error::None) {
+        qDebug() << "PDF Error: load failed" << clean << static_cast<int>(err);
+        return QString();
+    }
+
+    // load() can return before the document is Ready; wait briefly so text APIs work.
+    QElapsedTimer waitClock;
+    waitClock.start();
+    while (doc.status() == QPdfDocument::Status::Loading && waitClock.elapsed() < 5000) {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        QThread::msleep(2);
+    }
+    if (doc.status() != QPdfDocument::Status::Ready || doc.pageCount() <= 0) {
+        qDebug() << "PDF Error: document not ready or empty page count" << clean
+                 << "status" << static_cast<int>(doc.status()) << "pages" << doc.pageCount();
         return QString();
     }
 
     const int pages = doc.pageCount();
     QString out;
     for (int i = 0; i < pages; ++i) {
-        const QSizeF sz = doc.pagePointSize(i);
-        if (sz.width() <= 0 || sz.height() <= 0) continue;
-        const QPdfSelection sel = doc.getSelection(i, QPointF(0, 0), QPointF(sz.width(), sz.height()));
-        const QString pageText = sel.text();
-        if (!pageText.trimmed().isEmpty()) {
+        QSizeF sz = doc.pagePointSize(i);
+        if (sz.width() <= 1 || sz.height() <= 1) {
+            qDebug() << "PDF Text Empty: invalid page size" << clean << "page" << i << sz;
+            continue;
+        }
+
+        QString pageText;
+        {
+            const QPdfSelection allSel = doc.getAllText(i);
+            pageText = allSel.text();
+            qDebug() << "Page" << i << "Text:" << pageText.left(50) << "len" << pageText.size()
+                     << "getAllText valid" << allSel.isValid();
+        }
+
+        if (pageText.trimmed().isEmpty()) {
+            const int maxPass = 3;
+            for (int pass = 0; pass < maxPass && pageText.trimmed().isEmpty(); ++pass) {
+                const qreal w = sz.width() * (1.0 + 0.25 * pass);
+                const qreal h = sz.height() * (1.0 + 0.25 * pass);
+                const QPdfSelection sel = doc.getSelection(i, QPointF(0, 0), QPointF(w, h));
+                pageText = sel.text();
+            }
+            qDebug() << "Page" << i << "fallback getSelection Text:" << pageText.left(50)
+                     << "len" << pageText.size();
+        }
+
+        if (pageText.trimmed().isEmpty()) {
+            qDebug() << "PDF Text Empty:" << clean << "page" << i << "/" << pages;
+        } else {
             out += pageText;
             out += QStringLiteral("\n");
         }
         if (out.size() > 100000) break;
     }
-    const QString trimmed = out.trimmed();
-    if (trimmed.isEmpty()) return QString();
-    if (trimmed.contains(QStringLiteral("No searchable text"), Qt::CaseInsensitive)) return QString();
-    if (trimmed.contains(QStringLiteral("no searchable text"), Qt::CaseInsensitive)) return QString();
-    return trimmed;
+    qDebug() << "PDF extract total chars" << out.size() << "file" << clean;
+    return out.trimmed();
 #elif defined(HAVE_POPPLER_QT6)
     std::unique_ptr<Poppler::Document> pdf(Poppler::Document::load(clean));
-    if (!pdf) return QString();
+    if (!pdf) {
+        qDebug() << "PDF Error: Poppler::Document::load failed" << clean;
+        return QString();
+    }
     const int pages = pdf->numPages();
     QString out;
     for (int i = 0; i < pages; ++i) {
         std::unique_ptr<Poppler::Page> page(pdf->page(i));
         if (!page) continue;
-        const QString pageText = page->text(QRectF());
-        if (!pageText.trimmed().isEmpty()) {
+        QString pageText = page->text(QRectF());
+        if (pageText.trimmed().isEmpty()) {
+            const QRectF r = page->pageRectF();
+            pageText = page->text(r);
+        }
+        qDebug() << "Page" << i << "Text:" << pageText.left(50) << "len" << pageText.size();
+        if (pageText.trimmed().isEmpty()) {
+            qDebug() << "PDF Text Empty:" << clean << "page" << i << "/" << pages;
+        } else {
             out += pageText;
             out += QStringLiteral("\n");
         }
         if (out.size() > 100000) break;
     }
-    const QString trimmed = out.trimmed();
-    if (trimmed.isEmpty()) return QString();
-    if (trimmed.contains(QStringLiteral("No searchable text"), Qt::CaseInsensitive)) return QString();
-    if (trimmed.contains(QStringLiteral("no searchable text"), Qt::CaseInsensitive)) return QString();
-    return trimmed;
+    qDebug() << "PDF (Poppler) extract total chars" << out.size() << "file" << clean;
+    return out.trimmed();
 #else
     Q_UNUSED(clean);
+    qDebug() << "PDF Error: built without Qt Pdf / Poppler" << filePath;
     return QString();
 #endif
 }

@@ -273,6 +273,70 @@ static QString sha256HexOfFile(const QString &path)
 
 } // namespace
 
+void MainWindow::prioritizeAnalysisPaths(QStringList &paths, const QString &focusFolderAbs)
+{
+    const QString focus = QDir::cleanPath(focusFolderAbs);
+    if (focus.isEmpty() || paths.isEmpty()) return;
+    QStringList under;
+    QStringList other;
+    under.reserve(paths.size());
+    other.reserve(paths.size());
+    for (const QString &p : paths) {
+        const QString d = QDir::cleanPath(QFileInfo(p).absolutePath());
+        if (d == focus || d.startsWith(focus + QLatin1Char('/'))) under << p;
+        else other << p;
+    }
+    paths = under + other;
+}
+
+void MainWindow::recordBatchPathForContentHash(const QString &hashHex, const QString &filePath)
+{
+    if (hashHex.isEmpty() || filePath.isEmpty()) return;
+    m_batchHashToPaths[hashHex].insert(filePath);
+    QStringList known;
+    {
+        QMutexLocker locker(&tagMutex);
+        known = tagManager.filePathsWithContentHash(hashHex);
+    }
+    for (const QString &p : known) m_batchHashToPaths[hashHex].insert(p);
+}
+
+void MainWindow::noteSameNameDifferentHashConflicts(const QString &filePath, const QString &hashHex)
+{
+    if (filePath.isEmpty() || hashHex.isEmpty()) return;
+    const QString base = QFileInfo(filePath).fileName();
+    QStringList candidates;
+    {
+        QMutexLocker locker(&tagMutex);
+        candidates = tagManager.filePathsWithFileName(base);
+    }
+    for (const QString &other : candidates) {
+        if (other == filePath) continue;
+        QString oh;
+        {
+            QMutexLocker locker(&tagMutex);
+            oh = tagManager.fileContentHash(other);
+        }
+        if (oh.isEmpty()) continue;
+        if (oh.compare(hashHex, Qt::CaseInsensitive) == 0) continue;
+        m_batchNameConflictPaths[base].insert(filePath);
+        m_batchNameConflictPaths[base].insert(other);
+    }
+}
+
+void MainWindow::updateBackgroundStatusLabel()
+{
+    if (!lblBackgroundStatus) return;
+    // Remaining includes the file currently being analyzed (batch not yet incremented).
+    const int nRemaining =
+        m_isBatchMode ? qMax(0, m_totalBatchSize - m_batchCompletedCount) : 0;
+    const bool show = m_isBatchMode && nRemaining > 0;
+    lblBackgroundStatus->setVisible(show);
+    if (!show) return;
+    lblBackgroundStatus->setText(
+        LanguageManager::instance().getText(QStringLiteral("bg_analyze_queue")).arg(nRemaining));
+}
+
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setupToolbar();
     m_mainTabWidget = new QTabWidget(this);
@@ -553,6 +617,7 @@ void MainWindow::updateAllTexts() {
     if (chkRecursive) chkRecursive->setText(lm.getText(QStringLiteral("包含子資料夾")));
     if (lblFolderTreeTitle) lblFolderTreeTitle->setText(QStringLiteral("🗂️ %1").arg(lm.getText(QStringLiteral("資料夾樹"))));
     if (lblFileListTitle) lblFileListTitle->setText(QStringLiteral("📂 %1").arg(lm.getText(QStringLiteral("檔案清單"))));
+    updateBackgroundStatusLabel();
     if (lblPreviewTitle) lblPreviewTitle->setText(QStringLiteral("👁️ %1").arg(lm.getText(QStringLiteral("預覽與控制"))));
     if (lblPreviewImage) {
         // Only update the default placeholder text
@@ -821,8 +886,17 @@ void MainWindow::setupFourColumnLayout() {
     // --- Column 3: Files (row1 sort, row2 filter+search) ---
     filesPanel = new QWidget(this);
     auto *filesLayout = new QVBoxLayout(filesPanel);
+    auto *fileTitleRow = new QHBoxLayout();
     lblFileListTitle = new QLabel(QStringLiteral("📂 檔案清單"), this);
-    filesLayout->addWidget(lblFileListTitle);
+    fileTitleRow->addWidget(lblFileListTitle);
+    lblBackgroundStatus = new QLabel(this);
+    lblBackgroundStatus->setVisible(false);
+    lblBackgroundStatus->setWordWrap(false);
+    lblBackgroundStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    lblBackgroundStatus->setStyleSheet(QStringLiteral(
+        "QLabel { color:#1d4ed8; font-weight:700; font-size:14px; padding-left:12px; }"));
+    fileTitleRow->addWidget(lblBackgroundStatus, 1);
+    filesLayout->addLayout(fileTitleRow);
 
     auto *controlsCol = new QVBoxLayout();
 
@@ -941,6 +1015,7 @@ void MainWindow::setupFourColumnLayout() {
         m_totalBatchSize = 0;
         m_isBatchMode = false;
         m_currentAnalyzingFile.clear();
+        updateBackgroundStatusLabel();
         if (batchProgressBar) batchProgressBar->setVisible(false);
         if (lblBatchStatus) lblBatchStatus->setVisible(false);
         if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
@@ -2193,16 +2268,26 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     }
 
     const QString suffix = fi.suffix().toLower();
-    if (suffix == QStringLiteral("pdf") || suffix == QStringLiteral("docx") || suffix == QStringLiteral("xlsx")) {
+    if (suffix == QStringLiteral("pdf")) {
         txtPreviewText->setVisible(true);
-        std::string content = DocumentParser::extractText(absPath.toStdString());
-        if (content.size() > 2500) content = content.substr(0, 2500) + "...";
-        if (content.empty()) {
+        QString content = DocumentParser::extractPdfText(absPath);
+        if (content.size() > 2500) content = content.left(2500) + QStringLiteral("...");
+        if (content.trimmed().isEmpty()) {
             content = QStringLiteral("[%1]")
-                          .arg(LanguageManager::instance().getText(QStringLiteral("無法提取文字內容（可能為掃描檔或加密）")))
-                          .toStdString();
+                          .arg(LanguageManager::instance().getText(QStringLiteral("無法提取文字內容（可能為掃描檔或加密）")));
         }
-        txtPreviewText->setPlainText(typeLine + QStringLiteral("\n") + QString::fromStdString(content));
+        txtPreviewText->setPlainText(typeLine + QStringLiteral("\n") + content);
+        return;
+    }
+    if (suffix == QStringLiteral("docx") || suffix == QStringLiteral("xlsx") || suffix == QStringLiteral("pptx")) {
+        txtPreviewText->setVisible(true);
+        QString content = DocumentParser::extractTextQString(absPath);
+        if (content.size() > 2500) content = content.left(2500) + QStringLiteral("...");
+        if (content.trimmed().isEmpty()) {
+            content = QStringLiteral("[%1]")
+                          .arg(LanguageManager::instance().getText(QStringLiteral("無法提取文字內容（可能為掃描檔或加密）")));
+        }
+        txtPreviewText->setPlainText(typeLine + QStringLiteral("\n") + content);
         return;
     }
 
@@ -2400,10 +2485,13 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
 
     const QString contentHash = sha256HexOfFile(fp);
     primeAnalysisCacheFromDisk(contentHash);
+    if (!contentHash.isEmpty()) {
+        noteSameNameDifferentHashConflicts(fp, contentHash);
+    }
     if (!contentHash.isEmpty() && m_analysisByContentHash.contains(contentHash)) {
         const QJsonObject cached = m_analysisByContentHash.value(contentHash);
         m_currentAnalyzingFile = fp;
-        applyCachedAnalysisForHashHit(fp, cached);
+        applyCachedAnalysisForHashHit(fp, cached, contentHash);
         if (m_isBatchMode) {
             ++m_batchCompletedCount;
             setUiBusy(false);
@@ -2411,6 +2499,7 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
                 batchProgressBar->setValue(qMin(m_totalBatchSize, m_batchCompletedCount));
             }
             lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成（重複內容：已套用快取）")));
+            updateBackgroundStatusLabel();
             QTimer::singleShot(0, this, &MainWindow::processNextInQueue);
         } else {
             lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
@@ -2435,6 +2524,7 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
     lblStatus->setText(tr("Preparing…"));
 
     m_currentAnalyzingFile = fp;
+    updateBackgroundStatusLabel();
     const QString filename = fi.fileName();
     // IMPORTANT: Do NOT feed full historical tags into the prompt.
     // It causes "prompt contamination" where prior institution names get repeated.
@@ -2445,6 +2535,16 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
     }();
 
     const QString suffix = fi.suffix().toLower();
+    const QSet<QString> zipXmlExtractable = {QStringLiteral("pdf"),
+                                             QStringLiteral("docx"),
+                                             QStringLiteral("docm"),
+                                             QStringLiteral("xlsx"),
+                                             QStringLiteral("xlsm"),
+                                             QStringLiteral("pptx"),
+                                             QStringLiteral("pptm"),
+                                             QStringLiteral("odt"),
+                                             QStringLiteral("ods"),
+                                             QStringLiteral("odp")};
     const QStringList textExtensions = {QStringLiteral("txt"),
                                         QStringLiteral("md"),
                                         QStringLiteral("cpp"),
@@ -2456,7 +2556,6 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
                                         QStringLiteral("csv"),
                                         QStringLiteral("log"),
                                         QStringLiteral("pdf"),
-                                        // Modern XML (ZIP+XML) families
                                         QStringLiteral("docx"),
                                         QStringLiteral("docm"),
                                         QStringLiteral("xlsx"),
@@ -2471,22 +2570,11 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
     const bool isTextExt = textExtensions.contains(suffix) && !legacyBinaryBlocked.contains(suffix);
     QString contentQ;
     if (isTextExt) {
-        const QSet<QString> zipXmlExtractable = {QStringLiteral("pdf"),
-                                                 QStringLiteral("docx"),
-                                                 QStringLiteral("docm"),
-                                                 QStringLiteral("xlsx"),
-                                                 QStringLiteral("xlsm"),
-                                                 QStringLiteral("pptx"),
-                                                 QStringLiteral("pptm"),
-                                                 QStringLiteral("odt"),
-                                                 QStringLiteral("ods"),
-                                                 QStringLiteral("odp")};
         if (zipXmlExtractable.contains(suffix)) {
-            // Use the same extraction logic as Preview & Control.
             if (suffix == QStringLiteral("pdf")) {
                 contentQ = DocumentParser::extractPdfText(fp);
             } else {
-                contentQ = QString::fromStdString(DocumentParser::extractText(fp.toStdString()));
+                contentQ = DocumentParser::extractTextQString(fp);
             }
         } else {
             // Read textual content only. (Never feed binary bytes to AI.)
@@ -2499,6 +2587,15 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
                 contentQ = QString::fromUtf8(buf.data(), static_cast<int>(buf.size()));
             }
         }
+    }
+
+    if (zipXmlExtractable.contains(suffix) && contentQ.trimmed().isEmpty()) {
+        qDebug() << "MainWindow: extract empty for Office/PDF; using filename stub" << suffix << fp;
+        contentQ = QStringLiteral("[Text extraction empty — filename: %1]").arg(filename);
+    }
+
+    if (suffix == QStringLiteral("pdf") && contentQ.trimmed().size() > 10) {
+        qDebug() << "MainWindow: PDF extracted text length" << contentQ.size() << "for" << fp;
     }
 
     const bool contentReadable = !contentQ.trimmed().isEmpty();
@@ -2536,7 +2633,8 @@ void MainWindow::startBatchAnalysis() {
     m_totalBatchSize = 0;
     m_pendingResults.clear();
 
-    // Enqueue all files currently displayed in fileList
+    // Enqueue all files currently displayed in fileList (current folder first)
+    QStringList batchPaths;
     for (int i = 0; i < fileList->count(); ++i) {
         auto *it = fileList->item(i);
         if (!it) continue;
@@ -2545,14 +2643,18 @@ void MainWindow::startBatchAnalysis() {
         QFileInfo fi(absPath);
         if (!fi.exists() || !fi.isFile()) continue;
         if (!isAnalyzableFile(fi)) continue;
-        m_analysisQueue.enqueue(QDir::cleanPath(absPath));
+        batchPaths << QDir::cleanPath(absPath);
     }
+    const QString focus = (fileListMode == FileListMode::PhysicalFolder) ? QDir::cleanPath(currentPath) : QString();
+    prioritizeAnalysisPaths(batchPaths, focus);
+    for (const QString &p : batchPaths) m_analysisQueue.enqueue(p);
 
     m_totalBatchSize = m_analysisQueue.size();
     if (m_totalBatchSize <= 0) return;
 
     m_batchTriggeredByBackgroundAuto = false;
-    m_currentBatchRedundantFiles.clear();
+    m_batchHashToPaths.clear();
+    m_batchNameConflictPaths.clear();
     m_batchCompletedCount = 0;
     m_folderReportAiTagAdds = 0;
     m_isBatchMode = true;
@@ -2567,6 +2669,7 @@ void MainWindow::processNextInQueue() {
         // Completed
         m_isBatchMode = false;
         m_currentAnalyzingFile.clear();
+        updateBackgroundStatusLabel();
         flushPendingBatchResults();
         if (batchProgressBar) batchProgressBar->setVisible(false);
         if (lblBatchStatus) lblBatchStatus->setVisible(false);
@@ -2586,6 +2689,8 @@ void MainWindow::processNextInQueue() {
     }
 
     const QString nextFile = m_analysisQueue.dequeue();
+    m_currentAnalyzingFile = nextFile;
+    updateBackgroundStatusLabel();
     const int nowDone = m_totalBatchSize - m_analysisQueue.size();
     if (lblBatchStatus) {
         lblBatchStatus->setText(QStringLiteral("%1: %2 (%3/%4)")
@@ -2717,6 +2822,9 @@ void MainWindow::onBackgroundAutoAnalyzeDebounce()
     }
     if (paths.isEmpty()) return;
 
+    const QString focus = (fileListMode == FileListMode::PhysicalFolder) ? QDir::cleanPath(currentPath) : QString();
+    prioritizeAnalysisPaths(paths, focus);
+
     m_pendingResults.clear();
     m_analysisQueue.clear();
     for (const QString &p : paths) m_analysisQueue.enqueue(p);
@@ -2724,7 +2832,8 @@ void MainWindow::onBackgroundAutoAnalyzeDebounce()
     if (m_totalBatchSize <= 0) return;
 
     m_batchTriggeredByBackgroundAuto = true;
-    m_currentBatchRedundantFiles.clear();
+    m_batchHashToPaths.clear();
+    m_batchNameConflictPaths.clear();
     m_batchCompletedCount = 0;
     m_folderReportAiTagAdds = 0;
     m_isBatchMode = true;
@@ -2751,15 +2860,16 @@ void MainWindow::beginBatchAnalysisUi()
     if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(false);
     if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(false);
     if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(true);
+    updateBackgroundStatusLabel();
 }
 
-void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached)
+void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached, const QString &contentHashHex)
 {
     const QJsonObject copy = QJsonDocument::fromJson(QJsonDocument(cached).toJson()).object();
 
     if (m_isBatchMode) {
         m_pendingResults.insert(fp, copy);
-        m_currentBatchRedundantFiles << fp;
+        if (!contentHashHex.isEmpty()) recordBatchPathForContentHash(contentHashHex, fp);
         return;
     }
 
@@ -2792,18 +2902,41 @@ void MainWindow::showFolderAnalysisReport()
     auto &lm = LanguageManager::instance();
     const int n = m_batchCompletedCount;
     const int x = m_folderReportAiTagAdds;
-    const int y = m_currentBatchRedundantFiles.size();
 
-    if (n <= 0 && x <= 0 && y <= 0) {
-        m_currentBatchRedundantFiles.clear();
+    auto filterMultiPath = [](const QMap<QString, QSet<QString>> &in) {
+        QMap<QString, QSet<QString>> out;
+        for (auto it = in.constBegin(); it != in.constEnd(); ++it) {
+            if (it.value().size() >= 2) out.insert(it.key(), it.value());
+        }
+        return out;
+    };
+
+    const QMap<QString, QSet<QString>> hashGroups = filterMultiPath(m_batchHashToPaths);
+    const QMap<QString, QSet<QString>> nameGroups = filterMultiPath(m_batchNameConflictPaths);
+
+    int hashDupCount = 0;
+    for (auto it = hashGroups.constBegin(); it != hashGroups.constEnd(); ++it) {
+        hashDupCount += static_cast<int>(it.value().size()) - 1;
+    }
+    int nameDupCount = 0;
+    for (auto it = nameGroups.constBegin(); it != nameGroups.constEnd(); ++it) {
+        nameDupCount += static_cast<int>(it.value().size()) - 1;
+    }
+
+    const bool showTree = !hashGroups.isEmpty() || !nameGroups.isEmpty();
+    const int yTotal = hashDupCount + nameDupCount;
+
+    if (n <= 0 && x <= 0 && yTotal <= 0 && !showTree) {
+        m_batchHashToPaths.clear();
+        m_batchNameConflictPaths.clear();
         m_batchCompletedCount = 0;
         m_folderReportAiTagAdds = 0;
         m_batchTriggeredByBackgroundAuto = false;
         return;
     }
 
-    if (y > 0) {
-        RedundancyReportDialog dlg(this, n, x, y, m_currentBatchRedundantFiles);
+    if (showTree) {
+        RedundancyReportDialog dlg(this, n, x, hashDupCount, nameDupCount, hashGroups, nameGroups);
         connect(&dlg, &RedundancyReportDialog::redundantFilesRemoved, this, [this](const QStringList &paths) {
             {
                 QMutexLocker locker(&tagMutex);
@@ -2817,11 +2950,12 @@ void MainWindow::showFolderAnalysisReport()
         });
         dlg.exec();
     } else {
-        const QString body = lm.getText(QStringLiteral("folder_report_body")).arg(n).arg(x).arg(y);
+        const QString body = lm.getText(QStringLiteral("folder_report_body")).arg(n).arg(x).arg(yTotal);
         QMessageBox::information(this, lm.getText(QStringLiteral("folder_report_title")), body);
     }
 
-    m_currentBatchRedundantFiles.clear();
+    m_batchHashToPaths.clear();
+    m_batchNameConflictPaths.clear();
     m_batchCompletedCount = 0;
     m_folderReportAiTagAdds = 0;
     m_batchTriggeredByBackgroundAuto = false;
@@ -2888,6 +3022,7 @@ void MainWindow::onAnalysisFinished() {
         if (m_isBatchMode) {
             ++m_batchCompletedCount;
             setUiBusy(false);
+            updateBackgroundStatusLabel();
             QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
         }
         return;
@@ -2898,6 +3033,7 @@ void MainWindow::onAnalysisFinished() {
         if (m_isBatchMode) {
             ++m_batchCompletedCount;
             setUiBusy(false);
+            updateBackgroundStatusLabel();
             QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
         }
         return;
@@ -3026,6 +3162,7 @@ void MainWindow::onAnalysisFinished() {
             ++m_batchCompletedCount;
             QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
         }
+        updateBackgroundStatusLabel();
         return;
     }
 
@@ -3045,9 +3182,14 @@ void MainWindow::onAnalysisFinished() {
         }
     }
 
+    if (!persistedHash.isEmpty()) {
+        recordBatchPathForContentHash(persistedHash, fp);
+    }
+
     if (m_isBatchMode) {
         ++m_batchCompletedCount;
     }
+    updateBackgroundStatusLabel();
 
     // Smooth progress update (on completion)
     if (m_isBatchMode && batchProgressBar) {

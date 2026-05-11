@@ -8,6 +8,8 @@ class DocumentParser
 {
 public:
     static std::string extractText(const std::string& filePath);
+    /// Prefer this for paths with non-Latin characters (uses Qt I/O end-to-end).
+    static QString extractTextQString(const QString& filePath);
     static QString extractPdfText(const QString& filePath);
 
 private:

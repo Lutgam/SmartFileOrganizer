@@ -162,6 +162,7 @@ private:
     // Column 3: Files
     QWidget *filesPanel = nullptr;
     QLabel *lblFileListTitle = nullptr;
+    QLabel *lblBackgroundStatus = nullptr;
     QComboBox *cmbSort = nullptr;
     QComboBox *cmbTagFilter = nullptr;
     QLineEdit *txtSearch = nullptr;
@@ -232,7 +233,8 @@ private:
 
     /// SHA-256 (hex) → last successful analysis JSON { summary, tags[] } for duplicate-file fast path.
     QHash<QString, QJsonObject> m_analysisByContentHash;
-    QStringList m_currentBatchRedundantFiles;
+    QMap<QString, QSet<QString>> m_batchHashToPaths;
+    QMap<QString, QSet<QString>> m_batchNameConflictPaths;
     int m_batchCompletedCount = 0;
     int m_folderReportAiTagAdds = 0;
     bool m_batchTriggeredByBackgroundAuto = false;
@@ -244,7 +246,7 @@ private:
     void analyzeFileForPath(const QString &absPath);
     void flushPendingBatchResults();
     void showFolderAnalysisReport();
-    void applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached);
+    void applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached, const QString &contentHashHex);
     void beginBatchAnalysisUi();
     void loadBackgroundAutoAnalyzeSetting();
 
@@ -252,6 +254,11 @@ private:
     void applyFilesystemWatchPolicy();
     void ensureRecursiveWatchCoversWorkspace();
     void primeAnalysisCacheFromDisk(const QString &sha256Hex);
+
+    void recordBatchPathForContentHash(const QString &hashHex, const QString &filePath);
+    void noteSameNameDifferentHashConflicts(const QString &filePath, const QString &hashHex);
+    void updateBackgroundStatusLabel();
+    static void prioritizeAnalysisPaths(QStringList &paths, const QString &focusFolderAbs);
 
     std::vector<QString> m_pendingFilesToDisplay;
     int m_currentLoadedCount = 0;

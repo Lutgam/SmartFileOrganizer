@@ -2,32 +2,39 @@
 #define REDUNDANCYREPORTDIALOG_H
 
 #include <QDialog>
+#include <QMap>
+#include <QSet>
 #include <QStringList>
 
-class QListWidget;
 class QLabel;
+class QTreeWidget;
 class QPushButton;
+class QButtonGroup;
 
-/// Post–folder-analysis UI: redundant paths with checkboxes and optional bulk delete.
+/// Grouped redundancy: same-content (hash) vs same-name / different hash. One keep per group (radio).
 class RedundancyReportDialog : public QDialog {
     Q_OBJECT
 public:
-    /// \a redundantPaths should be absolute file paths (one row each).
     explicit RedundancyReportDialog(QWidget *parent,
                                     int filesAnalyzed,
                                     int newTagAdds,
-                                    int redundantCount,
-                                    const QStringList &redundantPaths);
+                                    int hashDuplicatePathCount,
+                                    int nameConflictPathCount,
+                                    const QMap<QString, QSet<QString>> &hashToPaths,
+                                    const QMap<QString, QSet<QString>> &baseNameToPaths);
 
 signals:
-    /// Emitted with paths successfully removed from disk (metadata should be updated by receiver).
     void redundantFilesRemoved(const QStringList &absolutePaths);
 
 private slots:
-    void onDeleteChecked();
+    void onExecuteDelete();
 
 private:
-    QListWidget *m_list = nullptr;
+    void appendHashSection(const QMap<QString, QSet<QString>> &hashToPaths);
+    void appendNameConflictSection(const QMap<QString, QSet<QString>> &baseNameToPaths);
+
+    QTreeWidget *m_tree = nullptr;
+    QList<QButtonGroup *> m_buttonGroups;
 };
 
 #endif // REDUNDANCYREPORTDIALOG_H

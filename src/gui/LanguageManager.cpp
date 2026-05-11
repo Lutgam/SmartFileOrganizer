@@ -222,6 +222,28 @@ QString LanguageManager::getText(const QString &key) const {
     }
     if (key == QStringLiteral("redundancy_delete_checked"))
         return en ? QStringLiteral("Delete checked redundant files") : QStringLiteral("刪除勾選的冗餘檔案");
+    if (key == QStringLiteral("redundancy_dialog_body_grouped")) {
+        return en ? QStringLiteral("Analysis finished.\nCompleted %1 file(s). %2 new tag assignment(s).\nSame-content duplicates: %3 path(s) to review. Same-name / different-content: %4 path(s) to review.")
+                    : QStringLiteral("分析完成。\n已完成 %1 個檔案分析，共新增 %2 個標籤。\n內容相同（Hash）可檢視路徑：%3；檔名相同但內容不同：%4。");
+    }
+    if (key == QStringLiteral("redundancy_section_hash"))
+        return en ? QStringLiteral("Same content (SHA-256)") : QStringLiteral("內容相同（SHA-256）");
+    if (key == QStringLiteral("redundancy_section_name")) {
+        return en ? QStringLiteral("Same filename, different content (version conflict)") : QStringLiteral("檔名相同、內容不同（版本衝突）");
+    }
+    if (key == QStringLiteral("redundancy_group_hash_title")) {
+        return en ? QStringLiteral("📁 Same-content group (Hash: %1) — %2 file(s)")
+                    : QStringLiteral("📁 內容相同群組 (Hash: %1) — 共 %2 個檔案");
+    }
+    if (key == QStringLiteral("redundancy_group_name_title")) {
+        return en ? QStringLiteral("📄 Filename: \"%1\" — %2 path(s)")
+                    : QStringLiteral("📄 檔名：「%1」— 共 %2 個路徑");
+    }
+    if (key == QStringLiteral("redundancy_execute_delete"))
+        return en ? QStringLiteral("Execute delete") : QStringLiteral("執行刪除");
+    if (key == QStringLiteral("bg_analyze_running")) return en ? QStringLiteral("🔄 Background analysis… (%1)") : QStringLiteral("🔄 背景分析中… (%1)");
+    if (key == QStringLiteral("bg_analyze_queue"))
+        return en ? QStringLiteral("🔄 Analyzing… (%1 file(s) remaining)") : QStringLiteral("🔄 分析中… (剩餘 %1 個檔案)");
     if (key == QStringLiteral("redundancy_delete_none")) {
         return en ? QStringLiteral("No files were deleted. Check permissions or that paths still exist.")
                   : QStringLiteral("沒有檔案被刪除。請確認路徑仍存在且具備寫入／刪除權限。");

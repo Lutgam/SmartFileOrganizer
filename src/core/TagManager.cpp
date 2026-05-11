@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <iostream>
 #include <QDebug>
+#include <QFileInfo>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -491,6 +492,32 @@ void TagManager::exportHashAnalysisCache(QHash<QString, QJsonObject> *dst) const
         if (err.error != QJsonParseError::NoError || !d.isObject()) continue;
         dst->insert(h, d.object());
     }
+}
+
+QStringList TagManager::filePathsWithFileName(const QString &baseFileName) const
+{
+    QMutexLocker locker(&m_mutex);
+    QStringList out;
+    if (baseFileName.isEmpty()) return out;
+    for (const auto &entry : m_fileToTags) {
+        if (QFileInfo(entry.first).fileName().compare(baseFileName, Qt::CaseInsensitive) == 0) {
+            out << entry.first;
+        }
+    }
+    out.removeDuplicates();
+    return out;
+}
+
+QStringList TagManager::filePathsWithContentHash(const QString &sha256Hex) const
+{
+    QMutexLocker locker(&m_mutex);
+    QStringList out;
+    if (sha256Hex.isEmpty()) return out;
+    for (const auto &[path, hx] : m_pathToContentHash) {
+        if (hx.compare(sha256Hex, Qt::CaseInsensitive) == 0) out << path;
+    }
+    out.removeDuplicates();
+    return out;
 }
 
 std::vector<QString> TagManager::getTags(const QString& filename) const {
