@@ -3,13 +3,12 @@
 
 #include <algorithm>
 
-#include <QButtonGroup>
+#include <QCheckBox>
 #include <QFile>
 #include <QHeaderView>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QRadioButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -19,6 +18,21 @@ QString shortHash(const QString &hex)
 {
     if (hex.size() <= 16) return hex;
     return hex.left(8) + QStringLiteral("…") + hex.right(6);
+}
+
+void collectCheckedPathsFromGroup(QTreeWidgetItem *grp, QStringList *out)
+{
+    if (!grp || !out) return;
+    QTreeWidget *tw = grp->treeWidget();
+    if (!tw) return;
+    for (int ci = 0; ci < grp->childCount(); ++ci) {
+        QTreeWidgetItem *row = grp->child(ci);
+        if (!row) continue;
+        auto *cb = qobject_cast<QCheckBox *>(tw->itemWidget(row, 0));
+        if (!cb || !cb->isChecked()) continue;
+        const QString p = cb->property("absPath").toString();
+        if (!p.isEmpty()) *out << p;
+    }
 }
 
 } // namespace
@@ -90,24 +104,18 @@ void RedundancyReportDialog::appendHashSection(const QMap<QString, QSet<QString>
         grp->setExpanded(true);
         grp->setFlags(grp->flags() & ~Qt::ItemIsSelectable);
 
-        auto *bg = new QButtonGroup(this);
-        m_buttonGroups.append(bg);
-
         QStringList ordered;
         for (const QString &p : paths) ordered << p;
         std::sort(ordered.begin(), ordered.end(), [](const QString &a, const QString &b) {
             return a.localeAwareCompare(b) < 0;
         });
 
-        bool first = true;
         for (const QString &path : ordered) {
             auto *row = new QTreeWidgetItem(grp, {QString()});
-            auto *rb = new QRadioButton(path);
-            rb->setProperty("absPath", path);
-            rb->setChecked(first);
-            first = false;
-            m_tree->setItemWidget(row, 0, rb);
-            bg->addButton(rb);
+            auto *cb = new QCheckBox(path, m_tree);
+            cb->setProperty("absPath", path);
+            cb->setChecked(false);
+            m_tree->setItemWidget(row, 0, cb);
         }
     }
 }
@@ -137,30 +145,26 @@ void RedundancyReportDialog::appendNameConflictSection(const QMap<QString, QSet<
         grp->setExpanded(true);
         grp->setFlags(grp->flags() & ~Qt::ItemIsSelectable);
 
-        auto *bg = new QButtonGroup(this);
-        m_buttonGroups.append(bg);
-
         QStringList ordered;
         for (const QString &p : paths) ordered << p;
         std::sort(ordered.begin(), ordered.end(), [](const QString &a, const QString &b) {
             return a.localeAwareCompare(b) < 0;
         });
 
-        bool first = true;
         for (const QString &path : ordered) {
             auto *row = new QTreeWidgetItem(grp, {QString()});
-            auto *rb = new QRadioButton(path);
-            rb->setProperty("absPath", path);
-            rb->setChecked(first);
-            first = false;
-            m_tree->setItemWidget(row, 0, rb);
-            bg->addButton(rb);
+            auto *cb = new QCheckBox(path, m_tree);
+            cb->setProperty("absPath", path);
+            cb->setChecked(false);
+            m_tree->setItemWidget(row, 0, cb);
         }
     }
 }
 
 void RedundancyReportDialog::onExecuteDelete()
 {
+    auto &lm = LanguageManager::instance();
+
     QStringList toDelete;
     for (int si = 0; si < m_tree->topLevelItemCount(); ++si) {
         QTreeWidgetItem *section = m_tree->topLevelItem(si);
@@ -168,32 +172,15 @@ void RedundancyReportDialog::onExecuteDelete()
         for (int gi = 0; gi < section->childCount(); ++gi) {
             QTreeWidgetItem *grp = section->child(gi);
             if (!grp) continue;
-
-            QString keepPath;
-            for (int ci = 0; ci < grp->childCount(); ++ci) {
-                QTreeWidgetItem *row = grp->child(ci);
-                if (!row) continue;
-                auto *rb = qobject_cast<QRadioButton *>(m_tree->itemWidget(row, 0));
-                if (!rb) continue;
-                if (rb->isChecked()) {
-                    keepPath = rb->property("absPath").toString();
-                    break;
-                }
-            }
-            if (keepPath.isEmpty() && grp->childCount() == 1) {
-                auto *rb = qobject_cast<QRadioButton *>(m_tree->itemWidget(grp->child(0), 0));
-                if (rb) keepPath = rb->property("absPath").toString();
-            }
-
-            for (int ci = 0; ci < grp->childCount(); ++ci) {
-                QTreeWidgetItem *row = grp->child(ci);
-                if (!row) continue;
-                auto *rb = qobject_cast<QRadioButton *>(m_tree->itemWidget(row, 0));
-                if (!rb) continue;
-                const QString p = rb->property("absPath").toString();
-                if (!p.isEmpty() && p != keepPath) toDelete << p;
-            }
+            collectCheckedPathsFromGroup(grp, &toDelete);
         }
+    }
+
+    if (toDelete.isEmpty()) {
+        QMessageBox::warning(this,
+                             lm.getText(QStringLiteral("redundancy_dialog_title")),
+                             lm.getText(QStringLiteral("redundancy_delete_select_first")));
+        return;
     }
 
     QStringList removed;
@@ -202,11 +189,18 @@ void RedundancyReportDialog::onExecuteDelete()
     }
 
     if (!removed.isEmpty()) {
+        QString bulletLines;
+        for (const QString &p : removed) bulletLines += QStringLiteral("- %1\n").arg(p);
+        bulletLines = bulletLines.trimmed();
+        QMessageBox::information(this,
+                                 lm.getText(QStringLiteral("redundancy_dialog_title")),
+                                 lm.getText(QStringLiteral("redundancy_delete_success")).arg(bulletLines));
         emit redundantFilesRemoved(removed);
         accept();
         return;
     }
+
     QMessageBox::warning(this,
-                         LanguageManager::instance().getText(QStringLiteral("redundancy_dialog_title")),
-                         LanguageManager::instance().getText(QStringLiteral("redundancy_delete_none")));
+                         lm.getText(QStringLiteral("redundancy_dialog_title")),
+                         lm.getText(QStringLiteral("redundancy_delete_none")));
 }

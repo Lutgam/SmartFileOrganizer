@@ -8,10 +8,8 @@
 
 class QLabel;
 class QTreeWidget;
-class QPushButton;
-class QButtonGroup;
 
-/// Grouped redundancy: same-content (hash) vs same-name / different hash. One keep per group (radio).
+/// Grouped redundancy: same-content (hash) vs same-name / different hash. Check files to delete.
 class RedundancyReportDialog : public QDialog {
     Q_OBJECT
 public:
@@ -34,7 +32,6 @@ private:
     void appendNameConflictSection(const QMap<QString, QSet<QString>> &baseNameToPaths);
 
     QTreeWidget *m_tree = nullptr;
-    QList<QButtonGroup *> m_buttonGroups;
 };
 
 #endif // REDUNDANCYREPORTDIALOG_H

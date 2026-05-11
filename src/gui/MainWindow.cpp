@@ -31,6 +31,7 @@
 #include <QWidget>
 #include <QMutexLocker>
 #include <QSizePolicy>
+#include <QSpacerItem>
 #include <QStyledItemDelegate>
 #include <QPainter>
 #include <QStyleOptionViewItem>
@@ -58,6 +59,50 @@
 #include <QCryptographicHash>
 #include <QByteArrayView>
 #include <QSettings>
+
+namespace {
+
+const QSet<QString> &plainTextFileSuffixes()
+{
+    static const QSet<QString> k = {QStringLiteral("txt"),  QStringLiteral("md"),   QStringLiteral("cpp"),
+                                    QStringLiteral("h"),    QStringLiteral("c"),    QStringLiteral("hpp"),
+                                    QStringLiteral("json"), QStringLiteral("xml"),  QStringLiteral("csv"),
+                                    QStringLiteral("log"),  QStringLiteral("yaml"), QStringLiteral("yml"),
+                                    QStringLiteral("py"),   QStringLiteral("js"),   QStringLiteral("ts")};
+    return k;
+}
+
+/// PDF + Office Open XML / macro / template + OpenDocument + EPUB (ZIP-backed text extraction).
+const QSet<QString> &zipOrPdfTextExtractSuffixes()
+{
+    static const QSet<QString> k = {QStringLiteral("pdf"),
+                                    QStringLiteral("docx"),
+                                    QStringLiteral("docm"),
+                                    QStringLiteral("dotx"),
+                                    QStringLiteral("xlsx"),
+                                    QStringLiteral("xlsm"),
+                                    QStringLiteral("xltx"),
+                                    QStringLiteral("pptx"),
+                                    QStringLiteral("pptm"),
+                                    QStringLiteral("potx"),
+                                    QStringLiteral("odt"),
+                                    QStringLiteral("ods"),
+                                    QStringLiteral("odp"),
+                                    QStringLiteral("epub")};
+    return k;
+}
+
+const QSet<QString> &officeZipPreviewSuffixes()
+{
+    static const QSet<QString> k = {QStringLiteral("docx"), QStringLiteral("docm"), QStringLiteral("dotx"),
+                                     QStringLiteral("xlsx"), QStringLiteral("xlsm"), QStringLiteral("xltx"),
+                                     QStringLiteral("pptx"), QStringLiteral("pptm"), QStringLiteral("potx"),
+                                     QStringLiteral("odt"),  QStringLiteral("ods"),  QStringLiteral("odp"),
+                                     QStringLiteral("epub")};
+    return k;
+}
+
+} // namespace
 
 class FileItemDelegate : public QStyledItemDelegate {
 public:
@@ -888,14 +933,17 @@ void MainWindow::setupFourColumnLayout() {
     auto *filesLayout = new QVBoxLayout(filesPanel);
     auto *fileTitleRow = new QHBoxLayout();
     lblFileListTitle = new QLabel(QStringLiteral("📂 檔案清單"), this);
-    fileTitleRow->addWidget(lblFileListTitle);
+    fileTitleRow->addWidget(lblFileListTitle, 0);
+    fileTitleRow->addSpacerItem(
+        new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Minimum));
     lblBackgroundStatus = new QLabel(this);
     lblBackgroundStatus->setVisible(false);
     lblBackgroundStatus->setWordWrap(false);
     lblBackgroundStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    lblBackgroundStatus->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
     lblBackgroundStatus->setStyleSheet(QStringLiteral(
         "QLabel { color:#1d4ed8; font-weight:700; font-size:14px; padding-left:12px; }"));
-    fileTitleRow->addWidget(lblBackgroundStatus, 1);
+    fileTitleRow->addWidget(lblBackgroundStatus, 0, Qt::AlignRight | Qt::AlignVCenter);
     filesLayout->addLayout(fileTitleRow);
 
     auto *controlsCol = new QVBoxLayout();
@@ -2279,7 +2327,7 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
         txtPreviewText->setPlainText(typeLine + QStringLiteral("\n") + content);
         return;
     }
-    if (suffix == QStringLiteral("docx") || suffix == QStringLiteral("xlsx") || suffix == QStringLiteral("pptx")) {
+    if (officeZipPreviewSuffixes().contains(suffix)) {
         txtPreviewText->setVisible(true);
         QString content = DocumentParser::extractTextQString(absPath);
         if (content.size() > 2500) content = content.left(2500) + QStringLiteral("...");
@@ -2535,39 +2583,11 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
     }();
 
     const QString suffix = fi.suffix().toLower();
-    const QSet<QString> zipXmlExtractable = {QStringLiteral("pdf"),
-                                             QStringLiteral("docx"),
-                                             QStringLiteral("docm"),
-                                             QStringLiteral("xlsx"),
-                                             QStringLiteral("xlsm"),
-                                             QStringLiteral("pptx"),
-                                             QStringLiteral("pptm"),
-                                             QStringLiteral("odt"),
-                                             QStringLiteral("ods"),
-                                             QStringLiteral("odp")};
-    const QStringList textExtensions = {QStringLiteral("txt"),
-                                        QStringLiteral("md"),
-                                        QStringLiteral("cpp"),
-                                        QStringLiteral("h"),
-                                        QStringLiteral("c"),
-                                        QStringLiteral("hpp"),
-                                        QStringLiteral("json"),
-                                        QStringLiteral("xml"),
-                                        QStringLiteral("csv"),
-                                        QStringLiteral("log"),
-                                        QStringLiteral("pdf"),
-                                        QStringLiteral("docx"),
-                                        QStringLiteral("docm"),
-                                        QStringLiteral("xlsx"),
-                                        QStringLiteral("xlsm"),
-                                        QStringLiteral("pptx"),
-                                        QStringLiteral("pptm"),
-                                        QStringLiteral("odt"),
-                                        QStringLiteral("ods"),
-                                        QStringLiteral("odp")};
-
+    const QSet<QString> zipXmlExtractable = zipOrPdfTextExtractSuffixes();
     const QSet<QString> legacyBinaryBlocked = {QStringLiteral("doc"), QStringLiteral("xls"), QStringLiteral("ppt")};
-    const bool isTextExt = textExtensions.contains(suffix) && !legacyBinaryBlocked.contains(suffix);
+    const bool isTextExt =
+        (plainTextFileSuffixes().contains(suffix) || zipXmlExtractable.contains(suffix))
+        && !legacyBinaryBlocked.contains(suffix);
     QString contentQ;
     if (isTextExt) {
         if (zipXmlExtractable.contains(suffix)) {
@@ -3563,7 +3583,12 @@ QStringList MainWindow::getFastPathTags(const QString &filename) {
         tags << QStringLiteral("💻應用程式");
     if (lower.endsWith(QStringLiteral(".cpp")) || lower.endsWith(QStringLiteral(".h")) || lower.endsWith(QStringLiteral(".hpp")) || lower.endsWith(QStringLiteral(".c")) || lower.endsWith(QStringLiteral(".rs")) || lower.endsWith(QStringLiteral(".go")) || lower.endsWith(QStringLiteral(".py")) || lower.endsWith(QStringLiteral(".js")) || lower.endsWith(QStringLiteral(".ts")) || lower.endsWith(QStringLiteral(".java")) || lower.endsWith(QStringLiteral(".cs")))
         tags << QStringLiteral("⌨️程式碼");
-    if (lower.endsWith(QStringLiteral(".pdf")) || lower.endsWith(QStringLiteral(".docx")) || lower.endsWith(QStringLiteral(".xlsx")) || lower.endsWith(QStringLiteral(".pptx")) || lower.endsWith(QStringLiteral(".txt")) || lower.endsWith(QStringLiteral(".md")) || lower.endsWith(QStringLiteral(".rtf")))
+    if (lower.endsWith(QStringLiteral(".pdf")) || lower.endsWith(QStringLiteral(".docx")) || lower.endsWith(QStringLiteral(".docm"))
+        || lower.endsWith(QStringLiteral(".dotx")) || lower.endsWith(QStringLiteral(".xlsx")) || lower.endsWith(QStringLiteral(".xlsm"))
+        || lower.endsWith(QStringLiteral(".xltx")) || lower.endsWith(QStringLiteral(".pptx")) || lower.endsWith(QStringLiteral(".pptm"))
+        || lower.endsWith(QStringLiteral(".potx")) || lower.endsWith(QStringLiteral(".odt")) || lower.endsWith(QStringLiteral(".ods"))
+        || lower.endsWith(QStringLiteral(".odp")) || lower.endsWith(QStringLiteral(".epub")) || lower.endsWith(QStringLiteral(".txt"))
+        || lower.endsWith(QStringLiteral(".md")) || lower.endsWith(QStringLiteral(".rtf")))
         tags << kTagDoc;
     if (lower.endsWith(QStringLiteral(".jpg")) || lower.endsWith(QStringLiteral(".jpeg")) || lower.endsWith(QStringLiteral(".png")) || lower.endsWith(QStringLiteral(".gif")) || lower.endsWith(QStringLiteral(".webp")) || lower.endsWith(QStringLiteral(".heic")) || lower.endsWith(QStringLiteral(".bmp")))
         tags << kTagImage;

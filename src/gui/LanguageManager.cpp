@@ -248,6 +248,14 @@ QString LanguageManager::getText(const QString &key) const {
         return en ? QStringLiteral("No files were deleted. Check permissions or that paths still exist.")
                   : QStringLiteral("沒有檔案被刪除。請確認路徑仍存在且具備寫入／刪除權限。");
     }
+    if (key == QStringLiteral("redundancy_delete_select_first")) {
+        return en ? QStringLiteral("Please check one or more file paths to delete, then try again.")
+                  : QStringLiteral("請先勾選要刪除的檔案路徑，再按刪除。");
+    }
+    if (key == QStringLiteral("redundancy_delete_success")) {
+        return en ? QStringLiteral("Redundant files cleaned up successfully!\nDeleted:\n%1")
+                  : QStringLiteral("成功清理冗餘檔案！\n已刪除以下檔案：\n%1");
+    }
     if (key == QStringLiteral("dialog_close")) return en ? QStringLiteral("Close") : QStringLiteral("關閉");
 
     if (key == QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？")) {

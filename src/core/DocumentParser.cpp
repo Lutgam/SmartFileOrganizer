@@ -42,6 +42,85 @@ static QString cleanseXmlTagNoise(const QString &raw)
     return s.trimmed();
 }
 
+static QString extractOdfViaCleansedContentXml(const QString &abs)
+{
+    try {
+        const std::string xmlContent = extractZipEntryQ(abs, "content.xml");
+        if (xmlContent.rfind("DEBUG:", 0) == 0 || xmlContent.empty())
+            return QString();
+        return cleanseXmlTagNoise(QString::fromStdString(xmlContent)).trimmed();
+    } catch (...) {
+        return QString();
+    }
+}
+
+/// EPUB (ZIP): concatenate .html/.htm/.xhtml bodies, then tag-stripped plain text.
+static QString extractEpubPlainCleansed(const QString &abs)
+{
+    try {
+        QFile file(abs);
+        if (!file.open(QIODevice::ReadOnly)) {
+            qDebug() << "EPUB Error: cannot open" << abs;
+            return QString();
+        }
+        const QByteArray fileData = file.readAll();
+        file.close();
+        if (fileData.isEmpty()) return QString();
+
+        mz_zip_archive zip_archive;
+        memset(&zip_archive, 0, sizeof(zip_archive));
+        if (!mz_zip_reader_init_mem(&zip_archive, fileData.constData(), static_cast<mz_uint>(fileData.size()), 0)) {
+            qDebug() << "EPUB Error: zip init failed" << abs;
+            return QString();
+        }
+
+        QStringList entryPaths;
+        const int num_files = mz_zip_reader_get_num_files(&zip_archive);
+        for (int i = 0; i < num_files; ++i) {
+            mz_zip_archive_file_stat st{};
+            if (!mz_zip_reader_file_stat(&zip_archive, i, &st)) continue;
+            const QString name = QString::fromUtf8(st.m_filename);
+            const QString ln = name.toLower();
+            if (!(ln.endsWith(QStringLiteral(".html")) || ln.endsWith(QStringLiteral(".htm"))
+                  || ln.endsWith(QStringLiteral(".xhtml"))))
+                continue;
+            entryPaths << name;
+        }
+        std::sort(entryPaths.begin(), entryPaths.end(), [](const QString &a, const QString &b) {
+            return a.localeAwareCompare(b) < 0;
+        });
+
+        QString blob;
+        for (const QString &entryName : entryPaths) {
+            const QByteArray enc = entryName.toUtf8();
+            const int zi = mz_zip_reader_locate_file(&zip_archive, enc.constData(), nullptr, 0);
+            if (zi < 0) continue;
+            size_t file_size = 0;
+            void *pHeap = mz_zip_reader_extract_to_heap(&zip_archive, zi, &file_size, 0);
+            if (!pHeap || file_size == 0) {
+                if (pHeap) mz_free(pHeap);
+                continue;
+            }
+            blob += QString::fromUtf8(static_cast<const char *>(pHeap), static_cast<int>(file_size));
+            blob += QLatin1Char('\n');
+            mz_free(pHeap);
+            if (blob.size() > 500000) break;
+        }
+        mz_zip_reader_end(&zip_archive);
+        if (blob.trimmed().isEmpty()) {
+            qDebug() << "EPUB Error: no html/xhtml in archive" << abs;
+            return QString();
+        }
+        return cleanseXmlTagNoise(blob).trimmed();
+    } catch (const std::exception &e) {
+        qDebug() << "EPUB Error: exception" << e.what() << abs;
+        return QString();
+    } catch (...) {
+        qDebug() << "EPUB Error: unknown exception" << abs;
+        return QString();
+    }
+}
+
 std::string DocumentParser::extractText(const std::string& filePath)
 {
     return extractTextQString(QString::fromStdString(filePath)).toStdString();
@@ -60,15 +139,15 @@ QString DocumentParser::extractTextQString(const QString& filePath)
         return QString();
     }
 
-    if (suffix == QStringLiteral("docx") || suffix == QStringLiteral("docm")) {
+    if (suffix == QStringLiteral("docx") || suffix == QStringLiteral("docm") || suffix == QStringLiteral("dotx")) {
         const QByteArray utf8 = abs.toUtf8();
         return QString::fromStdString(parsDocx(std::string(utf8.constData(), static_cast<size_t>(utf8.size()))));
     }
-    if (suffix == QStringLiteral("xlsx") || suffix == QStringLiteral("xlsm")) {
+    if (suffix == QStringLiteral("xlsx") || suffix == QStringLiteral("xlsm") || suffix == QStringLiteral("xltx")) {
         const QByteArray utf8 = abs.toUtf8();
         return QString::fromStdString(parseXlsx(std::string(utf8.constData(), static_cast<size_t>(utf8.size()))));
     }
-    if (suffix == QStringLiteral("pptx") || suffix == QStringLiteral("pptm")) {
+    if (suffix == QStringLiteral("pptx") || suffix == QStringLiteral("pptm") || suffix == QStringLiteral("potx")) {
         try {
             QFile file(abs);
             if (!file.open(QIODevice::ReadOnly)) {
@@ -171,26 +250,10 @@ QString DocumentParser::extractTextQString(const QString& filePath)
         }
     }
     if (suffix == QStringLiteral("odt") || suffix == QStringLiteral("ods") || suffix == QStringLiteral("odp")) {
-        std::string xmlContent = extractZipEntryQ(abs, "content.xml");
-        if (xmlContent.rfind("DEBUG:", 0) == 0) return QString();
-        if (xmlContent.empty()) return QString();
-
-        QString text;
-        QXmlStreamReader xml(QString::fromStdString(xmlContent));
-        while (!xml.atEnd() && !xml.hasError()) {
-            const auto token = xml.readNext();
-            if (token == QXmlStreamReader::StartElement) {
-                const QString n = xml.name().toString();
-                if (n == QStringLiteral("p")) {
-                    text += QStringLiteral("\n");
-                }
-            } else if (token == QXmlStreamReader::Characters && !xml.isWhitespace()) {
-                text += xml.text().toString();
-                text += QStringLiteral(" ");
-            }
-            if (text.size() > 4000) break;
-        }
-        return text.trimmed();
+        return extractOdfViaCleansedContentXml(abs);
+    }
+    if (suffix == QStringLiteral("epub")) {
+        return extractEpubPlainCleansed(abs);
     }
     if (suffix == QStringLiteral("pdf")) {
         return extractPdfText(abs);
