@@ -78,6 +78,7 @@ protected:
 
 class GraphWidget;
 class SettingsDialog;
+class BusyChip;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -118,6 +119,7 @@ private slots:
     void onBackgroundScanFinished();
     void consolidateTagsWithAI();
     void onConsolidateTagsFinished();
+    void applyConsolidateMergesFromRaw(const QString &raw);
     void onBackgroundAutoAnalyzeDebounce();
 
     void onWorkspaceClearAiCache();
@@ -163,7 +165,10 @@ private:
     // Column 3: Files
     QWidget *filesPanel = nullptr;
     QLabel *lblFileListTitle = nullptr;
+    QLabel *lblCurrentTarget = nullptr;
     QLabel *lblBackgroundStatus = nullptr;
+    QPushButton *m_btnRestartBackgroundAnalyze = nullptr;
+    bool m_showRestartBackgroundPrompt = false;
     QComboBox *cmbSort = nullptr;
     QComboBox *cmbTagFilter = nullptr;
     QLineEdit *txtSearch = nullptr;
@@ -177,6 +182,8 @@ private:
     QLabel *lblPreviewImage = nullptr;
     QTextEdit *txtPreviewText = nullptr;
     QLabel *lblTags = nullptr;
+    QWidget *m_statusRow = nullptr;
+    BusyChip *m_statusBusyChip = nullptr;
     QLabel *lblStatus = nullptr;
     QLabel *m_lblSummaryTitle = nullptr;
     QTextEdit *m_aiSummaryEdit = nullptr;
@@ -210,6 +217,7 @@ private:
     QPushButton *btnAutoMergeTags = nullptr;
     QPushButton *btnPhysicalArchive = nullptr;
     QPushButton *btnUndoPhysicalArchive = nullptr;
+    QLabel *m_lblPhysicalArchiveWarning = nullptr;
     // Tabbed UI: no duplicate/graph buttons in Tab 1 preview panel
     // Tag management + file operations are now in m_previewTabWidget
 
@@ -254,6 +262,9 @@ private:
     bool m_batchTriggeredByBackgroundAuto = false;
     /// Immediate parent folder name for the file currently processed in batch (status label).
     QString m_backgroundAnalyzeFolderLabel;
+    QString m_pendingPrioritySingleFile;
+    /// Shown in lblCurrentTarget after folder-tree prepend (cleared when batch ends).
+    QString m_priorityFolderBannerPath;
     bool m_bgAutoAnalyzeEnabled = false;
     QTimer *m_bgAutoAnalyzeDebounce = nullptr;
     int m_bgAnalyzeQueueRetries = 0;
@@ -286,7 +297,26 @@ private:
     void onTaskCenterCleanClicked();
     void syncBatchProgressBars();
     void applyDualTrackBatchProgressVisibility();
+    void refreshCurrentAnalysisTargetUi();
+    void syncBatchAnalyzeButtonLabel();
+
+    void startAnalysisSpinnerForPath(const QString &absPath);
+    void stopAnalysisSpinner();
+    void tickAnalysisSpinner();
+    void refreshFileAndFolderAnalysisIndicators();
+    void ensureAnalysisIndicatorTimer();
+    void reselectFileInList(const QString &absPath);
+    void syncPreviewBusySpinner();
+    void clearAnalysisWorkFlagsAndSyncUi();
+
+    QTimer *m_analysisSpinTimer = nullptr;
+    int m_analysisSpinPhase = 0;
+    /// True from enqueue of LLM work until watcher completion (covers Preparing / disk read before isRunning()).
+    bool m_analysisUiWorkActive = false;
     QString elideStatusLine(const QString &fullText, int pixelBudget) const;
+
+    void prependSingleFileToAnalysisQueueFront(const QString &absPath);
+    void enqueuePriorityAnalyzeForFileIfNeeded(const QString &absPath);
     void prependUnanalyzedFromFolderToAnalysisQueue(const QString &folderAbs);
     void prioritizeAnalysisPaths(QStringList &paths, const QString &focusFolderAbs);
 

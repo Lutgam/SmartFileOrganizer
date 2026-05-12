@@ -2,6 +2,7 @@
 #include "../core/DocumentParser.h"
 
 #include <QAbstractItemView>
+#include <QAbstractProxyModel>
 #include <QAbstractAnimation>
 #include <QAction>
 #include <QApplication>
@@ -26,6 +27,7 @@
 #include <QMimeDatabase>
 #include <QPixmap>
 #include <QRegularExpression>
+#include <QScrollBar>
 #include <QSet>
 #include <QTimer>
 #include <QUrl>
@@ -41,6 +43,8 @@
 #include <QSplitter>
 #include <QStyledItemDelegate>
 #include <QPainter>
+#include <QPaintEvent>
+#include <QFontMetrics>
 #include <QStyleOptionViewItem>
 #include <QStyle>
 #include <QThreadPool>
@@ -66,6 +70,42 @@
 #include <QCryptographicHash>
 #include <QByteArrayView>
 #include <QSettings>
+
+/// Small arc spinner next to status text (matches file-list / folder-tree arc style).
+class BusyChip final : public QWidget {
+public:
+    explicit BusyChip(QWidget *parent = nullptr) : QWidget(parent)
+    {
+        setAttribute(Qt::WA_TranslucentBackground);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    }
+
+    void setPhase(int phase)
+    {
+        m_phase = phase & 3;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const QRectF rf = QRectF(rect()).adjusted(2.0, 2.0, -2.0, -2.0);
+        QColor accent = palette().link().color();
+        if (!isEnabled())
+            accent.setAlpha(120);
+        QPen pen(accent, 2.2);
+        pen.setCapStyle(Qt::RoundCap);
+        p.setPen(pen);
+        const int span = 90 * 16;
+        const int start = -m_phase * 90 * 16;
+        p.drawArc(rf, start - span, span);
+    }
+
+private:
+    int m_phase = 0;
+};
 
 namespace {
 
@@ -115,63 +155,227 @@ const QSet<QString> &officeZipPreviewSuffixes()
 
 } // namespace
 
+namespace {
+
+static bool sfPathHasQueuedUnder(const QString &dirRaw, const QStringList &queuedFiles)
+{
+    const QString d = QDir::cleanPath(dirRaw);
+    if (d.isEmpty()) return false;
+    const QString dPref = d + QLatin1Char('/');
+    for (const QString &f0 : queuedFiles) {
+        const QString f = QDir::cleanPath(f0);
+        if (f.isEmpty()) continue;
+        if (f == d || f.startsWith(dPref)) return true;
+    }
+    return false;
+}
+
+/// state: 0 none, 1 hollow, 2 arc (animPhase 0–3), 3 solid
+static void sfPaintAnalysisBadge(QPainter *painter, const QRect &r, int state, int animPhase, const QColor &accent)
+{
+    if (state <= 0) return;
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, true);
+    const QRectF rf = QRectF(r).adjusted(1.0, 1.0, -1.0, -1.0);
+    if (state == 3) {
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(accent);
+        painter->drawEllipse(rf);
+    } else if (state == 1) {
+        QPen pen(accent, 1.8);
+        pen.setCapStyle(Qt::RoundCap);
+        painter->setPen(pen);
+        painter->setBrush(Qt::NoBrush);
+        painter->drawEllipse(rf);
+    } else if (state == 2) {
+        QPen pen(accent, 2.2);
+        pen.setCapStyle(Qt::RoundCap);
+        painter->setPen(pen);
+        painter->setBrush(Qt::NoBrush);
+        const int span = 90 * 16;
+        const int start = -(animPhase & 3) * 90 * 16;
+        painter->drawArc(rf, start - span, span);
+    }
+    painter->restore();
+}
+
+static int sfFolderRowBadgeState(const QString &rowPath, const QTreeView *tv)
+{
+    if (!tv || rowPath.isEmpty()) return 0;
+    const QString browsing = QDir::cleanPath(tv->property("sfBrowsingDir").toString());
+    const QString analyzingDir = QDir::cleanPath(tv->property("sfAnalyzingDir").toString());
+    const bool batch = tv->property("sfBatchActive").toInt() != 0;
+    const bool watcherBusy = tv->property("sfWatcherBusy").toInt() != 0;
+    const QStringList pend = tv->property("sfPendingPaths").toStringList();
+
+    if (!analyzingDir.isEmpty() && rowPath == analyzingDir && watcherBusy)
+        return 2;
+    if (batch && sfPathHasQueuedUnder(rowPath, pend))
+        return 1;
+    if (batch && rowPath == browsing && !sfPathHasQueuedUnder(rowPath, pend))
+        return 3;
+    return 0;
+}
+
+} // namespace
+
 class FileItemDelegate : public QStyledItemDelegate {
 public:
+    /// 0 none, 1 hollow (pending), 2 analyzing (arc; phase on list sfProgressPhase), 3 solid (done)
+    static constexpr int kSpinRole = Qt::UserRole + 16;
+
     explicit FileItemDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override {
         QStyleOptionViewItem opt = option;
         initStyleOption(&opt, index);
 
-        // 【關鍵修復】：清空原本要交給系統預設畫筆的文字，徹底防止雙重渲染！
+        QWidget *w = const_cast<QWidget *>(opt.widget);
+        QStyle *style = w ? w->style() : QApplication::style();
+
+        const QString name = index.data(Qt::DisplayRole).toString();
+        const QString path = index.data(Qt::UserRole + 1).toString();
+        const int prog = index.data(kSpinRole).toInt();
+        const int animPhase = w ? w->property("sfProgressPhase").toInt() : 0;
+
+        const QColor accent = (opt.state & QStyle::State_Selected) ? opt.palette.highlightedText().color()
+                                                                   : opt.palette.link().color();
+
         opt.text = QString();
+        style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, w);
 
-        // 1. 畫背景與選取狀態 (Highlight)
-        QStyle *style = opt.widget ? opt.widget->style() : QApplication::style();
-        style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
+        QRect dec = style->subElementRect(QStyle::SE_ItemViewItemDecoration, &opt, w);
+        QRect tr = style->subElementRect(QStyle::SE_ItemViewItemText, &opt, w);
+        if (!tr.isValid())
+            tr = opt.rect;
+        int leftBound = opt.rect.left() + 4;
+        if (dec.isValid())
+            leftBound = qMax(leftBound, dec.right() + 4);
 
-        // 2. 取得資料
-        QString name = index.data(Qt::DisplayRole).toString();
-        QString path = index.data(Qt::UserRole + 1).toString();
+        const int diam = qMax(10, qMin(14, tr.height() - 2));
+        QRect badge(leftBound, tr.center().y() - diam / 2, diam, diam);
+        if (prog > 0)
+            sfPaintAnalysisBadge(painter, badge, prog, animPhase, accent);
 
-        // 3. 準備畫筆設定
-        QRect rect = opt.rect;
-        rect.adjust(5, 0, -5, 0); // 左右邊距
+        const int textLeft = prog > 0 ? (badge.right() + 8) : leftBound;
+        QRect textArea = tr;
+        textArea.setLeft(qMax(tr.left(), textLeft));
         painter->save();
 
-        // 4. 繪製檔名 (粗體，適應深淺色與選取狀態)
         QFont nameFont = opt.font;
         nameFont.setBold(true);
         painter->setFont(nameFont);
-
-        if (opt.state & QStyle::State_Selected) {
+        if (opt.state & QStyle::State_Selected)
             painter->setPen(opt.palette.highlightedText().color());
-        } else {
+        else
             painter->setPen(opt.palette.text().color());
-        }
 
-        QFontMetrics fm(nameFont);
-        QRect nameRect = fm.boundingRect(name);
-        painter->drawText(rect, Qt::AlignLeft | Qt::AlignVCenter, name);
+        const QFontMetrics fmName(nameFont);
+        const QString nameElided = fmName.elidedText(name, Qt::ElideRight, textArea.width());
+        painter->drawText(textArea, Qt::AlignLeft | Qt::AlignVCenter, nameElided);
 
-        // 5. 繪製灰色路徑 (在檔名後方)
-        int pathX = rect.left() + nameRect.width() + 10; // 檔名後空 10px
-        QRect pathRect = rect;
-        pathRect.setLeft(pathX);
+        const int nameW = fmName.horizontalAdvance(nameElided);
+        QRect pathRect = textArea;
+        pathRect.setLeft(textArea.left() + nameW + 10);
 
-        painter->setFont(opt.font); // 恢復正常粗細
-        if (!(opt.state & QStyle::State_Selected)) {
-            painter->setPen(Qt::gray); // 未選取時維持灰色，選取時保持高亮色
-        }
+        painter->setFont(opt.font);
+        if (!(opt.state & QStyle::State_Selected))
+            painter->setPen(Qt::gray);
         painter->drawText(pathRect, Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("[%1]").arg(path));
 
         painter->restore();
     }
 
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
-        Q_UNUSED(option);
-        Q_UNUSED(index);
-        return QSize(200, 30);
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        const QString name = index.data(Qt::DisplayRole).toString();
+        const QString path = index.data(Qt::UserRole + 1).toString();
+        const int prog = index.data(kSpinRole).toInt();
+        QFont nameFont = opt.font;
+        nameFont.setBold(true);
+        const QFontMetrics fmName(nameFont);
+        const QFontMetrics fmPath(opt.font);
+        const int badgeW = prog > 0 ? 26 : 0;
+        const int textW = fmName.horizontalAdvance(name) + 10 + fmPath.horizontalAdvance(QStringLiteral("[%1]").arg(path)) + 20 + badgeW;
+        const int h = qMax(30, qMax(fmName.height(), fmPath.height()) + 8);
+        return QSize(qMax(320, textW), h);
+    }
+};
+
+class FolderTreeSpinDelegate : public QStyledItemDelegate {
+public:
+    explicit FolderTreeSpinDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+
+        QWidget *w = const_cast<QWidget *>(opt.widget);
+        QStyle *sty = w ? w->style() : QApplication::style();
+        const QTreeView *tv = qobject_cast<const QTreeView *>(w);
+        if (!tv && w)
+            tv = qobject_cast<const QTreeView *>(w->parentWidget());
+
+        QModelIndex src = index;
+        if (const auto *px = qobject_cast<const QAbstractProxyModel *>(index.model()))
+            src = px->mapToSource(index);
+        const auto *fs = qobject_cast<const QFileSystemModel *>(src.model());
+        const QString rowPath = fs ? QDir::cleanPath(fs->filePath(src)) : QString();
+
+        const QString savedText = opt.text;
+        opt.text = QString();
+        sty->drawControl(QStyle::CE_ItemViewItem, &opt, painter, w);
+
+        QRect dec = sty->subElementRect(QStyle::SE_ItemViewItemDecoration, &opt, w);
+        QRect tr = sty->subElementRect(QStyle::SE_ItemViewItemText, &opt, w);
+        if (!tr.isValid())
+            tr = opt.rect;
+        int leftBound = opt.rect.left() + 2;
+        if (dec.isValid())
+            leftBound = qMax(leftBound, dec.right() + 4);
+
+        const int st = sfFolderRowBadgeState(rowPath, tv);
+        const int animPhase = tv ? tv->property("sfProgressPhase").toInt() : 0;
+        const QColor accent = (opt.state & QStyle::State_Selected) ? opt.palette.highlightedText().color()
+                                                                   : opt.palette.link().color();
+
+        const int diam = qMax(10, qMin(14, tr.height() - 2));
+        QRect badge(leftBound, tr.center().y() - diam / 2, diam, diam);
+        if (st > 0)
+            sfPaintAnalysisBadge(painter, badge, st, animPhase, accent);
+
+        const int textLeft = st > 0 ? (badge.right() + 6) : leftBound;
+        QRect textDraw = tr;
+        textDraw.setLeft(qMax(tr.left(), textLeft));
+
+        painter->save();
+        if (opt.state & QStyle::State_Selected)
+            painter->setPen(opt.palette.highlightedText().color());
+        else
+            painter->setPen(opt.palette.text().color());
+        painter->setFont(opt.font);
+        const QString elided = opt.fontMetrics.elidedText(savedText, Qt::ElideRight, textDraw.width());
+        painter->drawText(textDraw, Qt::AlignLeft | Qt::AlignVCenter, elided);
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        const QWidget *ow = opt.widget;
+        const QTreeView *tv = qobject_cast<const QTreeView *>(ow);
+        if (!tv && ow)
+            tv = qobject_cast<const QTreeView *>(ow->parentWidget());
+        QModelIndex src = index;
+        if (const auto *px = qobject_cast<const QAbstractProxyModel *>(index.model()))
+            src = px->mapToSource(index);
+        const auto *fs = qobject_cast<const QFileSystemModel *>(src.model());
+        const QString rowPath = fs ? QDir::cleanPath(fs->filePath(src)) : QString();
+        const int st = sfFolderRowBadgeState(rowPath, tv);
+        const int extra = st > 0 ? 22 : 0;
+        const QSize sh = QStyledItemDelegate::sizeHint(option, index);
+        return QSize(sh.width() + extra, sh.height());
     }
 };
 
@@ -329,6 +533,64 @@ static QString sha256HexOfFile(const QString &path)
 
 } // namespace
 
+void MainWindow::prependSingleFileToAnalysisQueueFront(const QString &absPath)
+{
+    const QString p = QDir::cleanPath(absPath);
+    if (p.isEmpty() || !m_isBatchMode) return;
+
+    QFileInfo finfo(p);
+    if (!isAnalyzableFile(finfo)) return;
+    if (m_aiSummaryByPath.contains(p)) return;
+
+    if (!m_currentAnalyzingFile.isEmpty() && m_currentAnalyzingFile == p) return;
+
+    QQueue<QString> stripped;
+    while (!m_analysisQueue.isEmpty()) {
+        const QString x = m_analysisQueue.dequeue();
+        if (x != p) stripped.enqueue(x);
+    }
+    m_analysisQueue = std::move(stripped);
+
+    QQueue<QString> newQueue;
+    newQueue.enqueue(p);
+    while (!m_analysisQueue.isEmpty()) newQueue.enqueue(m_analysisQueue.dequeue());
+    m_analysisQueue = std::move(newQueue);
+
+    const bool inFlight = (watcher && watcher->isRunning());
+    m_totalBatchSize = m_batchCompletedCount + m_analysisQueue.size() + (inFlight ? 1 : 0);
+    if (batchProgressBar) {
+        batchProgressBar->setMaximum(qMax(1, m_totalBatchSize));
+        syncBatchProgressBars();
+    }
+    updateBackgroundStatusLabel();
+    m_priorityFolderBannerPath.clear();
+    refreshCurrentAnalysisTargetUi();
+}
+
+void MainWindow::enqueuePriorityAnalyzeForFileIfNeeded(const QString &absPath)
+{
+    const QString p = QDir::cleanPath(absPath);
+    if (p.isEmpty()) return;
+    QFileInfo fi(p);
+    if (!isAnalyzableFile(fi)) return;
+    if (m_aiSummaryByPath.contains(p)) return;
+
+    if (m_isBatchMode) {
+        prependSingleFileToAnalysisQueueFront(p);
+        return;
+    }
+
+    if (watcher && watcher->isRunning()) {
+        m_pendingPrioritySingleFile = p;
+        refreshCurrentAnalysisTargetUi();
+        return;
+    }
+
+    if (!llamaEngine.isModelLoaded()) return;
+
+    QTimer::singleShot(0, this, [this, p]() { analyzeFileForPath(p); });
+}
+
 void MainWindow::prioritizeAnalysisPaths(QStringList &paths, const QString &focusFolderAbs)
 {
     const QString focus = QDir::cleanPath(focusFolderAbs);
@@ -364,7 +626,10 @@ void MainWindow::prependUnanalyzedFromFolderToAnalysisQueue(const QString &folde
         if (m_aiSummaryByPath.contains(p)) continue;
         found << p;
     }
-    if (found.isEmpty()) return;
+    if (found.isEmpty()) {
+        refreshCurrentAnalysisTargetUi();
+        return;
+    }
     prioritizeAnalysisPaths(found, folder);
 
     QSet<QString> existing;
@@ -378,7 +643,10 @@ void MainWindow::prependUnanalyzedFromFolderToAnalysisQueue(const QString &folde
         prepend << p;
         existing.insert(p);
     }
-    if (prepend.isEmpty()) return;
+    if (prepend.isEmpty()) {
+        refreshCurrentAnalysisTargetUi();
+        return;
+    }
 
     QQueue<QString> newQueue;
     for (const QString &p : prepend) newQueue.enqueue(p);
@@ -392,6 +660,7 @@ void MainWindow::prependUnanalyzedFromFolderToAnalysisQueue(const QString &folde
         syncBatchProgressBars();
     }
     updateBackgroundStatusLabel();
+    refreshCurrentAnalysisTargetUi();
 }
 
 namespace {
@@ -466,6 +735,9 @@ void MainWindow::pruneTaskCenterPersistentRedundancy(const QStringList &removedP
 void MainWindow::refreshTaskCenterRedundancyTreeUi()
 {
     if (!m_taskCenterRedundancyTree) return;
+    QScrollBar *vsb = m_taskCenterRedundancyTree->verticalScrollBar();
+    const int scrollValue = vsb ? vsb->value() : 0;
+
     m_taskCenterRedundancyTree->clear();
 
     auto filterMultiPath = [](const QMap<QString, QSet<QString>> &in) {
@@ -558,6 +830,11 @@ void MainWindow::refreshTaskCenterRedundancyTreeUi()
             }
         }
     }
+
+    if (vsb) {
+        const int mx = vsb->maximum();
+        vsb->setValue(qBound(0, scrollValue, mx));
+    }
 }
 
 void MainWindow::onTaskCenterCleanClicked()
@@ -645,6 +922,190 @@ QString MainWindow::elideStatusLine(const QString &fullText, int pixelBudget) co
     return lblBackgroundStatus->fontMetrics().elidedText(fullText, Qt::ElideRight, budget);
 }
 
+void MainWindow::syncBatchAnalyzeButtonLabel()
+{
+    if (!btnBatchAnalyze) return;
+    auto &lm = LanguageManager::instance();
+    if (!btnBatchAnalyze->isEnabled() && m_isBatchMode && m_batchTriggeredByBackgroundAuto) {
+        btnBatchAnalyze->setText(lm.getText(QStringLiteral("btn_batch_bg_running")));
+    } else {
+        btnBatchAnalyze->setText(lm.getText(QStringLiteral("資料夾分析")));
+    }
+}
+
+void MainWindow::refreshFileAndFolderAnalysisIndicators()
+{
+    const bool inferBusy = watcher && watcher->isRunning();
+    const bool spinHot = inferBusy || m_analysisUiWorkActive;
+    const QString cur = QDir::cleanPath(m_currentAnalyzingFile);
+
+    QSet<QString> queued;
+    for (const QString &p : m_analysisQueue)
+        queued.insert(QDir::cleanPath(p));
+
+    if (fileList) {
+        fileList->setProperty("sfProgressPhase", m_analysisSpinPhase);
+        if (QWidget *vp = fileList->viewport())
+            vp->setProperty("sfProgressPhase", m_analysisSpinPhase);
+        for (int i = 0; i < fileList->count(); ++i) {
+            auto *it = fileList->item(i);
+            if (!it) continue;
+            const QString path = QDir::cleanPath(it->data(Qt::UserRole).toString());
+            if (path.isEmpty()) {
+                it->setData(FileItemDelegate::kSpinRole, QVariant());
+                continue;
+            }
+
+            int st = 0;
+            if (!cur.isEmpty() && path == cur && spinHot)
+                st = 2;
+            else if (m_isBatchMode && queued.contains(path))
+                st = 1;
+            else if (m_aiSummaryByPath.contains(path) || m_pendingResults.contains(path))
+                st = 3;
+
+            it->setData(FileItemDelegate::kSpinRole, st > 0 ? QVariant(st) : QVariant());
+        }
+        fileList->viewport()->update();
+    }
+
+    if (folderTree) {
+        QStringList pend;
+        pend.reserve(m_analysisQueue.size());
+        for (const QString &p : m_analysisQueue)
+            pend.append(QDir::cleanPath(p));
+
+        folderTree->setProperty("sfBatchActive", m_isBatchMode ? 1 : 0);
+        folderTree->setProperty("sfBrowsingDir", QDir::cleanPath(currentPath));
+        folderTree->setProperty("sfPendingPaths", pend);
+        const QString ad = cur.isEmpty() ? QString() : QFileInfo(cur).absolutePath();
+        folderTree->setProperty("sfAnalyzingDir", QDir::cleanPath(ad));
+        folderTree->setProperty("sfWatcherBusy", spinHot ? 1 : 0);
+        folderTree->setProperty("sfProgressPhase", m_analysisSpinPhase);
+        if (QWidget *tvp = folderTree->viewport())
+            tvp->setProperty("sfProgressPhase", m_analysisSpinPhase);
+        folderTree->viewport()->update();
+    }
+
+    syncPreviewBusySpinner();
+}
+
+void MainWindow::ensureAnalysisIndicatorTimer()
+{
+    const bool inferBusy = watcher && watcher->isRunning();
+    const bool spinHot = inferBusy || m_analysisUiWorkActive;
+    if (!m_analysisSpinTimer)
+        return;
+    if (spinHot) {
+        if (!m_analysisSpinTimer->isActive())
+            m_analysisSpinTimer->start();
+    } else {
+        m_analysisSpinTimer->stop();
+    }
+}
+
+void MainWindow::reselectFileInList(const QString &absPath)
+{
+    if (!fileList || absPath.isEmpty()) return;
+    const QString fp = QDir::cleanPath(absPath);
+    for (int i = 0; i < fileList->count(); ++i) {
+        auto *it = fileList->item(i);
+        if (!it) continue;
+        if (QDir::cleanPath(it->data(Qt::UserRole).toString()) != fp) continue;
+        fileList->setCurrentItem(it);
+        fileList->scrollToItem(it);
+        onFileSelected(it);
+        break;
+    }
+}
+
+void MainWindow::syncPreviewBusySpinner()
+{
+    const bool inferBusy = watcher && watcher->isRunning();
+    const bool show = m_analysisUiWorkActive || inferBusy;
+    if (!m_statusBusyChip)
+        return;
+    m_statusBusyChip->setVisible(show);
+    if (show)
+        m_statusBusyChip->setPhase(m_analysisSpinPhase);
+}
+
+void MainWindow::clearAnalysisWorkFlagsAndSyncUi()
+{
+    m_analysisUiWorkActive = false;
+    refreshFileAndFolderAnalysisIndicators();
+    ensureAnalysisIndicatorTimer();
+}
+
+void MainWindow::startAnalysisSpinnerForPath(const QString &absPath)
+{
+    Q_UNUSED(absPath);
+    refreshFileAndFolderAnalysisIndicators();
+    ensureAnalysisIndicatorTimer();
+}
+
+void MainWindow::stopAnalysisSpinner()
+{
+    refreshFileAndFolderAnalysisIndicators();
+    ensureAnalysisIndicatorTimer();
+}
+
+void MainWindow::tickAnalysisSpinner()
+{
+    m_analysisSpinPhase = (m_analysisSpinPhase + 1) & 3;
+    if (fileList) {
+        fileList->setProperty("sfProgressPhase", m_analysisSpinPhase);
+        if (QWidget *vp = fileList->viewport())
+            vp->setProperty("sfProgressPhase", m_analysisSpinPhase);
+        fileList->viewport()->update();
+    }
+    if (folderTree) {
+        folderTree->setProperty("sfProgressPhase", m_analysisSpinPhase);
+        if (QWidget *tvp = folderTree->viewport())
+            tvp->setProperty("sfProgressPhase", m_analysisSpinPhase);
+        folderTree->viewport()->update();
+    }
+    if (m_statusBusyChip && m_statusBusyChip->isVisible())
+        m_statusBusyChip->setPhase(m_analysisSpinPhase);
+}
+
+void MainWindow::refreshCurrentAnalysisTargetUi()
+{
+    if (!lblCurrentTarget) return;
+    auto &lm = LanguageManager::instance();
+    const int budget = qMax(120, lblCurrentTarget->width() - 8);
+    const QFontMetrics fm(lblCurrentTarget->font());
+
+    const bool inferBusy = watcher && watcher->isRunning();
+    const QString cur = m_currentAnalyzingFile;
+
+    QString raw;
+    if (inferBusy && m_isBatchMode && !m_analysisQueue.isEmpty()) {
+        const QString head = m_analysisQueue.head();
+        if (!cur.isEmpty() && head != cur) {
+            raw = lm.getText(QStringLiteral("ui_target_lock_file")).arg(QFileInfo(head).fileName());
+        }
+    }
+    if (raw.isEmpty() && !cur.isEmpty() && (inferBusy || m_isBatchMode)) {
+        raw = lm.getText(QStringLiteral("ui_target_analyzing")).arg(QFileInfo(cur).fileName());
+    }
+    if (raw.isEmpty() && m_isBatchMode && !m_analysisQueue.isEmpty()) {
+        raw = lm.getText(QStringLiteral("ui_target_lock_file")).arg(QFileInfo(m_analysisQueue.head()).fileName());
+    }
+    if (raw.isEmpty() && !m_pendingPrioritySingleFile.isEmpty()) {
+        raw = lm.getText(QStringLiteral("ui_target_lock_file")).arg(QFileInfo(m_pendingPrioritySingleFile).fileName());
+    }
+    if (raw.isEmpty() && !m_priorityFolderBannerPath.isEmpty()) {
+        raw = lm.getText(QStringLiteral("ui_target_lock_folder")).arg(QFileInfo(m_priorityFolderBannerPath).fileName());
+    }
+
+    if (raw.isEmpty()) {
+        lblCurrentTarget->clear();
+        return;
+    }
+    lblCurrentTarget->setText(fm.elidedText(raw, Qt::ElideRight, budget));
+}
+
 void MainWindow::updateBackgroundStatusLabel()
 {
     const int nRemaining = m_isBatchMode ? qMax(0, m_totalBatchSize - m_batchCompletedCount) : 0;
@@ -705,6 +1166,12 @@ void MainWindow::updateBackgroundStatusLabel()
             m_taskCenterStatusLabel->setText(
                 m_taskCenterStatusLabel->fontMetrics().elidedText(rawText, Qt::ElideRight, tw));
         }
+    }
+
+    if (m_btnRestartBackgroundAnalyze) {
+        const bool showRestart =
+            m_showRestartBackgroundPrompt && m_bgAutoAnalyzeEnabled && !rootPath.trimmed().isEmpty();
+        m_btnRestartBackgroundAnalyze->setVisible(showRestart);
     }
 
     applyDualTrackBatchProgressVisibility();
@@ -816,7 +1283,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_taskCenterRedundancyTree = new QTreeWidget(tcRightPane);
     m_taskCenterRedundancyTree->setColumnCount(1);
     m_taskCenterRedundancyTree->setHeaderHidden(true);
-    m_taskCenterRedundancyTree->header()->setStretchLastSection(true);
+    m_taskCenterRedundancyTree->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_taskCenterRedundancyTree->header()->setStretchLastSection(false);
+    m_taskCenterRedundancyTree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     tcRightLayout->addWidget(m_taskCenterRedundancyTree, 1);
 
     m_taskCenterCleanBtn = new QPushButton(QStringLiteral("清理勾選檔案"), tcRightPane);
@@ -880,6 +1349,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     m_consolidateWatcher = new QFutureWatcher<std::string>(this);
     connect(m_consolidateWatcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onConsolidateTagsFinished);
+
+    m_analysisSpinTimer = new QTimer(this);
+    m_analysisSpinTimer->setInterval(50);
+    connect(m_analysisSpinTimer, &QTimer::timeout, this, &MainWindow::tickAnalysisSpinner);
 
     modelLoadWatcher = new QFutureWatcher<bool>(this);
     connect(modelLoadWatcher, &QFutureWatcher<bool>::finished, this, [this]() {
@@ -1149,8 +1622,10 @@ void MainWindow::updateAllTexts() {
     }
     if (btnPhysicalArchive) btnPhysicalArchive->setText(lm.getText(QStringLiteral("btn_physical_archive")));
     if (btnUndoPhysicalArchive) btnUndoPhysicalArchive->setText(lm.getText(QStringLiteral("btn_undo_archive")));
-
-    // Workspace static texts (labels, group titles, placeholders)
+    if (m_lblPhysicalArchiveWarning) {
+        m_lblPhysicalArchiveWarning->setText(
+            lm.getText(QStringLiteral("physical_archive_ui_warning")));
+    }
     if (lblTagLibraryTitle) lblTagLibraryTitle->setText(QStringLiteral("🏷️ %1").arg(lm.getText(QStringLiteral("標籤庫"))));
     if (chkRecursive) chkRecursive->setText(lm.getText(QStringLiteral("包含子資料夾")));
     if (lblFolderTreeTitle) lblFolderTreeTitle->setText(QStringLiteral("🗂️ %1").arg(lm.getText(QStringLiteral("資料夾樹"))));
@@ -1291,8 +1766,12 @@ void MainWindow::updateAllTexts() {
         btnLoadAll->setText(lm.getText(QStringLiteral("載入全部")));
     }
 
-    if (btnBatchAnalyze) btnBatchAnalyze->setText(lm.getText(QStringLiteral("資料夾分析")));
     if (btnStopBatchAnalyze) btnStopBatchAnalyze->setText(lm.getText(QStringLiteral("停止")));
+    if (m_btnRestartBackgroundAnalyze)
+        m_btnRestartBackgroundAnalyze->setText(lm.getText(QStringLiteral("btn_restart_bg_analyze")));
+
+    syncBatchAnalyzeButtonLabel();
+    refreshCurrentAnalysisTargetUi();
 
     if (m_lblSummaryTitle) m_lblSummaryTitle->setText(lm.getText(QStringLiteral("AI 智慧摘要")));
     if (m_aiSummaryEdit) {
@@ -1426,6 +1905,7 @@ void MainWindow::setupFourColumnLayout() {
     folderTree->setIndentation(18);
     folderTree->setExpandsOnDoubleClick(true);
     folderTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    folderTree->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
     folderModel = new QFileSystemModel(this);
     folderModel->setFilter(QDir::AllDirs | QDir::NoDotAndDotDot);
@@ -1435,6 +1915,9 @@ void MainWindow::setupFourColumnLayout() {
     proxyModel->setWorkspace(QDir::homePath());
     folderTree->setModel(proxyModel);
     for (int col = 1; col < folderModel->columnCount(); ++col) folderTree->hideColumn(col);
+    folderTree->header()->setStretchLastSection(false);
+    folderTree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    folderTree->setItemDelegateForColumn(0, new FolderTreeSpinDelegate(folderTree));
 
     foldersLayout->addWidget(folderTree);
     connect(folderTree, &QTreeView::clicked, this, [this](const QModelIndex &idx) {
@@ -1446,6 +1929,8 @@ void MainWindow::setupFourColumnLayout() {
         if (!fi.exists() || !fi.isDir()) return;
         fileListMode = FileListMode::PhysicalFolder;
         activeVirtualTag.clear();
+        m_priorityFolderBannerPath = QDir::cleanPath(fi.absoluteFilePath());
+        refreshCurrentAnalysisTargetUi();
         navigateToFolder(fi.absoluteFilePath(), true);
         prependUnanalyzedFromFolderToAnalysisQueue(QDir::cleanPath(fi.absoluteFilePath()));
     });
@@ -1469,7 +1954,31 @@ void MainWindow::setupFourColumnLayout() {
     lblBackgroundStatus->setStyleSheet(QStringLiteral(
         "QLabel { color:#1d4ed8; font-weight:700; font-size:14px; padding-left:12px; }"));
     fileTitleRow->addWidget(lblBackgroundStatus, 0, Qt::AlignRight | Qt::AlignVCenter);
+
+    m_btnRestartBackgroundAnalyze = new QPushButton(this);
+    m_btnRestartBackgroundAnalyze->setVisible(false);
+    m_btnRestartBackgroundAnalyze->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    connect(m_btnRestartBackgroundAnalyze, &QPushButton::clicked, this, [this]() {
+        m_showRestartBackgroundPrompt = false;
+        if (m_btnRestartBackgroundAnalyze)
+            m_btnRestartBackgroundAnalyze->setVisible(false);
+        if (m_bgAutoAnalyzeDebounce && m_bgAutoAnalyzeEnabled && !rootPath.trimmed().isEmpty())
+            m_bgAutoAnalyzeDebounce->start();
+        updateBackgroundStatusLabel();
+    });
+    fileTitleRow->addWidget(m_btnRestartBackgroundAnalyze, 0, Qt::AlignRight | Qt::AlignVCenter);
+
     filesLayout->addLayout(fileTitleRow);
+
+    lblCurrentTarget = new QLabel(this);
+    lblCurrentTarget->setWordWrap(false);
+    lblCurrentTarget->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    lblCurrentTarget->setFixedHeight(lblCurrentTarget->fontMetrics().height() + 6);
+    lblCurrentTarget->setMinimumWidth(280);
+    lblCurrentTarget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    lblCurrentTarget->setStyleSheet(QStringLiteral(
+        "QLabel { color: palette(windowText); font-size: 13px; padding: 2px 0 6px 0; }"));
+    filesLayout->addWidget(lblCurrentTarget);
 
     auto *controlsCol = new QVBoxLayout();
 
@@ -1497,6 +2006,7 @@ void MainWindow::setupFourColumnLayout() {
     filesLayout->addLayout(controlsCol);
 
     fileList = new QListWidget(this);
+    fileList->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     fileList->setContextMenuPolicy(Qt::CustomContextMenu);
     fileList->setItemDelegate(new FileItemDelegate(fileList));
     connect(fileList, &QListWidget::itemClicked, this, &MainWindow::onFileSelected);
@@ -1554,9 +2064,18 @@ void MainWindow::setupFourColumnLayout() {
     lblTags->setStyleSheet(QStringLiteral("font-weight: bold; margin-top: 8px;"));
     previewLayout->addWidget(lblTags);
 
+    m_statusRow = new QWidget(this);
+    auto *statusHBox = new QHBoxLayout(m_statusRow);
+    statusHBox->setContentsMargins(0, 0, 0, 0);
+    statusHBox->setSpacing(8);
+    m_statusBusyChip = new BusyChip(m_statusRow);
+    m_statusBusyChip->setFixedSize(20, 20);
+    m_statusBusyChip->hide();
+    statusHBox->addWidget(m_statusBusyChip, 0, Qt::AlignTop);
     lblStatus = new QLabel(QStringLiteral("狀態: 就緒"), this);
     lblStatus->setWordWrap(true);
-    previewLayout->addWidget(lblStatus);
+    statusHBox->addWidget(lblStatus, 1);
+    previewLayout->addWidget(m_statusRow);
 
     m_lblSummaryTitle = new QLabel(QStringLiteral("AI 智慧摘要"), this);
     m_lblSummaryTitle->setStyleSheet(QStringLiteral("font-weight: 700; margin-top: 10px;"));
@@ -1580,8 +2099,10 @@ void MainWindow::setupFourColumnLayout() {
     btnStopBatchAnalyze = new QPushButton(QStringLiteral("停止"), this);
     btnStopBatchAnalyze->setEnabled(false);
     connect(btnStopBatchAnalyze, &QPushButton::clicked, this, [this]() {
+        const bool wasBg = m_batchTriggeredByBackgroundAuto;
         // Abort current inference and stop the queue.
         cancelFlag.store(true);
+        stopAnalysisSpinner();
         m_analysisQueue.clear();
         // Default behavior: apply completed results before stopping.
         flushPendingBatchResults();
@@ -1590,16 +2111,25 @@ void MainWindow::setupFourColumnLayout() {
         m_batchTriggeredByBackgroundAuto = false;
         m_currentAnalyzingFile.clear();
         m_backgroundAnalyzeFolderLabel.clear();
+        m_pendingPrioritySingleFile.clear();
+        m_priorityFolderBannerPath.clear();
+        m_showRestartBackgroundPrompt = wasBg && m_bgAutoAnalyzeEnabled;
+        if (m_btnRestartBackgroundAnalyze)
+            m_btnRestartBackgroundAnalyze->setVisible(m_showRestartBackgroundPrompt);
         updateBackgroundStatusLabel();
         syncBatchProgressBars();
         if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
         if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
+        syncBatchAnalyzeButtonLabel();
+        refreshCurrentAnalysisTargetUi();
         // Refresh once so UI reflects applied results.
         updateTagList();
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("已停止資料夾分析")));
         scanFiles();
         showFolderAnalysisReport();
+        refreshFileAndFolderAnalysisIndicators();
+        ensureAnalysisIndicatorTimer();
     });
     batchRow->addWidget(btnStopBatchAnalyze);
     batchRow->addStretch(1);
@@ -1716,6 +2246,14 @@ void MainWindow::setupFourColumnLayout() {
     archiveRow->addWidget(btnUndoPhysicalArchive);
     archiveRow->addStretch(1);
     fileGroupLayout->addLayout(archiveRow);
+
+    m_lblPhysicalArchiveWarning = new QLabel(this);
+    m_lblPhysicalArchiveWarning->setWordWrap(true);
+    m_lblPhysicalArchiveWarning->setTextFormat(Qt::PlainText);
+    m_lblPhysicalArchiveWarning->setStyleSheet(QStringLiteral(
+        "QLabel { color: #dc2626; font-weight: 700; font-size: 12px; padding: 6px 4px; }"));
+    fileGroupLayout->addWidget(m_lblPhysicalArchiveWarning);
+
     fileGroupLayout->addStretch(1);
 
     previewLayout->addWidget(m_previewTabWidget);
@@ -2123,9 +2661,10 @@ QString sanitizeTagFolderName(const QString &tag) {
 } // namespace
 
 void MainWindow::physicalArchiveFiles() {
+    auto &lm = LanguageManager::instance();
     if (rootPath.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("實體歸檔 (依標籤)"),
-                                 QStringLiteral("請先開啟工作區資料夾。"));
+        QMessageBox::information(this, lm.getText(QStringLiteral("physical_archive_confirm_title")),
+                                 lm.getText(QStringLiteral("physical_archive_need_workspace")));
         return;
     }
 
@@ -2142,15 +2681,15 @@ void MainWindow::physicalArchiveFiles() {
     if (isHighRisk) {
         QMessageBox::critical(
             this,
-            QStringLiteral("實體歸檔 (依標籤)"),
-            QStringLiteral("為保護系統安全，禁止對系統核心或使用者根目錄執行全域實體歸檔！請指定特定工作資料夾。"));
+            lm.getText(QStringLiteral("physical_archive_confirm_title")),
+            lm.getText(QStringLiteral("physical_archive_high_risk")));
         return;
     }
 
-    const int answer = QMessageBox::question(
+    const int answer = QMessageBox::warning(
         this,
-        QStringLiteral("實體歸檔 (依標籤)"),
-        QStringLiteral("將對以下目錄進行實體歸檔：\n【%1】\n此操作將改變檔案實體位置，是否繼續？").arg(rootPath),
+        lm.getText(QStringLiteral("physical_archive_confirm_title")),
+        lm.getText(QStringLiteral("physical_archive_confirm_body")).arg(rootPath),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
     if (answer != QMessageBox::Yes) {
@@ -2728,6 +3267,12 @@ void MainWindow::renderFileListBatch(int count) {
             const QString fileName = fi.fileName();
             auto *item = new QListWidgetItem(fileName, fileList);
             item->setData(Qt::UserRole, filePath);
+            if (!rootPath.trimmed().isEmpty()) {
+                QString rel = QDir(rootPath).relativeFilePath(filePath);
+                if (rel == QLatin1String("."))
+                    rel = fileName;
+                item->setData(Qt::UserRole + 1, rel);
+            }
         }
     }
 
@@ -2739,6 +3284,8 @@ void MainWindow::renderFileListBatch(int count) {
 
     filterFiles();
     sortFileList();
+    refreshFileAndFolderAnalysisIndicators();
+    ensureAnalysisIndicatorTimer();
 }
 
 void MainWindow::updateTagListCountsOnly() {
@@ -2844,16 +3391,15 @@ void MainWindow::updateTagList() {
     for (const QString &d : defaults) keys.insert(normalizeDisplayTag(d));
 
     QList<QString> ordered = keys.values();
-    std::sort(ordered.begin(), ordered.end(), [this, &normToFiles](const QString &a, const QString &b) {
+    std::sort(ordered.begin(), ordered.end(), [&normToFiles](const QString &a, const QString &b) {
         const bool aAi = TagManager::hasAiPrefix(a);
         const bool bAi = TagManager::hasAiPrefix(b);
 
-        // Frequency sorting for AI tags: count desc, then name
+        // Frequency sorting for AI tags: count desc, then name (use snapshot only — never call TagManager
+        // from comparator to avoid strict-weak-ordering UB / re-entrancy crashes).
         if (aAi && bAi) {
-            const int na = normToFiles.count(a) ? static_cast<int>(normToFiles[a].size())
-                                                : static_cast<int>(tagManager.getFilesByTag(a).size());
-            const int nb = normToFiles.count(b) ? static_cast<int>(normToFiles[b].size())
-                                                : static_cast<int>(tagManager.getFilesByTag(b).size());
+            const int na = normToFiles.contains(a) ? static_cast<int>(normToFiles.at(a).size()) : 0;
+            const int nb = normToFiles.contains(b) ? static_cast<int>(normToFiles.at(b).size()) : 0;
             if (na != nb) return na > nb;
             return a.localeAwareCompare(b) < 0;
         }
@@ -3112,6 +3658,8 @@ void MainWindow::onFileSelected(QListWidgetItem *item) {
     QFileInfo fi(absPath);
     btnAnalyzeFile->setEnabled(isAnalyzableFile(fi));
 
+    enqueuePriorityAnalyzeForFileIfNeeded(absPath);
+
     updatePreviewForFile(absPath);
     updateTagDisplayForFile(absPath);
     btnSaveTags->setEnabled(false);
@@ -3356,25 +3904,17 @@ void MainWindow::setUiBusy(bool busy) {
         if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(false); // avoid concurrent single-file analyze
         if (btnCancelAnalysis) btnCancelAnalysis->setEnabled(busy);
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(false);
+        syncBatchAnalyzeButtonLabel();
         return;
     }
 
     btnAnalyzeFile->setEnabled(!busy && !currentFilePath().isEmpty());
     btnCancelAnalysis->setEnabled(busy);
     btnSaveTags->setEnabled(!busy && btnSaveTags->isEnabled());
-    fileList->setEnabled(!busy);
-    folderTree->setEnabled(!busy);
-    if (m_systemTagListWidget) m_systemTagListWidget->setEnabled(!busy);
-    if (m_aiTagTreeWidget) m_aiTagTreeWidget->setEnabled(!busy);
-    cmbTagFilter->setEnabled(!busy);
-    txtSearch->setEnabled(!busy);
-    cmbSort->setEnabled(!busy);
-    btnHome->setEnabled(!busy);
-    if (!busy) syncNavigationButtons();
-    else {
-        btnBack->setEnabled(false);
-        btnForward->setEnabled(false);
-    }
+    if (!busy)
+        syncNavigationButtons();
+    syncBatchAnalyzeButtonLabel();
+    refreshCurrentAnalysisTargetUi();
 }
 
 void MainWindow::analyzeFile() {
@@ -3425,6 +3965,8 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
             QTimer::singleShot(0, this, &MainWindow::processNextInQueue);
         } else {
             lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
+            m_currentAnalyzingFile.clear();
+            refreshCurrentAnalysisTargetUi();
         }
         return;
     }
@@ -3446,7 +3988,10 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
     lblStatus->setText(tr("Preparing…"));
 
     m_currentAnalyzingFile = fp;
+    m_analysisUiWorkActive = true;
     updateBackgroundStatusLabel();
+    refreshCurrentAnalysisTargetUi();
+    startAnalysisSpinnerForPath(fp);
     const QString filename = fi.fileName();
     // IMPORTANT: Do NOT feed full historical tags into the prompt.
     // It causes "prompt contamination" where prior institution names get repeated.
@@ -3513,10 +4058,15 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
                                       suffix.toStdString());
     });
     watcher->setFuture(future);
+    refreshFileAndFolderAnalysisIndicators();
+    ensureAnalysisIndicatorTimer();
 }
 
 void MainWindow::cancelAnalysis() {
     cancelFlag.store(true);
+    m_pendingPrioritySingleFile.clear();
+    m_analysisUiWorkActive = false;
+    stopAnalysisSpinner();
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("取消中…")));
 }
 
@@ -3565,6 +4115,10 @@ void MainWindow::processNextInQueue() {
         m_isBatchMode = false;
         m_currentAnalyzingFile.clear();
         m_backgroundAnalyzeFolderLabel.clear();
+        m_priorityFolderBannerPath.clear();
+        m_showRestartBackgroundPrompt = false;
+        if (m_btnRestartBackgroundAnalyze)
+            m_btnRestartBackgroundAnalyze->setVisible(false);
         updateBackgroundStatusLabel();
         flushPendingBatchResults();
         syncBatchProgressBars();
@@ -3573,6 +4127,8 @@ void MainWindow::processNextInQueue() {
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
         if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
         if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
+        syncBatchAnalyzeButtonLabel();
+        refreshCurrentAnalysisTargetUi();
 
         // Refresh once at end for UI correctness
         updateTagList();
@@ -3592,6 +4148,8 @@ void MainWindow::processNextInQueue() {
                 m_bgAutoAnalyzeDebounce->start();
             }
         }
+        refreshFileAndFolderAnalysisIndicators();
+        ensureAnalysisIndicatorTimer();
         return;
     }
 
@@ -3617,6 +4175,7 @@ void MainWindow::processNextInQueue() {
     }
 
     analyzeFileForPath(nextFile);
+    refreshCurrentAnalysisTargetUi();
 }
 
 void MainWindow::collectUnanalyzedPathsFromWorkspace(int maxFiles, QStringList *out)
@@ -3733,6 +4292,7 @@ void MainWindow::applyPresetBypassAnalysis(const QString &fp, const QString &sum
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
         updateBackgroundStatusLabel();
         QTimer::singleShot(0, this, &MainWindow::processNextInQueue);
+        refreshCurrentAnalysisTargetUi();
         return;
     }
 
@@ -3750,7 +4310,12 @@ void MainWindow::applyPresetBypassAnalysis(const QString &fp, const QString &sum
     updateTagList();
     if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
     else populateVirtualTagFiles(activeVirtualTag);
+    reselectFileInList(fp);
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
+    m_currentAnalyzingFile.clear();
+    refreshCurrentAnalysisTargetUi();
+    refreshFileAndFolderAnalysisIndicators();
+    ensureAnalysisIndicatorTimer();
 }
 
 void MainWindow::loadBackgroundAutoAnalyzeSetting()
@@ -3910,6 +4475,10 @@ void MainWindow::onBackgroundAutoAnalyzeDebounce()
 
 void MainWindow::beginBatchAnalysisUi()
 {
+    m_showRestartBackgroundPrompt = false;
+    if (m_btnRestartBackgroundAnalyze)
+        m_btnRestartBackgroundAnalyze->setVisible(false);
+
     if (batchProgressBar) {
         batchProgressBar->setRange(0, m_totalBatchSize);
         batchProgressBar->setValue(0);
@@ -3926,6 +4495,9 @@ void MainWindow::beginBatchAnalysisUi()
     if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(true);
     updateBackgroundStatusLabel();
     syncBatchProgressBars();
+    syncBatchAnalyzeButtonLabel();
+    refreshFileAndFolderAnalysisIndicators();
+    ensureAnalysisIndicatorTimer();
 }
 
 void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached, const QString &contentHashHex)
@@ -3960,6 +4532,11 @@ void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObj
     updateTagList();
     if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
     else populateVirtualTagFiles(activeVirtualTag);
+    reselectFileInList(fp);
+    m_currentAnalyzingFile.clear();
+    refreshCurrentAnalysisTargetUi();
+    refreshFileAndFolderAnalysisIndicators();
+    ensureAnalysisIndicatorTimer();
 }
 
 void MainWindow::showFolderAnalysisReport()
@@ -4130,6 +4707,9 @@ void MainWindow::onAnalysisFinished() {
             updateBackgroundStatusLabel();
             QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
         }
+        m_currentAnalyzingFile.clear();
+        refreshCurrentAnalysisTargetUi();
+        clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
 
@@ -4141,6 +4721,9 @@ void MainWindow::onAnalysisFinished() {
             updateBackgroundStatusLabel();
             QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
         }
+        m_currentAnalyzingFile.clear();
+        refreshCurrentAnalysisTargetUi();
+        clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
 
@@ -4268,6 +4851,9 @@ void MainWindow::onAnalysisFinished() {
             QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
         }
         updateBackgroundStatusLabel();
+        m_currentAnalyzingFile.clear();
+        refreshCurrentAnalysisTargetUi();
+        clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
 
@@ -4340,15 +4926,25 @@ void MainWindow::onAnalysisFinished() {
         updateTagList();
         if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
         else populateVirtualTagFiles(activeVirtualTag);
+        reselectFileInList(fp);
     }
 
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
 
     if (m_isBatchMode) {
         QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
+    } else if (!m_pendingPrioritySingleFile.isEmpty()) {
+        const QString nextP = QDir::cleanPath(m_pendingPrioritySingleFile);
+        m_pendingPrioritySingleFile.clear();
+        if (!nextP.isEmpty() && nextP != fp)
+            QTimer::singleShot(0, this, [this, nextP]() { analyzeFileForPath(nextP); });
     } else if (m_bgAutoAnalyzeEnabled && m_bgAutoAnalyzeDebounce && !rootPath.trimmed().isEmpty()) {
         m_bgAutoAnalyzeDebounce->start();
     }
+
+    m_currentAnalyzingFile.clear();
+    refreshCurrentAnalysisTargetUi();
+    clearAnalysisWorkFlagsAndSyncUi();
 }
 
 void MainWindow::consolidateTagsWithAI() {
@@ -4379,6 +4975,12 @@ void MainWindow::consolidateTagsWithAI() {
     }
 
     if (aiTags.size() < 2) return;
+
+    std::sort(aiTags.begin(), aiTags.end(), [](const QString &a, const QString &b) {
+        return QString::compare(a, b, Qt::CaseInsensitive) < 0;
+    });
+    if (aiTags.size() > 120)
+        aiTags = aiTags.mid(0, 120);
 
     m_isConsolidatingTags = true;
     updateAllTexts();
@@ -4417,30 +5019,58 @@ void MainWindow::consolidateTagsWithAI() {
     }));
 }
 
-void MainWindow::onConsolidateTagsFinished() {
-    const QString raw = QString::fromStdString(m_consolidateWatcher ? m_consolidateWatcher->result() : std::string());
-
-    m_isConsolidatingTags = false;
-    updateAllTexts();
-
-    if (raw.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive)) {
-        QMessageBox::critical(this, QStringLiteral("Smartflie"), raw);
-        return;
+static QString extractFirstBalancedJsonObject(const QString &rawIn)
+{
+    QString raw = rawIn;
+    if (raw.size() > 400000)
+        raw.truncate(400000);
+    const int start = raw.indexOf(QLatin1Char('{'));
+    if (start < 0)
+        return QStringLiteral("{}");
+    int depth = 0;
+    bool inStr = false;
+    for (int i = start; i < raw.size(); ++i) {
+        const QChar c = raw.at(i);
+        if (inStr) {
+            if (c == QLatin1Char('\\') && i + 1 < raw.size()) {
+                ++i;
+                continue;
+            }
+            if (c == QLatin1Char('"'))
+                inStr = false;
+            continue;
+        }
+        if (c == QLatin1Char('"')) {
+            inStr = true;
+            continue;
+        }
+        if (c == QLatin1Char('{'))
+            ++depth;
+        else if (c == QLatin1Char('}')) {
+            --depth;
+            if (depth == 0)
+                return raw.mid(start, i - start + 1);
+        }
     }
+    return QStringLiteral("{}");
+}
 
-    QRegularExpression re(QStringLiteral("\\{.*\\}"));
-    re.setPatternOptions(QRegularExpression::DotMatchesEverythingOption);
-    const QRegularExpressionMatch m = re.match(raw);
-    const QString jsonText = m.hasMatch() ? m.captured(0).trimmed() : QStringLiteral("{}");
+void MainWindow::applyConsolidateMergesFromRaw(const QString &rawIn)
+{
+    QString capped = rawIn;
+    if (capped.size() > 500000)
+        capped.truncate(500000);
 
-    QJsonParseError err;
+    const QString jsonText = extractFirstBalancedJsonObject(capped);
+
+    QJsonParseError err{};
     const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &err);
     if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("Invalid JSON: %1").arg(err.errorString()));
+        QMessageBox::warning(this, QStringLiteral("Smartflie"),
+                               QStringLiteral("Invalid JSON: %1").arg(err.errorString()));
         return;
     }
 
-    // Snapshot current AI tags for validation
     std::vector<QString> allTags;
     {
         QMutexLocker locker(&tagMutex);
@@ -4449,30 +5079,124 @@ void MainWindow::onConsolidateTagsFinished() {
     QSet<QString> aiTagSet;
     for (const QString &t : allTags) {
         const QString tt = t.trimmed();
-        if (TagManager::hasAiPrefix(tt)) aiTagSet.insert(tt);
+        if (TagManager::hasAiPrefix(tt))
+            aiTagSet.insert(tt);
     }
 
     int merged = 0;
     const QJsonObject obj = doc.object();
+    QMap<QString, QString> rawEdges;
     for (auto it = obj.begin(); it != obj.end(); ++it) {
         const QString key = it.key().trimmed();
         const QString value = it.value().toString().trimmed();
         if (key.isEmpty() || value.isEmpty()) continue;
         if (key == value) continue;
         if (!aiTagSet.contains(key) || !aiTagSet.contains(value)) continue;
+        rawEdges.insert(key, value);
+    }
 
-        {
-            QMutexLocker locker(&tagMutex);
-            tagManager.mergeTag(key, value);
+    auto followKeepTarget = [&rawEdges](const QString &start) -> QString {
+        QString cur = start;
+        QSet<QString> stack;
+        while (rawEdges.contains(cur)) {
+            if (stack.contains(cur)) return QString();
+            stack.insert(cur);
+            const QString nxt = rawEdges.value(cur).trimmed();
+            if (nxt.isEmpty()) return QString();
+            cur = nxt;
         }
-        merged++;
-        aiTagSet.remove(key);
+        return cur;
+    };
+
+    QMap<QString, QString> planned;
+    for (auto it = rawEdges.constBegin(); it != rawEdges.constEnd(); ++it) {
+        const QString key = it.key();
+        const QString finalTo = followKeepTarget(it.value());
+        if (finalTo.isEmpty() || finalTo == key) continue;
+        if (!aiTagSet.contains(key) || !aiTagSet.contains(finalTo)) continue;
+        planned.insert(key, finalTo);
+    }
+
+    QVector<QPair<QString, QString>> mergePairs;
+    mergePairs.reserve(planned.size());
+    for (auto it = planned.constBegin(); it != planned.constEnd(); ++it) {
+        mergePairs.append(qMakePair(it.key(), it.value()));
+    }
+    if (mergePairs.size() > 500)
+        mergePairs.resize(500);
+
+    int outerIters = 0;
+    while (!mergePairs.isEmpty()) {
+        if (++outerIters > 5000)
+            break;
+        bool progressed = false;
+        for (int i = 0; i < mergePairs.size();) {
+            if (merged >= 500) {
+                mergePairs.clear();
+                progressed = true;
+                break;
+            }
+            const QString oldT = mergePairs[i].first;
+            const QString newT = mergePairs[i].second;
+            bool newIsSource = false;
+            for (int j = 0; j < mergePairs.size(); ++j) {
+                if (j == i) continue;
+                if (mergePairs[j].first == newT) {
+                    newIsSource = true;
+                    break;
+                }
+            }
+            if (newIsSource) {
+                ++i;
+                continue;
+            }
+            {
+                QMutexLocker locker(&tagMutex);
+                tagManager.mergeTag(oldT, newT, false);
+            }
+            ++merged;
+            mergePairs.removeAt(i);
+            progressed = true;
+        }
+        if (!progressed) break;
+        if (merged >= 500)
+            break;
+    }
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.saveTags();
     }
 
     updateTagList();
     QMessageBox::information(this,
                              QStringLiteral("Smartflie"),
                              LanguageManager::instance().getText(QStringLiteral("已自動合併 %1 組標籤")).arg(merged));
+}
+
+void MainWindow::onConsolidateTagsFinished() {
+    if (!m_consolidateWatcher) {
+        m_isConsolidatingTags = false;
+        updateAllTexts();
+        return;
+    }
+
+    QString raw = QString::fromStdString(m_consolidateWatcher->result());
+    if (raw.size() > 500000)
+        raw.truncate(500000);
+
+    if (raw.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive)) {
+        m_isConsolidatingTags = false;
+        updateAllTexts();
+        QMessageBox::critical(this, QStringLiteral("Smartflie"), raw);
+        return;
+    }
+
+    QTimer::singleShot(0, this, [this, raw]() {
+        applyConsolidateMergesFromRaw(raw);
+        m_isConsolidatingTags = false;
+        updateAllTexts();
+    });
 }
 
 void MainWindow::saveTags() {

@@ -62,6 +62,22 @@ QString LanguageManager::getText(const QString &key) const {
 
     if (key == QStringLiteral("btn_physical_archive")) return en ? QStringLiteral("Physical Archive (by Tag)") : QStringLiteral("實體歸檔 (依標籤)");
     if (key == QStringLiteral("btn_undo_archive")) return en ? QStringLiteral("Undo Archive") : QStringLiteral("回上一步 (復原歸檔)");
+    if (key == QStringLiteral("physical_archive_ui_warning")) {
+        return en ? QStringLiteral("Warning: physical archive moves files on disk. Only the last run can be undone via \"Undo Archive\".")
+                  : QStringLiteral("警告：實體歸檔會改變磁碟上的實體檔案位置；僅能透過「回上一步 (復原歸檔)」復原上一輪操作。");
+    }
+    if (key == QStringLiteral("physical_archive_confirm_title"))
+        return en ? QStringLiteral("Physical archive — destructive operation") : QStringLiteral("實體歸檔 — 破壞性操作");
+    if (key == QStringLiteral("physical_archive_confirm_body")) {
+        return en ? QStringLiteral("You are about to move files under:\n%1\nFiles will be placed into subfolders named after their primary tag. This changes real paths on disk.\n\nContinue?")
+                  : QStringLiteral("即將對以下工作區執行實體歸檔：\n【%1】\n檔案將依主要標籤被移入對應子資料夾；此操作會改變實體檔案位置。\n\n確定要繼續嗎？");
+    }
+    if (key == QStringLiteral("physical_archive_need_workspace"))
+        return en ? QStringLiteral("Open a workspace folder first.") : QStringLiteral("請先開啟工作區資料夾。");
+    if (key == QStringLiteral("physical_archive_high_risk")) {
+        return en ? QStringLiteral("For safety, physical archive is not allowed on system root, user home, or Desktop. Choose a dedicated project folder.")
+                  : QStringLiteral("為保護系統安全，禁止對系統核心、使用者根目錄或桌面執行全域實體歸檔；請指定專用工作資料夾。");
+    }
 
     if (key == QStringLiteral("btn_scan")) return en ? QStringLiteral("Start Analysis") : QStringLiteral("開始分析");
 
@@ -187,6 +203,20 @@ QString LanguageManager::getText(const QString &key) const {
         return en ? QStringLiteral("Cannot extract text (possibly scanned or encrypted)") : QStringLiteral("無法提取文字內容（可能為掃描檔或加密）");
     }
 
+    if (key == QStringLiteral("btn_batch_bg_running"))
+        return en ? QStringLiteral("🔄 Background analysis running…") : QStringLiteral("🔄 背景分析運作中…");
+
+    if (key == QStringLiteral("ui_target_analyzing"))
+        return en ? QStringLiteral("⚙ Analyzing: %1") : QStringLiteral("⚙ 分析中: %1");
+    if (key == QStringLiteral("ui_target_next_line"))
+        return en ? QStringLiteral("⏭ Next in line: %1") : QStringLiteral("⏭ 下一個: %1");
+    if (key == QStringLiteral("ui_target_lock_folder"))
+        return en ? QStringLiteral("🎯 Priority folder: %1") : QStringLiteral("🎯 優先資料夾: %1");
+    if (key == QStringLiteral("ui_target_lock_file"))
+        return en ? QStringLiteral("🎯 Priority target: %1") : QStringLiteral("🎯 鎖定分析: %1");
+
+    if (key == QStringLiteral("graph_max_nodes")) return en ? QStringLiteral("Max files") : QStringLiteral("檔案節點上限");
+
     if (key == QStringLiteral("資料夾分析")) return en ? QStringLiteral("Folder Analyze") : QStringLiteral("資料夾分析");
     if (key == QStringLiteral("資料夾分析完成")) return en ? QStringLiteral("Folder analysis completed") : QStringLiteral("資料夾分析完成");
     if (key == QStringLiteral("正在資料夾分析")) return en ? QStringLiteral("Folder analyzing") : QStringLiteral("正在資料夾分析");
@@ -277,6 +307,9 @@ QString LanguageManager::getText(const QString &key) const {
     }
     if (key == QStringLiteral("bg_idle_monitoring"))
         return en ? QStringLiteral("👀 Monitoring & crawler idle…") : QStringLiteral("👀 系統監控與爬蟲待命中…");
+    if (key == QStringLiteral("btn_restart_bg_analyze"))
+        return en ? QStringLiteral("Resume background analysis") : QStringLiteral("重新開始背景分析");
+
     if (key == QStringLiteral("bypass_tag_dev_system_file"))
         return en ? QStringLiteral("Development & system files") : QStringLiteral("[開發與系統檔]");
     if (key == QStringLiteral("bypass_summary_dev_dependency")) {

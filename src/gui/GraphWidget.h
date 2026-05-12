@@ -114,6 +114,8 @@ private:
     QWidget *m_toolbar = nullptr;
     QLabel *m_filterLabel = nullptr;
     QComboBox *m_tagFilter = nullptr;
+    QLabel *m_maxNodesLabel = nullptr;
+    QComboBox *m_maxNodesCombo = nullptr;
 };
 
 #endif // GRAPHWIDGET_H

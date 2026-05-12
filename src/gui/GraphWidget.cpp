@@ -12,7 +12,6 @@
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QMessageBox>
 #include <QResizeEvent>
 #include <QSet>
 #include <algorithm>
@@ -371,17 +370,28 @@ void GraphWidget::ensureToolbar() {
     connect(m_tagFilter, &QComboBox::currentIndexChanged, this, [this](int) { buildGraph(); });
     connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() {
         if (m_filterLabel) m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
+        if (m_maxNodesLabel)
+            m_maxNodesLabel->setText(LanguageManager::instance().getText(QStringLiteral("graph_max_nodes")));
         rebuildTagFilterOptions();
     });
+
+    m_maxNodesLabel = new QLabel(LanguageManager::instance().getText(QStringLiteral("graph_max_nodes")), m_toolbar);
+    row->addWidget(m_maxNodesLabel);
+
+    m_maxNodesCombo = new QComboBox(m_toolbar);
+    for (int n : {10, 30, 50}) {
+        m_maxNodesCombo->addItem(QString::number(n), n);
+    }
+    m_maxNodesCombo->setCurrentIndex(1); // 30
+    row->addWidget(m_maxNodesCombo);
+    connect(m_maxNodesCombo, &QComboBox::currentIndexChanged, this, [this](int) { buildGraph(); });
 
     m_toolbar->show();
 }
 
 QString GraphWidget::selectedFilterTag() const {
-    if (!m_tagFilter) return {};
-    const QString raw = m_tagFilter->currentData().toString();
-    if (raw == QStringLiteral("__ALL__")) return {};
-    return raw;
+    if (!m_tagFilter || m_tagFilter->count() <= 0) return {};
+    return m_tagFilter->currentData().toString().trimmed();
 }
 
 void GraphWidget::rebuildTagFilterOptions() {
@@ -394,7 +404,6 @@ void GraphWidget::rebuildTagFilterOptions() {
 
     m_tagFilter->blockSignals(true);
     m_tagFilter->clear();
-    m_tagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("顯示全部")), QStringLiteral("__ALL__"));
     if (tagManager) {
         auto tags = tagManager->getAllTags();
         std::sort(tags.begin(), tags.end(), [](const QString &a, const QString &b) {
@@ -405,10 +414,10 @@ void GraphWidget::rebuildTagFilterOptions() {
             m_tagFilter->addItem(translateVirtualTagForDisplay(t), t);
         }
     }
-    // restore selection if possible
-    if (!prev.isEmpty()) {
-        const int idx = m_tagFilter->findData(prev);
-        if (idx >= 0) m_tagFilter->setCurrentIndex(idx);
+    // restore selection if possible; otherwise first tag (no global "show all")
+    if (m_tagFilter->count() > 0) {
+        const int idx = prev.isEmpty() ? 0 : m_tagFilter->findData(prev);
+        m_tagFilter->setCurrentIndex(idx >= 0 ? idx : 0);
     }
     m_tagFilter->blockSignals(false);
 }
@@ -433,35 +442,24 @@ void GraphWidget::buildGraph() {
     rebuildTagFilterOptions();
 
     const QString filterTag = selectedFilterTag();
-    QStringList candidateFiles;
-    if (!filterTag.isEmpty()) {
-        const std::vector<QString> files = tagManager->getFilesByTag(filterTag);
-        for (const auto &p : files) candidateFiles.push_back(p);
-    } else {
-        const auto pairs = tagManager->taggedFilesWithPrimaryTag();
-        candidateFiles.reserve(static_cast<int>(pairs.size()));
-        for (const auto &p : pairs) candidateFiles.push_back(p.first);
+    if (filterTag.isEmpty()) {
+        return;
     }
+
+    QStringList candidateFiles;
+    const std::vector<QString> files = tagManager->getFilesByTag(filterTag);
+    for (const auto &p : files) candidateFiles.push_back(p);
     candidateFiles.removeDuplicates();
     std::sort(candidateFiles.begin(), candidateFiles.end(), [](const QString &a, const QString &b) {
         return a.localeAwareCompare(b) < 0;
     });
 
-    const int totalFiles = candidateFiles.size();
-    bool limitNodes = false;
-    if (totalFiles > MAX_NODES_RENDER) {
-        auto &lm = LanguageManager::instance();
-        const int answer = QMessageBox::question(
-            this,
-            lm.getText(QStringLiteral("關聯圖譜")),
-            lm.getText(QStringLiteral("當前目錄包含過多檔案（共 %1 個），繪製完整關聯圖可能導致畫面雜亂或系統卡頓。是否僅顯示核心標籤與前 50 個關聯檔案？"))
-                .arg(totalFiles),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::Yes);
-        limitNodes = (answer == QMessageBox::Yes);
+    int userCap = MAX_NODES_RENDER;
+    if (m_maxNodesCombo && m_maxNodesCombo->currentData().isValid()) {
+        userCap = qBound(1, m_maxNodesCombo->currentData().toInt(), MAX_NODES_RENDER);
     }
-    if (limitNodes && candidateFiles.size() > MAX_NODES_RENDER) {
-        candidateFiles = candidateFiles.mid(0, MAX_NODES_RENDER);
+    if (candidateFiles.size() > userCap) {
+        candidateFiles = candidateFiles.mid(0, userCap);
     }
     
     // Decide which tag nodes should exist

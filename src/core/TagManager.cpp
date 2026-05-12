@@ -377,7 +377,7 @@ void TagManager::deleteTag(const QString& tag) {
     }
 }
 
-void TagManager::mergeTag(const QString& oldTag, const QString& newTag) {
+void TagManager::mergeTag(const QString& oldTag, const QString& newTag, bool saveImmediately) {
     QMutexLocker locker(&m_mutex);
     const QString nOld = normalizeTag(oldTag);
     const QString nNew = normalizeTag(newTag);
@@ -420,7 +420,7 @@ void TagManager::mergeTag(const QString& oldTag, const QString& newTag) {
         m_rejectedTags.erase(nOld);
     }
 
-    saveTags();
+    if (saveImmediately) saveTags();
 }
 
 std::vector<std::pair<QString, QString>> TagManager::taggedFilesWithPrimaryTag() const {
