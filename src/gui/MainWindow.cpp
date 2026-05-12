@@ -38,6 +38,7 @@
 #include <QWidget>
 #include <QTextCursor>
 #include <QMutexLocker>
+#include <QMetaObject>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QHeaderView>
@@ -54,6 +55,7 @@
 #include <QStyle>
 #include <QThreadPool>
 #include <QThread>
+#include <QScopeGuard>
 
 #include <algorithm>
 #include <exception>
@@ -80,6 +82,29 @@
 static QString extractFirstBalancedJsonObject(const QString &rawIn);
 static QString extractFirstBalancedJsonArray(const QString &rawIn);
 static QVector<int> parseSemanticRetrieverIdList(const QString &raw);
+
+static QString sfBuildSemanticRetrieverPromptWorker(const QString &userQuery, const QString &idContextLines);
+static bool sfSemanticWorkspaceHasAnalyzableFile(const QString &rootPathRaw, int maxProbeFiles);
+static QString sfBuildWorkspaceSemanticIdLines(const QString &root,
+                                               const QHash<QString, QString> &summaryByPath,
+                                               TagManager *tagMgr,
+                                               QMutex *tagMutex,
+                                               int maxFiles,
+                                               QMap<int, QString> *outIdToPath,
+                                               QSet<QString> *outValidPaths);
+static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootPathRaw,
+                                                            int maxFiles,
+                                                            const QHash<QString, QString> &summaryByPath,
+                                                            TagManager *tagMgr,
+                                                            QMutex *tagMutex,
+                                                            LlamaEngine *llama,
+                                                            const QString &userQuery);
+static TagClusterWorkerResult sfParseTagClusterJsonIntoDrawerMap(const QString &rawIn, const QSet<QString> &aiTagSet);
+
+enum HeroSearchScopeComboData : int {
+    HeroSearchScope_LocalFolder = 0,
+    HeroSearchScope_GlobalSemantic = 1,
+};
 
 /// Small arc spinner next to status text (matches file-list / folder-tree arc style).
 class BusyChip final : public QWidget {
@@ -147,14 +172,65 @@ protected:
 
 namespace {
 
+const QSet<QString> &dailyTextSuffixes()
+{
+    static const QSet<QString> k = {QStringLiteral("txt"), QStringLiteral("md"), QStringLiteral("csv")};
+    return k;
+}
+
+/// Developer / heavy text types — allowed for manual analysis only (not background auto-scan).
+const QSet<QString> &devTextSuffixes()
+{
+    static const QSet<QString> k = {QStringLiteral("sql"),  QStringLiteral("db"),   QStringLiteral("json"),
+                                    QStringLiteral("xml"),  QStringLiteral("py"),   QStringLiteral("cpp"),
+                                    QStringLiteral("js"),   QStringLiteral("html"), QStringLiteral("htm"),
+                                    QStringLiteral("h"),    QStringLiteral("c"),    QStringLiteral("hpp"),
+                                    QStringLiteral("log"),  QStringLiteral("yaml"), QStringLiteral("yml"),
+                                    QStringLiteral("ts"),   QStringLiteral("ini")};
+    return k;
+}
+
+/// Union of daily + dev — used for preview and any path that should treat file as plain text.
 const QSet<QString> &plainTextFileSuffixes()
 {
-    static const QSet<QString> k = {QStringLiteral("txt"),  QStringLiteral("md"),   QStringLiteral("cpp"),
-                                    QStringLiteral("h"),    QStringLiteral("c"),    QStringLiteral("hpp"),
-                                    QStringLiteral("json"), QStringLiteral("xml"),  QStringLiteral("csv"),
-                                    QStringLiteral("log"),  QStringLiteral("yaml"), QStringLiteral("yml"),
-                                    QStringLiteral("py"),   QStringLiteral("js"),   QStringLiteral("ts")};
+    static const QSet<QString> k = [] {
+        QSet<QString> u = dailyTextSuffixes();
+        u.unite(devTextSuffixes());
+        return u;
+    }();
     return k;
+}
+
+static bool sfSummaryAcceptableForStorage(const QString &s)
+{
+    const QString t = s.trimmed();
+    if (t.isEmpty()) return false;
+    if (t.contains(QStringLiteral("Error"), Qt::CaseInsensitive)) return false;
+    return true;
+}
+
+/// When JSON parsing fails, recover a one-line summary from prose ("摘要：…" / `summary:`).
+static QString sfExtractSummaryRegexFallback(const QString &raw)
+{
+    if (raw.trimmed().isEmpty()) return QString();
+    static const QRegularExpression reZh(QStringLiteral(R"(摘要\s*[:：]\s*([^\r\n\"]+))"));
+    {
+        const QRegularExpressionMatch m = reZh.match(raw);
+        if (m.hasMatch()) {
+            const QString cap = m.captured(1).trimmed();
+            if (sfSummaryAcceptableForStorage(cap)) return cap;
+        }
+    }
+    static const QRegularExpression reEn(QStringLiteral(R"((?:^|[\r\n])\s*summary\s*[:：]\s*([^\r\n\"]+))"),
+                                          QRegularExpression::CaseInsensitiveOption);
+    {
+        const QRegularExpressionMatch m = reEn.match(raw);
+        if (m.hasMatch()) {
+            const QString cap = m.captured(1).trimmed();
+            if (sfSummaryAcceptableForStorage(cap)) return cap;
+        }
+    }
+    return QString();
 }
 
 /// PDF + Office Open XML / macro / template + OpenDocument + EPUB (ZIP-backed text extraction).
@@ -178,6 +254,25 @@ const QSet<QString> &zipOrPdfTextExtractSuffixes()
                                     QStringLiteral("odp"),
                                     QStringLiteral("epub")};
     return k;
+}
+
+/// Background queue: daily plain text + PDF / Office extractable only (strictly excludes devTextSuffixes).
+static bool sfSuffixEligibleForBackgroundAutoAnalysis(const QFileInfo &fi)
+{
+    const QString sfx = fi.suffix().toLower();
+    if (sfx.isEmpty()) return false;
+    if (devTextSuffixes().contains(sfx)) return false;
+    if (dailyTextSuffixes().contains(sfx)) return true;
+    return zipOrPdfTextExtractSuffixes().contains(sfx);
+}
+
+/// Manual / semantic keyword fallback: daily + dev + PDF/Office (filename-only hits must pass this).
+static bool sfSuffixEligibleForManualOrSemanticTextAnalysis(const QFileInfo &fi)
+{
+    const QString sfx = fi.suffix().toLower();
+    if (sfx.isEmpty()) return false;
+    if (dailyTextSuffixes().contains(sfx) || devTextSuffixes().contains(sfx)) return true;
+    return zipOrPdfTextExtractSuffixes().contains(sfx);
 }
 
 const QSet<QString> &officeZipPreviewSuffixes()
@@ -261,6 +356,8 @@ class FileItemDelegate : public QStyledItemDelegate {
 public:
     /// 0 none, 1 hollow (pending), 2 analyzing (arc; phase on list sfProgressPhase), 3 solid (done)
     static constexpr int kSpinRole = Qt::UserRole + 16;
+    /// Preloaded base badge from pathHasUsableAnalysisSummary (0 none, 3 analyzed); used when kSpinRole unset.
+    static constexpr int kAnalysisStateRole = Qt::UserRole + 17;
 
     explicit FileItemDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
 
@@ -273,7 +370,10 @@ public:
 
         const QString name = index.data(Qt::DisplayRole).toString();
         const QString path = index.data(Qt::UserRole + 1).toString();
-        const int prog = index.data(kSpinRole).toInt();
+        const QVariant vSpin = index.data(kSpinRole);
+        int prog = (vSpin.isValid() && !vSpin.isNull()) ? vSpin.toInt() : 0;
+        if (prog == 0)
+            prog = index.data(kAnalysisStateRole).toInt();
         const int animPhase = w ? w->property("sfProgressPhase").toInt() : 0;
 
         const QColor accent = (opt.state & QStyle::State_Selected) ? opt.palette.highlightedText().color()
@@ -329,7 +429,10 @@ public:
         initStyleOption(&opt, index);
         const QString name = index.data(Qt::DisplayRole).toString();
         const QString path = index.data(Qt::UserRole + 1).toString();
-        const int prog = index.data(kSpinRole).toInt();
+        const QVariant vSpin = index.data(kSpinRole);
+        int prog = (vSpin.isValid() && !vSpin.isNull()) ? vSpin.toInt() : 0;
+        if (prog == 0)
+            prog = index.data(kAnalysisStateRole).toInt();
         QFont nameFont = opt.font;
         nameFont.setBold(true);
         const QFontMetrics fmName(nameFont);
@@ -569,24 +672,39 @@ static QString sha256HexOfFile(const QString &path)
     return QString::fromLatin1(h.result().toHex());
 }
 
-static const QString &kAiDrawerUncategorizedKey()
-{
-    static const QString k = QStringLiteral("__uncat__");
-    return k;
-}
-
 static QStringList sfFixedAiClusterDrawerKeys()
 {
-    return {QStringLiteral("[營運管理]"),     QStringLiteral("[技術與開發]"), QStringLiteral("[財務與法務]"),
-            QStringLiteral("[行銷與企劃]"), QStringLiteral("[人事與行政]"), QStringLiteral("[多媒體資源]"),
-            QStringLiteral("[會議與報告]"), QStringLiteral("[其他雜項]")};
+    return {QStringLiteral("💼 工作"), QStringLiteral("📚 學習"), QStringLiteral("💰 財務"),
+            QStringLiteral("🎬 媒體"), QStringLiteral("⚙️ 系統"), QStringLiteral("📦 雜項")};
 }
 
-static QString sfAiFolderTagForDrawerCanon(const QString &canonicalBracketKey)
+/// Map legacy (pre-11.7) drawer keys saved on disk to the current six canonical drawers.
+static QString sfLegacyAiDrawerKeyToCanon(const QString &rawIn)
 {
-    QString s = canonicalBracketKey.trimmed();
-    if (s.startsWith(QLatin1Char('[')) && s.endsWith(QLatin1Char(']')))
-        s = s.mid(1, s.size() - 2).trimmed();
+    const QString t = rawIn.trimmed();
+    static const QMap<QString, QString> kLegacyToNew = {
+        {QStringLiteral("[營運管理]"), QStringLiteral("💼 工作")},
+        {QStringLiteral("[技術與開發]"), QStringLiteral("💼 工作")},
+        {QStringLiteral("[財務與法務]"), QStringLiteral("💰 財務")},
+        {QStringLiteral("[行銷與企劃]"), QStringLiteral("💼 工作")},
+        {QStringLiteral("[人事與行政]"), QStringLiteral("💼 工作")},
+        {QStringLiteral("[多媒體資源]"), QStringLiteral("🎬 媒體")},
+        {QStringLiteral("[會議與報告]"), QStringLiteral("💼 工作")},
+        {QStringLiteral("[其他雜項]"), QStringLiteral("📦 雜項")},
+    };
+    auto it = kLegacyToNew.constFind(t);
+    if (it != kLegacyToNew.cend()) return it.value();
+
+    for (auto jt = kLegacyToNew.cbegin(); jt != kLegacyToNew.cend(); ++jt) {
+        const QString inner = jt.key().mid(1, jt.key().size() - 2).trimmed();
+        if (QString::compare(t, inner, Qt::CaseInsensitive) == 0) return jt.value();
+    }
+    return QString();
+}
+
+static QString sfAiFolderTagForDrawerCanon(const QString &canonicalDrawerKey)
+{
+    const QString s = canonicalDrawerKey.trimmed();
     return QStringLiteral("[AI] ") + s;
 }
 
@@ -595,12 +713,38 @@ static QString sfNormalizeDrawerJsonKeyToCanon(const QString &raw)
     const QString t = raw.trimmed();
     for (const QString &ref : sfFixedAiClusterDrawerKeys()) {
         if (QString::compare(t, ref, Qt::CaseInsensitive) == 0) return ref;
-        const QString inner = ref.mid(1, ref.size() - 2).trimmed();
-        if (QString::compare(t, inner, Qt::CaseInsensitive) == 0) return ref;
+    }
+    static const QMap<QString, QString> kBracketToShort = {
+        {QStringLiteral("[工作與專案]"), QStringLiteral("💼 工作")},
+        {QStringLiteral("[學習與研究]"), QStringLiteral("📚 學習")},
+        {QStringLiteral("[財務與紀錄]"), QStringLiteral("💰 財務")},
+        {QStringLiteral("[多媒體與素材]"), QStringLiteral("🎬 媒體")},
+        {QStringLiteral("[系統與備份]"), QStringLiteral("⚙️ 系統")},
+        {QStringLiteral("[未分類雜項]"), QStringLiteral("📦 雜項")},
+    };
+    auto itb = kBracketToShort.constFind(t);
+    if (itb != kBracketToShort.cend()) return itb.value();
+    for (auto jt = kBracketToShort.cbegin(); jt != kBracketToShort.cend(); ++jt) {
+        const QString inner = jt.key().mid(1, jt.key().size() - 2).trimmed();
+        if (QString::compare(t, inner, Qt::CaseInsensitive) == 0) return jt.value();
         const QString withAi = QStringLiteral("[AI] ") + inner;
-        if (QString::compare(t, withAi, Qt::CaseInsensitive) == 0) return ref;
+        if (QString::compare(t, withAi, Qt::CaseInsensitive) == 0) return jt.value();
     }
     return QString();
+}
+
+static QString sfNormalizePersistedDrawerValue(const QString &vIn)
+{
+    QString v = vIn.trimmed();
+    if (v.startsWith(QStringLiteral("SF_DRAWER:")))
+        v = v.mid(QStringLiteral("SF_DRAWER:").size()).trimmed();
+    if (v.isEmpty() || v == QStringLiteral("__uncat__"))
+        return QStringLiteral("📦 雜項");
+    QString canon = sfNormalizeDrawerJsonKeyToCanon(v);
+    if (!canon.isEmpty()) return canon;
+    canon = sfLegacyAiDrawerKeyToCanon(v);
+    if (!canon.isEmpty()) return canon;
+    return QStringLiteral("📦 雜項");
 }
 
 static bool sfIsSyntheticAiDrawerFolderTag(const QString &t)
@@ -610,6 +754,80 @@ static bool sfIsSyntheticAiDrawerFolderTag(const QString &t)
         if (nt == sfAiFolderTagForDrawerCanon(dk)) return true;
     }
     return false;
+}
+
+static QString sfHeuristicDrawerKeyForAiTag(const QString &rawAiTag)
+{
+    const QString core = TagManager::stripAiPrefix(rawAiTag).trimmed();
+    if (core.isEmpty())
+        return QStringLiteral("📦 雜項");
+
+    const QString coreLower = core.toLower();
+
+    auto hitList = [&core, &coreLower](const QStringList &keys, bool asciiLower = false) {
+        for (const QString &kw : keys) {
+            if (kw.isEmpty()) continue;
+            if (asciiLower) {
+                if (coreLower.contains(kw.toLower())) return true;
+            } else if (core.contains(kw)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Priority: 學習 before 財務 (e.g. "統計" must not be pulled toward finance heuristics).
+    static const QStringList kStudy = {QStringLiteral("筆記"), QStringLiteral("研究"), QStringLiteral("論文"),
+                                       QStringLiteral("作業"), QStringLiteral("統計"), QStringLiteral("微積分"),
+                                       QStringLiteral("講義"), QStringLiteral("教材"), QStringLiteral("學校"),
+                                       QStringLiteral("考"), QStringLiteral("課"), QStringLiteral("題")};
+    static const QStringList kFin = {QStringLiteral("發票"), QStringLiteral("財務"), QStringLiteral("收據"),
+                                     QStringLiteral("薪資"), QStringLiteral("報價"), QStringLiteral("匯款"),
+                                     QStringLiteral("帳"), QStringLiteral("金")};
+    static const QStringList kWork = {QStringLiteral("專案"), QStringLiteral("企劃"), QStringLiteral("報告"),
+                                      QStringLiteral("會議"), QStringLiteral("合約"), QStringLiteral("履歷"),
+                                      QStringLiteral("公文"), QStringLiteral("簡報")};
+    static const QStringList kMedia = {QStringLiteral("照片"), QStringLiteral("影片"), QStringLiteral("素材"),
+                                       QStringLiteral("設計"), QStringLiteral("音樂"), QStringLiteral("音檔"),
+                                       QStringLiteral("錄音"), QStringLiteral("圖")};
+    static const QStringList kSys = {QStringLiteral("資料庫"), QStringLiteral("系統"), QStringLiteral("設定"),
+                                     QStringLiteral("備份"), QStringLiteral("日誌"), QStringLiteral("程式"),
+                                     QStringLiteral("環境"), QStringLiteral("軟體"), QStringLiteral("碼")};
+    static const QStringList kSysAscii = {QStringLiteral("sql"), QStringLiteral("db")};
+
+    if (hitList(kStudy)) return QStringLiteral("📚 學習");
+    if (hitList(kFin)) return QStringLiteral("💰 財務");
+    if (hitList(kWork)) return QStringLiteral("💼 工作");
+    if (hitList(kMedia)) return QStringLiteral("🎬 媒體");
+    if (hitList(kSys) || hitList(kSysAscii, true)) return QStringLiteral("⚙️ 系統");
+    return QStringLiteral("📦 雜項");
+}
+
+static TagClusterWorkerResult sfRunHeuristicTagClusterJob(TagManager *tm, QMutex *mx)
+{
+    QThread::msleep(800);
+    TagClusterWorkerResult r;
+    r.parseOk = true;
+    r.rawLlmText = QStringLiteral("(rule-based tag clustering)");
+    if (!tm || !mx)
+        return r;
+
+    QStringList leafTags;
+    {
+        QMutexLocker locker(mx);
+        for (const QString &t : tm->getAllTags()) {
+            const QString tt = t.trimmed();
+            if (!TagManager::hasAiPrefix(tt)) continue;
+            if (sfIsSyntheticAiDrawerFolderTag(tt)) continue;
+            leafTags.append(tt);
+        }
+    }
+
+    QHash<QString, QString> map;
+    for (const QString &tt : std::as_const(leafTags))
+        map.insert(tt, sfHeuristicDrawerKeyForAiTag(tt));
+    r.newAiTagToDrawerKey = std::move(map);
+    return r;
 }
 
 static QStringList orderedSystemTagWhitelistCanons()
@@ -719,7 +937,7 @@ void MainWindow::prependSingleFileToAnalysisQueueFront(const QString &absPath)
 
     QFileInfo finfo(p);
     if (!isAnalyzableFile(finfo)) return;
-    if (m_aiSummaryByPath.contains(p)) return;
+    if (pathHasUsableAnalysisSummary(p)) return;
 
     if (!m_currentAnalyzingFile.isEmpty() && m_currentAnalyzingFile == p) return;
 
@@ -753,7 +971,7 @@ void MainWindow::enqueuePriorityAnalyzeForFileIfNeeded(const QString &absPath)
     if (p.isEmpty()) return;
     QFileInfo fi(p);
     if (!isAnalyzableFile(fi)) return;
-    if (m_aiSummaryByPath.contains(p)) return;
+    if (pathHasUsableAnalysisSummary(p)) return;
 
     if (m_isBatchMode) {
         prependSingleFileToAnalysisQueueFront(p);
@@ -767,7 +985,7 @@ void MainWindow::enqueuePriorityAnalyzeForFileIfNeeded(const QString &absPath)
         return;
     }
 
-    if (!llamaEngine.isModelLoaded()) return;
+    if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) return;
 
     QTimer::singleShot(0, this, [this, p]() { analyzeFileForPath(p); });
 }
@@ -804,7 +1022,7 @@ void MainWindow::prependUnanalyzedFromFolderToAnalysisQueue(const QString &folde
         if (p.contains(QStringLiteral("/.smartfile")) || p.contains(QStringLiteral("\\.smartfile"))) continue;
         const QFileInfo finfo(p);
         if (!isAnalyzableFile(finfo)) continue;
-        if (m_aiSummaryByPath.contains(p)) continue;
+        if (pathHasUsableAnalysisSummary(p)) continue;
         found << p;
     }
     if (found.isEmpty()) {
@@ -1137,6 +1355,7 @@ void MainWindow::refreshFileAndFolderAnalysisIndicators()
             const QString path = QDir::cleanPath(it->data(Qt::UserRole).toString());
             if (path.isEmpty()) {
                 it->setData(FileItemDelegate::kSpinRole, QVariant());
+                it->setData(FileItemDelegate::kAnalysisStateRole, 0);
                 continue;
             }
 
@@ -1145,9 +1364,11 @@ void MainWindow::refreshFileAndFolderAnalysisIndicators()
                 st = 2;
             else if (m_isBatchMode && queued.contains(path))
                 st = 1;
-            else if (m_aiSummaryByPath.contains(path) || m_pendingResults.contains(path))
+            else if (pathHasUsableAnalysisSummary(path))
                 st = 3;
 
+            const int pre = pathHasUsableAnalysisSummary(path) ? 3 : 0;
+            it->setData(FileItemDelegate::kAnalysisStateRole, pre);
             it->setData(FileItemDelegate::kSpinRole, st > 0 ? QVariant(st) : QVariant());
         }
         fileList->viewport()->update();
@@ -1434,10 +1655,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_heroOmnibox->setPlaceholderText(QStringLiteral(
         "🔍 輸入關鍵字，或使用自然語言進行語意搜尋... (例如：幫我找出去年關於財務的報告)"));
 
+    m_cmbSearchMode = new QComboBox(m_workspaceTopBar);
+    m_cmbSearchMode->setFixedHeight(40);
+    m_cmbSearchMode->setMinimumWidth(220);
+    m_cmbSearchMode->addItem(QStringLiteral("索引: 當前資料夾（關鍵字）"), HeroSearchScope_LocalFolder);
+    m_cmbSearchMode->addItem(QStringLiteral("索引: 全域知識庫（AI 語意）"), HeroSearchScope_GlobalSemantic);
+    m_cmbSearchMode->setCurrentIndex(0);
+
     auto *heroField = new QWidget(m_workspaceTopBar);
     auto *heroFieldLay = new QHBoxLayout(heroField);
     heroFieldLay->setContentsMargins(0, 0, 0, 0);
     heroFieldLay->setSpacing(10);
+    heroFieldLay->addWidget(m_cmbSearchMode, 0, Qt::AlignVCenter);
     heroFieldLay->addWidget(m_heroOmnibox, 1);
 
     m_btnSemanticSearch = new QPushButton(QStringLiteral("🔍 搜尋"), m_workspaceTopBar);
@@ -1475,6 +1704,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     connect(m_heroOmnibox, &QLineEdit::textChanged, this, &MainWindow::onHeroOmniboxTextChanged);
     connect(m_heroOmnibox, &QLineEdit::returnPressed, this, &MainWindow::onHeroOmniboxReturnPressed);
     connect(m_btnSemanticSearch, &QPushButton::clicked, this, &MainWindow::onHeroOmniboxReturnPressed);
+    connect(m_cmbSearchMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onHeroSearchModeChanged);
 
     m_graphTab = new QWidget(this);
     auto *graphLayout = new QVBoxLayout(m_graphTab);
@@ -1605,11 +1835,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     watcher = new QFutureWatcher<std::string>(this);
     connect(watcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onAnalysisFinished);
 
-    m_consolidateWatcher = new QFutureWatcher<std::string>(this);
-    connect(m_consolidateWatcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onTagFolderClustersFinished);
+    m_consolidateWatcher = new QFutureWatcher<TagClusterWorkerResult>(this);
+    connect(m_consolidateWatcher, &QFutureWatcher<TagClusterWorkerResult>::finished, this, &MainWindow::onTagFolderClustersFinished);
 
-    m_semanticSearchWatcher = new QFutureWatcher<std::string>(this);
-    connect(m_semanticSearchWatcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onSemanticSearchFinished);
+    m_semanticSearchWatcher = new QFutureWatcher<SemanticSearchWorkerResult>(this);
+    connect(m_semanticSearchWatcher, &QFutureWatcher<SemanticSearchWorkerResult>::finished, this, &MainWindow::onSemanticSearchFinished);
 
     m_heroSemanticSpinTimer = new QTimer(this);
     m_heroSemanticSpinTimer->setInterval(120);
@@ -1633,7 +1863,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     initialScanWatcher = new QFutureWatcher<void>(this);
     connect(initialScanWatcher, &QFutureWatcher<void>::finished, this, &MainWindow::onBackgroundScanFinished);
 
-    llamaEngine.setCancelFlag(&cancelFlag);
+    m_llamaEngine = new LlamaEngine(this);
+    m_llamaEngine->setCancelFlag(&cancelFlag);
 
     mapsHomeFixAndSetRoot(QDir::homePath());
     navHistory.clear();
@@ -1651,7 +1882,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     } else {
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在自動載入模型… %1")).arg(modelPath));
         modelLoadWatcher->setFuture(QtConcurrent::run([this, modelPath]() {
-            return llamaEngine.loadModel(modelPath.toStdString());
+            return m_llamaEngine->loadModel(modelPath.toStdString());
         }));
     }
 
@@ -1766,7 +1997,7 @@ void MainWindow::openSettings() {
 
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在載入新模型… %1")).arg(newModelPath));
         modelLoadWatcher->setFuture(QtConcurrent::run([this, newModelPath]() {
-            return llamaEngine.loadModel(newModelPath.toStdString());
+            return m_llamaEngine->loadModel(newModelPath.toStdString());
         }));
     }
 }
@@ -1874,7 +2105,7 @@ void MainWindow::updateAllTexts() {
     if (m_actOpenFolder) m_actOpenFolder->setText(lm.getText(QStringLiteral("toolbar_open")));
     if (m_actSettings) m_actSettings->setText(lm.getText(QStringLiteral("toolbar_settings")));
 
-    llamaEngine.setOutputLanguage(lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("en_US")
+    m_llamaEngine->setOutputLanguage(lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("en_US")
                                                                                    : QStringLiteral("zh_TW"));
 
     if (btnAnalyzeFile) btnAnalyzeFile->setText(lm.getText(QStringLiteral("btn_analyze")));
@@ -1939,13 +2170,39 @@ void MainWindow::updateAllTexts() {
         cmbSort->setCurrentIndex(std::max(0, idx));
         cmbSort->blockSignals(false);
     }
-    if (m_heroOmnibox) {
+    if (m_cmbSearchMode) {
+        const int idx = m_cmbSearchMode->currentIndex();
+        m_cmbSearchMode->blockSignals(true);
+        m_cmbSearchMode->clear();
         if (lm.language() == LanguageManager::Language::EN_US) {
-            m_heroOmnibox->setPlaceholderText(QStringLiteral(
-                "🔍 Enter keywords or natural-language semantic search… (e.g. find last year’s finance reports)"));
+            m_cmbSearchMode->addItem(QStringLiteral("Scope: Current folder (keyword)"), HeroSearchScope_LocalFolder);
+            m_cmbSearchMode->addItem(QStringLiteral("Scope: Workspace (AI semantic)"), HeroSearchScope_GlobalSemantic);
         } else {
-            m_heroOmnibox->setPlaceholderText(QStringLiteral(
-                "🔍 輸入關鍵字，或使用自然語言進行語意搜尋... (例如：幫我找出去年關於財務的報告)"));
+            m_cmbSearchMode->addItem(QStringLiteral("索引: 當前資料夾（關鍵字）"), HeroSearchScope_LocalFolder);
+            m_cmbSearchMode->addItem(QStringLiteral("索引: 全域知識庫（AI 語意）"), HeroSearchScope_GlobalSemantic);
+        }
+        m_cmbSearchMode->setCurrentIndex(qBound(0, idx, m_cmbSearchMode->count() - 1));
+        m_cmbSearchMode->blockSignals(false);
+    }
+    if (m_heroOmnibox) {
+        const bool global =
+            m_cmbSearchMode && m_cmbSearchMode->currentData().toInt() == HeroSearchScope_GlobalSemantic;
+        if (lm.language() == LanguageManager::Language::EN_US) {
+            if (global) {
+                m_heroOmnibox->setPlaceholderText(QStringLiteral(
+                    "Describe what to find across the workspace; press Search or Enter to run AI semantic retrieval…"));
+            } else {
+                m_heroOmnibox->setPlaceholderText(QStringLiteral(
+                    "Filter files in the current folder by name, path, or tag text…"));
+            }
+        } else {
+            if (global) {
+                m_heroOmnibox->setPlaceholderText(QStringLiteral(
+                    "描述要在整個工作區尋找的內容；按「搜尋」或 Enter 觸發 AI 語意檢索…"));
+            } else {
+                m_heroOmnibox->setPlaceholderText(QStringLiteral(
+                    "依檔名、路徑或標籤文字即時篩選「當前資料夾」檔案…"));
+            }
         }
     }
     if (m_btnSemanticSearch) {
@@ -2002,6 +2259,11 @@ void MainWindow::updateAllTexts() {
             const QString role = node->data(0, Qt::UserRole).toString();
             if (role == QStringLiteral("ALL")) {
                 node->setText(0, allFilesText);
+            } else if (node->data(0, Qt::UserRole + 3).toInt() == 1
+                       && role.startsWith(QStringLiteral("SF_DRAWER:"))) {
+                const QString drawerBracketKey = role.mid(QStringLiteral("SF_DRAWER:").size());
+                const int n = node->data(0, Qt::UserRole + 1).toInt();
+                node->setText(0, QStringLiteral("📁 %1 (%2)").arg(drawerBracketKey).arg(n));
             } else if (!role.isEmpty()) {
                 const int n = node->data(0, Qt::UserRole + 1).toInt();
                 const QString canon = normalizeDisplayTag(role);
@@ -2069,7 +2331,11 @@ void MainWindow::updateAllTexts() {
     }
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow()
+{
+    delete m_llamaEngine;
+    m_llamaEngine = nullptr;
+}
 
 void MainWindow::onBackgroundScanProgress() {
     updateTagListCountsOnly();
@@ -2116,7 +2382,15 @@ void MainWindow::setupFourColumnLayout() {
     m_tagTabWidget = new QTabWidget(this);
     m_systemTagListWidget = new QListWidget(this);
     m_systemTagListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_systemTagListWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_systemTagListWidget->setWrapping(false);
     m_aiTagTreeWidget = new AiTagDropTreeWidget(this, this);
+    m_aiTagTreeWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_aiTagTreeWidget->setWordWrap(false);
+    if (QHeaderView *tagHdr = m_aiTagTreeWidget->header()) {
+        tagHdr->setStretchLastSection(false);
+        tagHdr->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    }
     connect(m_systemTagListWidget, &QListWidget::itemClicked, this, &MainWindow::onTagSelected);
     connect(m_aiTagTreeWidget, &QTreeWidget::itemClicked, this, &MainWindow::onAiTagTreeItemClicked);
     m_tagTabWidget->addTab(m_systemTagListWidget, LanguageManager::instance().getText(QStringLiteral("預設分類 (System Tags)")));
@@ -3389,6 +3663,20 @@ bool isJunkFilename(const QString &fileNameLower)
     return kExact.contains(fileNameLower);
 }
 
+bool sfSemanticWorkerIsAnalyzableFile(const QFileInfo &fi)
+{
+    if (!fi.exists() || fi.isDir()) return false;
+    const QString fnLower = fi.fileName().toLower();
+    if (isJunkFilename(fnLower)) return false;
+    const QString sfx = fi.suffix().toLower();
+    if (!sfx.isEmpty() && junkFileSuffixes().contains(sfx)) return false;
+    if (fi.isSymLink()) {
+        const QString target = fi.symLinkTarget();
+        if (!target.isEmpty() && QFileInfo(target).isDir()) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 bool MainWindow::isAnalyzableFile(const QFileInfo &fi) const {
@@ -3406,6 +3694,23 @@ bool MainWindow::isAnalyzableFile(const QFileInfo &fi) const {
         if (!target.isEmpty() && QFileInfo(target).isDir()) return false;
     }
     return true;
+}
+
+bool MainWindow::pathHasUsableAnalysisSummary(const QString &absPathIn) const
+{
+    const QString path = QDir::cleanPath(absPathIn);
+    if (path.isEmpty()) return false;
+    if (m_aiSummaryByPath.contains(path)) {
+        if (sfSummaryAcceptableForStorage(m_aiSummaryByPath.value(path)))
+            return true;
+    }
+    const auto pit = m_pendingResults.constFind(path);
+    if (pit != m_pendingResults.cend()) {
+        const QString s = pit.value().value(QStringLiteral("summary")).toString();
+        if (sfSummaryAcceptableForStorage(s))
+            return true;
+    }
+    return false;
 }
 
 void MainWindow::scanFiles() {
@@ -3562,6 +3867,11 @@ void MainWindow::renderFileListBatch(int count) {
 
     const int start = m_currentLoadedCount;
     const int end = start + take;
+    auto stampAnalysisBadge = [this](QListWidgetItem *item, const QString &absPath) {
+        if (!item) return;
+        const int pre = pathHasUsableAnalysisSummary(QDir::cleanPath(absPath)) ? 3 : 0;
+        item->setData(FileItemDelegate::kAnalysisStateRole, pre);
+    };
     for (int i = start; i < end; ++i) {
         const QString filePath = m_pendingFilesToDisplay[static_cast<size_t>(i)];
         const QFileInfo fi(filePath);
@@ -3585,6 +3895,7 @@ void MainWindow::renderFileListBatch(int count) {
             QFileIconProvider ip;
             item->setIcon(ip.icon(fi));
             fileList->addItem(item);
+            stampAnalysisBadge(item, filePath);
         } else if (fileListMode == FileListMode::VirtualTag) {
             QString parentPath = fi.absolutePath();
             QDir workspaceDir(rootPath);
@@ -3598,6 +3909,7 @@ void MainWindow::renderFileListBatch(int count) {
             item->setData(Qt::UserRole, filePath);            // 絕對路徑（雙擊用）
             item->setData(Qt::UserRole + 1, relativePath);    // 相對工作區路徑（Delegate 用）
             fileList->addItem(item);
+            stampAnalysisBadge(item, filePath);
         } else {
             const QString fileName = fi.fileName();
             auto *item = new QListWidgetItem(fileName, fileList);
@@ -3608,6 +3920,7 @@ void MainWindow::renderFileListBatch(int count) {
                     rel = fileName;
                 item->setData(Qt::UserRole + 1, rel);
             }
+            stampAnalysisBadge(item, filePath);
         }
     }
 
@@ -3668,8 +3981,7 @@ void MainWindow::updateTagListCountsOnly() {
                     if (ch) sum += ch->data(0, Qt::UserRole + 1).toInt();
                 }
                 const QString dk = role.mid(QStringLiteral("SF_DRAWER:").size());
-                const QString label =
-                    (dk == kAiDrawerUncategorizedKey()) ? QStringLiteral("[未分類雜項]") : dk;
+                const QString label = dk;
                 it->setData(0, Qt::UserRole + 1, sum);
                 it->setText(0, QStringLiteral("📁 %1 (%2)").arg(label).arg(sum));
                 for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
@@ -3705,6 +4017,18 @@ void MainWindow::updateTagListCountsOnly() {
 
 void MainWindow::updateTagList() {
     tagManager.repairMalformedTagKeys();
+
+    QSet<QString> expandedDrawerRoles;
+    if (m_aiTagTreeWidget) {
+        for (int ti = 0; ti < m_aiTagTreeWidget->topLevelItemCount(); ++ti) {
+            QTreeWidgetItem *tl = m_aiTagTreeWidget->topLevelItem(ti);
+            if (!tl) continue;
+            const QString role = tl->data(0, Qt::UserRole).toString();
+            if (role == QStringLiteral("ALL")) continue;
+            if (tl->isExpanded())
+                expandedDrawerRoles.insert(role);
+        }
+    }
 
     if (m_systemTagListWidget) m_systemTagListWidget->clear();
     if (m_aiTagTreeWidget) m_aiTagTreeWidget->clear();
@@ -3789,12 +4113,12 @@ void MainWindow::updateTagList() {
         QHash<QString, QVector<QString>> drawerToLeaves;
         for (const QString &dk : sfFixedAiClusterDrawerKeys())
             drawerToLeaves.insert(dk, {});
-        drawerToLeaves.insert(kAiDrawerUncategorizedKey(), {});
 
         for (const QString &leaf : std::as_const(aiLeaves)) {
-            QString dk = m_aiTagToDrawerKey.value(leaf);
+            QString dk = sfNormalizePersistedDrawerValue(m_aiTagToDrawerKey.value(leaf));
+            static const QString kFallbackDrawer = QStringLiteral("📦 雜項");
             if (dk.isEmpty() || !drawerToLeaves.contains(dk))
-                dk = kAiDrawerUncategorizedKey();
+                dk = kFallbackDrawer;
             drawerToLeaves[dk].append(leaf);
         }
 
@@ -3846,7 +4170,13 @@ void MainWindow::updateTagList() {
         for (const QString &dk : sfFixedAiClusterDrawerKeys())
             makeDrawerRoot(dk, dk);
 
-        makeDrawerRoot(kAiDrawerUncategorizedKey(), QStringLiteral("[未分類雜項]"));
+        for (int ti = 0; ti < m_aiTagTreeWidget->topLevelItemCount(); ++ti) {
+            QTreeWidgetItem *tl = m_aiTagTreeWidget->topLevelItem(ti);
+            if (!tl) continue;
+            const QString role = tl->data(0, Qt::UserRole).toString();
+            if (expandedDrawerRoles.contains(role))
+                tl->setExpanded(true);
+        }
     }
 
     syncTagFilterFromTagList();
@@ -3959,8 +4289,11 @@ void MainWindow::syncTagListFromTagFilter() {
 }
 
 void MainWindow::filterFiles() {
+    if (!fileList) return;
+    const bool heroGlobalSemantic =
+        m_cmbSearchMode && m_cmbSearchMode->currentData().toInt() == HeroSearchScope_GlobalSemantic;
     const QString query =
-        m_heroOmnibox ? m_heroOmnibox->text().trimmed().toLower() : QString();
+        (!heroGlobalSemantic && m_heroOmnibox) ? m_heroOmnibox->text().trimmed().toLower() : QString();
     const QString tagFilter = cmbTagFilter->currentData().toString();
 
     const bool useSemanticSubset =
@@ -4021,20 +4354,48 @@ void MainWindow::filterFiles() {
 
 void MainWindow::onHeroOmniboxReturnPressed()
 {
+    const bool heroGlobalSemantic =
+        m_cmbSearchMode && m_cmbSearchMode->currentData().toInt() == HeroSearchScope_GlobalSemantic;
+    if (!heroGlobalSemantic)
+        return;
+
     QObject *snd = sender();
     if (snd != m_btnSemanticSearch && m_btnSemanticSearch)
         m_btnSemanticSearch->animateClick();
     runHeroSemanticSearchQuery();
 }
 
+void MainWindow::onHeroSearchModeChanged()
+{
+    if (!m_heroOmnibox) return;
+    m_heroOmnibox->clear();
+    disableSemanticOverlays();
+    setHeroSemanticBusy(false);
+    activeVirtualTag.clear();
+    fileListMode = FileListMode::PhysicalFolder;
+    reloadCurrentFileListPanel();
+}
+
 void MainWindow::onHeroOmniboxTextChanged(const QString &text)
 {
+    const bool heroGlobalSemantic =
+        m_cmbSearchMode && m_cmbSearchMode->currentData().toInt() == HeroSearchScope_GlobalSemantic;
+
+    if (text.trimmed().isEmpty()) {
+        clearSemanticSearchFilter();
+        if (!heroGlobalSemantic)
+            filterFiles();
+        return;
+    }
+
     if (m_semanticFilterActive) {
         const QString a = text.trimmed();
         const QString b = m_semanticLockedQuery.trimmed();
         if (!m_semanticLockedQuery.isEmpty() && a != b)
             clearSemanticSearchFilter();
     }
+    if (heroGlobalSemantic)
+        return;
     filterFiles();
 }
 
@@ -4079,7 +4440,8 @@ void MainWindow::loadAiUiDrawerAssignments()
     const QJsonObject o = d.object().value(QStringLiteral("tagToDrawer")).toObject();
     for (auto it = o.begin(); it != o.end(); ++it) {
         const QString k = it.key();
-        const QString v = it.value().toString();
+        const QString vRaw = it.value().toString();
+        const QString v = sfNormalizePersistedDrawerValue(vRaw);
         if (!k.isEmpty() && !v.isEmpty()) m_aiTagToDrawerKey.insert(k, v);
     }
 }
@@ -4157,60 +4519,6 @@ void MainWindow::reloadCurrentFileListPanel()
         populateVirtualTagFiles(activeVirtualTag);
 }
 
-QString MainWindow::buildWorkspaceSemanticIdLines(int maxFiles)
-{
-    m_semanticSearchIdToPath.clear();
-    m_semanticValidWorkspacePaths.clear();
-    QStringList lines;
-    if (rootPath.trimmed().isEmpty()) return {};
-    const QString root = QDir::cleanPath(rootPath);
-    QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
-    int id = 0;
-    while (it.hasNext()) {
-        if (id >= maxFiles) break;
-        const QString absPath = QDir::cleanPath(it.next());
-        const QFileInfo fi(absPath);
-        if (!isAnalyzableFile(fi)) continue;
-        ++id;
-        m_semanticSearchIdToPath.insert(id, absPath);
-        m_semanticValidWorkspacePaths.insert(absPath);
-        const QString fn = baseName(absPath);
-        QString relFromWs = QDir(root).relativeFilePath(absPath);
-        if (relFromWs == QLatin1String(".") || relFromWs.isEmpty())
-            relFromWs = fn;
-
-        if (m_aiSummaryByPath.contains(absPath)) {
-            QString sum = m_aiSummaryByPath.value(absPath).trimmed();
-            if (sum.size() > 420)
-                sum = sum.left(420) + QStringLiteral("…");
-            QStringList tagParts;
-            {
-                QMutexLocker locker(&tagMutex);
-                for (const QString &t : tagManager.getTags(absPath)) {
-                    const QString tt = t.trimmed();
-                    if (!tt.isEmpty())
-                        tagParts.append(tt);
-                }
-            }
-            QString tagsJoined = tagParts.join(QLatin1String(", "));
-            if (tagsJoined.size() > 220)
-                tagsJoined = tagsJoined.left(220) + QStringLiteral("…");
-            if (tagsJoined.isEmpty())
-                tagsJoined = QStringLiteral("(無標籤)");
-            if (sum.isEmpty())
-                sum = QStringLiteral("(無摘要文字)");
-            lines.append(QStringLiteral("[ID: %1] 路徑: %2 | 檔名: %3 | 摘要: %4 | 標籤: %5")
-                             .arg(id)
-                             .arg(relFromWs, fn, sum, tagsJoined));
-        } else {
-            lines.append(QStringLiteral("[ID: %1] 路徑: %2 | 檔名: %3 | (尚未分析) 僅能依檔名與路徑推論")
-                             .arg(id)
-                             .arg(relFromWs, fn));
-        }
-    }
-    return lines.join(QLatin1Char('\n'));
-}
-
 void MainWindow::setHeroSemanticBusy(bool busy)
 {
     if (m_heroSearchBusyChip) {
@@ -4226,6 +4534,8 @@ void MainWindow::setHeroSemanticBusy(bool busy)
         m_heroOmnibox->setEnabled(!busy);
         m_heroOmnibox->setReadOnly(busy);
     }
+    if (m_cmbSearchMode)
+        m_cmbSearchMode->setEnabled(!busy);
     if (m_fileListPageStack)
         m_fileListPageStack->setCurrentIndex(busy ? 1 : 0);
     if (m_heroSemanticSpinTimer) {
@@ -4236,38 +4546,16 @@ void MainWindow::setHeroSemanticBusy(bool busy)
     }
 }
 
-QString MainWindow::buildSemanticRetrieverPrompt(const QString &userQuery, const QString &idContextLines) const
-{
-    return QStringLiteral(
-               "System:\n"
-               "You are a precise file retrieval assistant. Your reply MUST be ONLY a JSON array of integers — no object wrapper, "
-               "no markdown fences, no explanations, no file paths or names.\n"
-               "Correct format example: [1, 5, 12]\n"
-               "Pick 5 to 10 file IDs from the list below that best match the user query (fewer if fewer are relevant; at least 1 if any match). "
-               "Each integer MUST be copied exactly from an [ID: N] line in the file list. Never invent IDs.\n\n"
-               "User query:\n%1\n\n"
-               "Files (numeric IDs only; use these IDs in your answer):\n%2\n")
-        .arg(userQuery, idContextLines);
-}
-
 void MainWindow::runHeroSemanticSearchQuery()
 {
     if (!m_heroOmnibox) return;
     const QString t = m_heroOmnibox->text();
-    bool hasWs = false;
-    for (QChar c : t) {
-        if (c.isSpace()) {
-            hasWs = true;
-            break;
-        }
-    }
-    const bool wantSemantic = t.trimmed().length() > 10 || hasWs;
-    if (!wantSemantic) {
+    if (t.trimmed().isEmpty()) {
         clearSemanticSearchFilter();
         return;
     }
 
-    if (!llamaEngine.isModelLoaded()) {
+    if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
         QMessageBox::warning(this,
                              QStringLiteral("Smartflie"),
                              LanguageManager::instance().getText(QStringLiteral("模型自動載入失敗 (Auto-load failed)")));
@@ -4286,91 +4574,93 @@ void MainWindow::runHeroSemanticSearchQuery()
     if (m_semanticSearchWatcher && m_semanticSearchWatcher->isRunning())
         return;
 
-    m_semanticSearchIdToPath.clear();
-    m_semanticValidWorkspacePaths.clear();
+    const QString rootSnap = QDir::cleanPath(rootPath);
+    if (rootSnap.isEmpty()) {
+        if (lblStatus)
+            lblStatus->setText(QStringLiteral("⚠️ 尚未設定工作區"));
+        return;
+    }
 
-    const int maxFiles = 180;
-    const QString idLines = buildWorkspaceSemanticIdLines(maxFiles);
-    if (idLines.isEmpty()) {
+    if (!sfSemanticWorkspaceHasAnalyzableFile(rootSnap, 4000)) {
         if (lblStatus)
             lblStatus->setText(QStringLiteral("⚠️ 目前清單無檔案可供語意搜尋"));
         return;
     }
 
+    m_semanticSearchIdToPath.clear();
+    m_semanticValidWorkspacePaths.clear();
+
+    if (!m_semanticSearchWatcher) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("內部錯誤：語意搜尋尚未初始化。"));
+        return;
+    }
+
+    const int maxFiles = 30;
+    const QHash<QString, QString> summarySnap = m_aiSummaryByPath;
     const QString userQuery = t.trimmed();
-    const QString fullPrompt = buildSemanticRetrieverPrompt(userQuery, idLines);
 
     setHeroSemanticBusy(true);
     if (lblStatus)
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("語意搜尋進行中…")));
 
-    if (!m_semanticSearchWatcher)
-        return;
-
-    m_semanticSearchWatcher->setFuture(QtConcurrent::run([this, fullPrompt]() {
-        return llamaEngine.generateResponse(fullPrompt.toStdString());
-    }));
+    m_semanticSearchWatcher->setFuture(QtConcurrent::run(
+        [rootSnap, maxFiles, summarySnap, userQuery](TagManager *tm, QMutex *mx, LlamaEngine *eng) -> SemanticSearchWorkerResult {
+            try {
+                return sfRunSemanticSearchWorker(rootSnap, maxFiles, summarySnap, tm, mx, eng, userQuery);
+            } catch (const std::exception &e) {
+                SemanticSearchWorkerResult errOut;
+                errOut.rawLlmText = QStringLiteral("Error: %1").arg(QString::fromUtf8(e.what()));
+                return errOut;
+            } catch (...) {
+                SemanticSearchWorkerResult errOut;
+                errOut.rawLlmText = QStringLiteral("Error: semantic search worker failed (unknown exception)");
+                return errOut;
+            }
+        },
+        &tagManager, &tagMutex, m_llamaEngine));
 }
 
 void MainWindow::onSemanticSearchFinished()
 {
-    auto endBusy = [this]() { setHeroSemanticBusy(false); };
+    const QScopeGuard busyReset([this]() { setHeroSemanticBusy(false); });
 
-    if (!m_semanticSearchWatcher) {
-        endBusy();
+    if (!m_semanticSearchWatcher)
         return;
-    }
 
-    QString raw;
+    SemanticSearchWorkerResult res;
     try {
-        raw = QString::fromStdString(m_semanticSearchWatcher->result());
+        res = m_semanticSearchWatcher->result();
     } catch (const std::exception &e) {
-        endBusy();
-        QMessageBox::warning(this, QStringLiteral("Smartflie"),
-                             QStringLiteral("語意搜尋結果讀取失敗：%1").arg(QString::fromUtf8(e.what())));
+        qWarning() << "[semantic-search] failed to read worker result:" << e.what();
         return;
     } catch (...) {
-        endBusy();
-        QMessageBox::warning(this, QStringLiteral("Smartflie"),
-                             QStringLiteral("語意搜尋結果讀取時發生未知錯誤。"));
+        qWarning() << "[semantic-search] failed to read worker result (unknown exception)";
         return;
     }
 
-    if (raw.size() > 400000)
-        raw.truncate(400000);
-
-    if (raw.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive)) {
-        endBusy();
-        QMessageBox::critical(this, QStringLiteral("Smartflie"), raw);
-        return;
-    }
-
-    QVector<int> ids;
-    try {
-        ids = parseSemanticRetrieverIdList(raw);
-    } catch (...) {
-        ids.clear();
-    }
+    if (res.rawLlmText.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive))
+        qWarning() << "[semantic-search] LLM reported error (fallback may have been used):" << res.rawLlmText;
 
     QSet<QString> picked;
-    for (int id : ids) {
-        const QString p = m_semanticSearchIdToPath.value(id);
-        if (!p.isEmpty()) picked.insert(QDir::cleanPath(p));
+    for (const QString &p : std::as_const(res.pickedAbsolutePaths)) {
+        if (!p.isEmpty())
+            picked.insert(QDir::cleanPath(p));
     }
 
     if (picked.isEmpty()) {
-        endBusy();
+        qWarning() << "[semantic-search] no paths after worker (unexpected empty workspace?)";
         if (lblStatus)
-            lblStatus->setText(QStringLiteral("⚠️ 語意搜尋未解析出有效檔案 ID，請換個描述再試"));
+            lblStatus->setText(QStringLiteral("⚠️ 語意搜尋沒有可顯示的檔案（工作區可能為空）。"));
         return;
     }
 
     m_semanticVisiblePaths = picked;
+    m_semanticSearchIdToPath = res.idToPathSnapshot;
+    m_semanticValidWorkspacePaths = res.validWorkspacePathsSnapshot;
     m_semanticFilterActive = true;
     m_semanticLockedQuery = m_heroOmnibox ? m_heroOmnibox->text().trimmed() : QString();
     fileListMode = FileListMode::SemanticResults;
     populateSemanticResultFiles();
-    endBusy();
 
     if (lblStatus) {
         lblStatus->setText(QStringLiteral("✅ 語意搜尋完成，已為您找到最相關的資料。"));
@@ -4471,8 +4761,8 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     txtPreviewText->setVisible(false);
     if (m_aiSummaryEdit) {
         const QString s = m_aiSummaryByPath.value(absPath).trimmed();
-        if (s.isEmpty()) {
-            m_aiSummaryEdit->clear(); // show placeholder "尚未分析"
+        if (!sfSummaryAcceptableForStorage(s)) {
+            m_aiSummaryEdit->clear();
         } else {
             m_aiSummaryEdit->setPlainText(s);
         }
@@ -4520,7 +4810,7 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
         return;
     }
 
-    if (mt.name().startsWith(QStringLiteral("text/")) || suffix == QStringLiteral("md") || suffix == QStringLiteral("txt") || suffix == QStringLiteral("log") || suffix == QStringLiteral("json") || suffix == QStringLiteral("xml") || suffix == QStringLiteral("yaml") || suffix == QStringLiteral("yml") || suffix == QStringLiteral("cpp") || suffix == QStringLiteral("h") || suffix == QStringLiteral("py") || suffix == QStringLiteral("js") || suffix == QStringLiteral("ts")) {
+    if (mt.name().startsWith(QStringLiteral("text/")) || plainTextFileSuffixes().contains(suffix)) {
         txtPreviewText->setVisible(true);
         std::ifstream f(absPath.toStdString(), std::ios::binary);
         if (!f.is_open()) {
@@ -4755,16 +5045,27 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
         return;
     }
 
-    if (!llamaEngine.isModelLoaded()) {
+    if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
         // If we're auto-loading in background, wait (blocking) to avoid "Model not loaded" race.
         if (modelLoadWatcher && modelLoadWatcher->isRunning()) {
             lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("等待模型載入完成…")));
             modelLoadWatcher->future().waitForFinished();
         }
-        if (!llamaEngine.isModelLoaded()) {
+        if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
             QMessageBox::warning(this, QStringLiteral("Model"), QStringLiteral("模型尚未載入"));
             return;
         }
+    }
+
+    if (m_consolidateWatcher && m_consolidateWatcher->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 QStringLiteral("AI 標籤分類進行中，請稍後再試分析。"));
+        return;
+    }
+    if (m_semanticSearchWatcher && m_semanticSearchWatcher->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 QStringLiteral("語意搜尋進行中，請稍後再試分析。"));
+        return;
     }
 
     cancelFlag.store(false);
@@ -4834,7 +5135,7 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
 
     QFuture<std::string> future = QtConcurrent::run([this, filename, content, rejectedTagsCsv, existingTags, contentReadable, suffix]() {
         // existingTags param is used for "historical tags"; rejectedTagsCsv used to constrain outputs
-        return llamaEngine.suggestTags(filename.toStdString(),
+        return m_llamaEngine->suggestTags(filename.toStdString(),
                                       content,
                                       rejectedTagsCsv.toStdString(),
                                       existingTags.toStdString(),
@@ -4994,7 +5295,8 @@ void MainWindow::collectUnanalyzedPathsFromWorkspace(int maxFiles, QStringList *
             seen.insert(p);
             const QFileInfo finfo(p);
             if (!isAnalyzableFile(finfo)) continue;
-            if (m_aiSummaryByPath.contains(p)) continue;
+            if (!sfSuffixEligibleForBackgroundAutoAnalysis(finfo)) continue;
+            if (pathHasUsableAnalysisSummary(p)) continue;
             *out << p;
             if (out->size() >= maxFiles) return;
         }
@@ -5281,7 +5583,7 @@ void MainWindow::onBackgroundAutoAnalyzeDebounce()
         m_bgAnalyzeQueueRetries = 0;
         return;
     }
-    if (!llamaEngine.isModelLoaded()) {
+    if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
         m_bgAnalyzeQueueRetries = 0;
         return;
     }
@@ -5357,6 +5659,13 @@ void MainWindow::beginBatchAnalysisUi()
 void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached, const QString &contentHashHex)
 {
     const QJsonObject copy = QJsonDocument::fromJson(QJsonDocument(cached).toJson()).object();
+    const QString summary = copy.value(QStringLiteral("summary")).toString().trimmed();
+    if (!sfSummaryAcceptableForStorage(summary)) {
+        qWarning() << "[analyze-cache] skip apply (invalid summary) for" << fp;
+        if (m_isBatchMode && !contentHashHex.isEmpty())
+            recordBatchPathForContentHash(contentHashHex, fp);
+        return;
+    }
 
     if (m_isBatchMode) {
         m_pendingResults.insert(fp, copy);
@@ -5364,8 +5673,7 @@ void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObj
         return;
     }
 
-    const QString summary = copy.value(QStringLiteral("summary")).toString().trimmed();
-    if (!summary.isEmpty()) m_aiSummaryByPath.insert(fp, summary);
+    m_aiSummaryByPath.insert(fp, summary);
 
     {
         QMutexLocker locker(&tagMutex);
@@ -5513,6 +5821,9 @@ void MainWindow::flushPendingBatchResults() {
         const QJsonObject obj = it.value();
         if (obj.value(QStringLiteral("skip_content_hash")).toBool())
             continue;
+        const QString sum = obj.value(QStringLiteral("summary")).toString().trimmed();
+        if (!sfSummaryAcceptableForStorage(sum))
+            continue;
         const QString hx = sha256HexOfFile(fp);
         if (!hx.isEmpty()) {
             tagManager.recordHashAnalysis(hx, obj, false);
@@ -5525,9 +5836,9 @@ void MainWindow::flushPendingBatchResults() {
         const QJsonObject obj = it.value();
 
         const QString summary = obj.value(QStringLiteral("summary")).toString().trimmed();
-        if (!summary.isEmpty()) {
-            m_aiSummaryByPath.insert(fp, summary);
-        }
+        if (!sfSummaryAcceptableForStorage(summary))
+            continue;
+        m_aiSummaryByPath.insert(fp, summary);
 
         const bool manualTags = obj.value(QStringLiteral("tags_are_manual")).toBool(false);
         const QJsonValue tagsV = obj.value(QStringLiteral("tags"));
@@ -5553,7 +5864,8 @@ void MainWindow::onAnalysisFinished() {
 
     if (raw.rfind("Error:", 0) == 0) {
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析失敗")));
-        QMessageBox::critical(this, QStringLiteral("Error"), qRaw);
+        qWarning() << "[analyze]" << qRaw;
+        if (!fp.isEmpty()) m_aiSummaryByPath.remove(fp);
         if (m_isBatchMode) {
             ++m_batchCompletedCount;
             setUiBusy(false);
@@ -5642,7 +5954,7 @@ void MainWindow::onAnalysisFinished() {
             const QJsonObject obj = doc.object();
 
             const QString s = obj.value(QStringLiteral("summary")).toString().trimmed();
-            if (summary.isEmpty() && !s.isEmpty()) summary = s;
+            if (summary.isEmpty() && sfSummaryAcceptableForStorage(s)) summary = s;
 
             const QJsonValue tagsV = obj.value(QStringLiteral("tags"));
             if (tagsV.isArray()) {
@@ -5657,7 +5969,7 @@ void MainWindow::onAnalysisFinished() {
                 }
             }
 
-            if (!summary.isEmpty() && tagsList.size() >= 3) break;
+            if (sfSummaryAcceptableForStorage(summary) && tagsList.size() >= 3) break;
         }
 
         if (!tagsList.isEmpty()) {
@@ -5677,9 +5989,12 @@ void MainWindow::onAnalysisFinished() {
         }
     }
 
-    // Fallback: treat whole raw as summary + tags via legacy sanitizer
-    if (summary.isEmpty()) summary = qRaw.trimmed();
-    if (tags.empty()) {
+    if (!sfSummaryAcceptableForStorage(summary)) {
+        const QString rx = sfExtractSummaryRegexFallback(qRaw);
+        if (!rx.isEmpty()) summary = rx;
+    }
+
+    if (tags.empty() && sfSummaryAcceptableForStorage(summary)) {
         // Fallback tags: still enforce hard limits to avoid long-sentence hallucinations.
         const auto rawTags = sanitizeAiTags(qRaw);
         std::vector<QString> filtered;
@@ -5710,11 +6025,28 @@ void MainWindow::onAnalysisFinished() {
         return;
     }
 
+    if (!sfSummaryAcceptableForStorage(summary)) {
+        m_aiSummaryByPath.remove(fp);
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析失敗")));
+        qWarning() << "[analyze] invalid or empty summary; not persisting for" << fp;
+        if (m_isBatchMode) {
+            ++m_batchCompletedCount;
+            setUiBusy(false);
+            updateBackgroundStatusLabel();
+            QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
+        }
+        m_currentAnalyzingFile.clear();
+        refreshCurrentAnalysisTargetUi();
+        clearAnalysisWorkFlagsAndSyncUi();
+        refreshFileAndFolderAnalysisIndicators();
+        return;
+    }
+
     QString persistedHash;
     QJsonObject persistedCache;
     {
         const QString hx = sha256HexOfFile(fp);
-        if (!hx.isEmpty() && (!summary.isEmpty() || !tags.empty())) {
+        if (!hx.isEmpty() && sfSummaryAcceptableForStorage(summary)) {
             QJsonObject cache;
             cache.insert(QStringLiteral("summary"), summary);
             QJsonArray a;
@@ -5801,86 +6133,32 @@ void MainWindow::onAnalysisFinished() {
 
 void MainWindow::generateTagFoldersWithAI() {
     if (m_isConsolidatingTags) return;
-    if (!llamaEngine.isModelLoaded()) {
-        QMessageBox::warning(this,
-                             QStringLiteral("Smartflie"),
-                             LanguageManager::instance().getText(QStringLiteral("模型自動載入失敗 (Auto-load failed)")));
+    if (watcher && watcher->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 LanguageManager::instance().getText(
+                                     QStringLiteral("分析進行中，請稍後再試 AI 標籤分類。")));
+        return;
+    }
+    if (m_semanticSearchWatcher && m_semanticSearchWatcher->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 QStringLiteral("語意搜尋進行中，請稍後再試 AI 標籤分類。"));
         return;
     }
 
-    struct TagCount {
-        QString tag;
-        int count = 0;
-    };
-    QVector<TagCount> ranked;
-    QSet<QString> seen;
+    int aiLeafCount = 0;
     {
-        std::vector<QString> rawTags;
-        {
-            QMutexLocker locker(&tagMutex);
-            rawTags = tagManager.getAllTags();
-        }
-        for (const QString &t : rawTags) {
+        QMutexLocker locker(&tagMutex);
+        for (const QString &t : tagManager.getAllTags()) {
             const QString tt = t.trimmed();
-            if (!TagManager::hasAiPrefix(tt) || seen.contains(tt)) continue;
-            seen.insert(tt);
-            int n = 0;
-            {
-                QMutexLocker locker(&tagMutex);
-                n = static_cast<int>(tagManager.getFilesByTag(tt).size());
-            }
-            ranked.push_back({tt, n});
+            if (!TagManager::hasAiPrefix(tt)) continue;
+            if (sfIsSyntheticAiDrawerFolderTag(tt)) continue;
+            ++aiLeafCount;
         }
     }
-
-    std::sort(ranked.begin(), ranked.end(), [](const TagCount &a, const TagCount &b) {
-        if (a.count != b.count) return a.count > b.count;
-        return a.tag.localeAwareCompare(b.tag) < 0;
-    });
-
-    QStringList aiTags;
-    const int cap = qMin(100, ranked.size());
-    for (int i = 0; i < cap; ++i) aiTags << ranked[i].tag;
-
-    if (aiTags.size() < 2) return;
+    if (aiLeafCount < 2) return;
 
     m_isConsolidatingTags = true;
     updateAllTexts();
-
-    auto &lm = LanguageManager::instance();
-
-    const QString drawersBlock = QStringLiteral(
-        "[營運管理]\n"
-        "[技術與開發]\n"
-        "[財務與法務]\n"
-        "[行銷與企劃]\n"
-        "[人事與行政]\n"
-        "[多媒體資源]\n"
-        "[會議與報告]\n"
-        "[其他雜項]\n");
-
-    const QString systemPromptEn = QStringLiteral(
-        "You are a constrained taxonomy assistant. You receive up to 100 existing AI tags (each begins with [AI]). "
-        "You MUST assign each tag you output to EXACTLY ONE of the following EIGHT JSON keys. Keys MUST match character-for-character (including square brackets):\n"
-        "%1"
-        "Return ONLY one JSON object mapping each key to a JSON array of tag strings copied EXACTLY from the input list. "
-        "ALL eight keys MUST appear. Use [] for categories with no tags. Each input tag appears at most once overall. "
-        "If a tag fits nowhere, omit it. No markdown, no commentary.")
-        .arg(drawersBlock);
-
-    const QString systemPromptZh = QStringLiteral(
-        "你是一位「受控分類」助理。以下最多 100 個既有的 AI 標籤（每個皆含 [AI] 前綴）。"
-        "你必須將你要輸出的每一個標籤，嚴格分配到下列八個 JSON Key 之一；Key 必須與下列文字完全一致（含方括號）：\n"
-        "%1"
-        "僅輸出一個 JSON 物件：每個 Key 對應一個字串陣列，陣列中的標籤必須與輸入清單逐字一致。"
-        "八個 Key 都必須出現；沒有標籤的類別請輸出空陣列 []。同一輸入標籤最多出現一次。無法歸類者可略過。不要 markdown 或說明。")
-        .arg(drawersBlock);
-
-    const QString systemPrompt = (lm.language() == LanguageManager::Language::EN_US) ? systemPromptEn : systemPromptZh;
-
-    const QString userPrompt = QStringLiteral("Tags:\n- %1\n").arg(aiTags.join(QStringLiteral("\n- ")));
-
-    const QString fullPrompt = QStringLiteral("System:\n%1\n\nUser:\n%2").arg(systemPrompt, userPrompt);
 
     if (!m_consolidateWatcher) {
         m_isConsolidatingTags = false;
@@ -5888,9 +6166,9 @@ void MainWindow::generateTagFoldersWithAI() {
         return;
     }
 
-    m_consolidateWatcher->setFuture(QtConcurrent::run([this, fullPrompt]() {
-        return llamaEngine.generateResponse(fullPrompt.toStdString());
-    }));
+    m_consolidateWatcher->setFuture(QtConcurrent::run(
+        [](TagManager *tm, QMutex *mx) -> TagClusterWorkerResult { return sfRunHeuristicTagClusterJob(tm, mx); },
+        &tagManager, &tagMutex));
 }
 
 static QString extractFirstBalancedJsonObject(const QString &rawIn)
@@ -6013,53 +6291,269 @@ static QVector<int> parseSemanticRetrieverIdList(const QString &raw)
     }
 }
 
-void MainWindow::applyTagFolderClustersFromRaw(const QString &rawIn)
+static QString sfBuildSemanticRetrieverPromptWorker(const QString &userQuery, const QString &idContextLines)
 {
+    return QStringLiteral(
+               "System:\n"
+               "You are a precise file retrieval assistant. Your reply MUST be ONLY a JSON array of integers — no object wrapper, "
+               "no markdown fences, no explanations, no file paths or names.\n"
+               "Correct format example: [1, 5, 12]\n"
+               "Pick 5 to 10 file IDs from the list below that best match the user query (fewer if fewer are relevant; at least 1 if any match). "
+               "Each integer MUST be copied exactly from an [ID: N] line in the file list. Never invent IDs.\n\n"
+               "User query:\n%1\n\n"
+               "Files (numeric IDs only; use these IDs in your answer):\n%2\n")
+        .arg(userQuery, idContextLines);
+}
+
+static bool sfSemanticWorkspaceHasAnalyzableFile(const QString &rootPathRaw, int maxProbeFiles)
+{
+    if (rootPathRaw.trimmed().isEmpty()) return false;
+    const QString root = QDir::cleanPath(rootPathRaw);
+    int scanned = 0;
+    QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        if (scanned >= maxProbeFiles) break;
+        ++scanned;
+        if (sfSemanticWorkerIsAnalyzableFile(QFileInfo(it.next())))
+            return true;
+    }
+    return false;
+}
+
+static QString sfBuildWorkspaceSemanticIdLines(const QString &root,
+                                               const QHash<QString, QString> &summaryByPath,
+                                               TagManager *tagMgr,
+                                               QMutex *tagMutex,
+                                               int maxFiles,
+                                               QMap<int, QString> *outIdToPath,
+                                               QSet<QString> *outValidPaths)
+{
+    if (!outIdToPath || !outValidPaths || !tagMgr || !tagMutex) return {};
+    outIdToPath->clear();
+    outValidPaths->clear();
+    if (root.trimmed().isEmpty() || maxFiles <= 0) return {};
+
+    struct SemanticFileCandidate {
+        QString absPath;
+        QFileInfo fi;
+        bool hasSummary = false;
+        qint64 mtimeMs = 0;
+    };
+
+    constexpr int kMaxScanCandidates = 4000;
+    QVector<SemanticFileCandidate> candidates;
+    candidates.reserve(512);
+
+    QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        if (candidates.size() >= kMaxScanCandidates) break;
+        const QString absPath = QDir::cleanPath(it.next());
+        const QFileInfo fi(absPath);
+        if (!sfSemanticWorkerIsAnalyzableFile(fi)) continue;
+        const QString sumText = summaryByPath.value(absPath).trimmed();
+        const bool hasSummary = summaryByPath.contains(absPath) && !sumText.isEmpty();
+        candidates.push_back({absPath, fi, hasSummary, fi.lastModified().toMSecsSinceEpoch()});
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const SemanticFileCandidate &a, const SemanticFileCandidate &b) {
+        if (a.hasSummary != b.hasSummary) return a.hasSummary > b.hasSummary;
+        if (a.mtimeMs != b.mtimeMs) return a.mtimeMs > b.mtimeMs;
+        return a.absPath.localeAwareCompare(b.absPath) < 0;
+    });
+
+    const int pick = qMin(maxFiles, candidates.size());
+    QStringList lines;
+    lines.reserve(pick);
+
+    for (int i = 0; i < pick; ++i) {
+        const int id = i + 1;
+        const SemanticFileCandidate &c = candidates[i];
+        outIdToPath->insert(id, c.absPath);
+        outValidPaths->insert(c.absPath);
+        const QString fn = c.fi.fileName();
+
+        if (summaryByPath.contains(c.absPath)) {
+            const QString sumRaw = summaryByPath.value(c.absPath).trimmed();
+            QString sum;
+            if (sumRaw.isEmpty())
+                sum = QStringLiteral("(無摘要文字)");
+            else if (sumRaw.size() > 50)
+                sum = sumRaw.left(50) + QStringLiteral("...");
+            else
+                sum = sumRaw;
+
+            QStringList tagParts;
+            {
+                QMutexLocker locker(tagMutex);
+                for (const QString &t : tagMgr->getTags(c.absPath)) {
+                    const QString tt = t.trimmed();
+                    if (!tt.isEmpty())
+                        tagParts.append(tt);
+                    if (tagParts.size() >= 3) break;
+                }
+            }
+            QString tagsJoined = tagParts.join(QLatin1String(", "));
+            if (tagsJoined.isEmpty())
+                tagsJoined = QStringLiteral("(無標籤)");
+            lines.append(QStringLiteral("[ID: %1] 檔名: %2 | 摘要: %3 | 標籤: %4").arg(id).arg(fn, sum, tagsJoined));
+        } else {
+            lines.append(QStringLiteral("[ID: %1] 檔名: %2 | (尚未分析)").arg(id).arg(fn));
+        }
+    }
+
+    return lines.join(QLatin1Char('\n'));
+}
+
+/// When the LLM path fails, match the query against filenames / summaries / tags, then (Demo Guard) all candidates.
+static void sfSemanticSearchKeywordFallback(const QString &userQuery,
+                                            const QMap<int, QString> &idToPath,
+                                            const QHash<QString, QString> &summaryByPath,
+                                            TagManager *tagMgr,
+                                            QMutex *tagMutex,
+                                            QStringList *outPicked)
+{
+    if (!outPicked || !tagMgr || !tagMutex) return;
+
+    QSet<QString> dedupe;
+    for (const QString &existing : std::as_const(*outPicked)) {
+        if (!existing.isEmpty())
+            dedupe.insert(QDir::cleanPath(existing));
+    }
+
+    const QString q = userQuery.trimmed();
+
+    auto considerPath = [&](const QString &absPathIn) {
+        const QString absPath = QDir::cleanPath(absPathIn);
+        if (absPath.isEmpty() || dedupe.contains(absPath)) return;
+
+        const QFileInfo finfo(absPath);
+        const bool hitByName = !q.isEmpty() && finfo.fileName().contains(q, Qt::CaseInsensitive);
+        bool hitByMeta = false;
+        if (!q.isEmpty()) {
+            const QString sum = summaryByPath.value(absPath).trimmed();
+            if (sum.contains(q, Qt::CaseInsensitive))
+                hitByMeta = true;
+            if (!hitByMeta) {
+                std::vector<QString> tags;
+                {
+                    QMutexLocker locker(tagMutex);
+                    tags = tagMgr->getTags(absPath);
+                }
+                for (const QString &tg : tags) {
+                    if (tg.contains(q, Qt::CaseInsensitive)) {
+                        hitByMeta = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        const bool hit = hitByName || hitByMeta;
+        if (!hit) return;
+        // Filename-only matches must be analyzable text types (exclude images / binaries from semantic list).
+        if (hitByName && !hitByMeta && !sfSuffixEligibleForManualOrSemanticTextAnalysis(finfo))
+            return;
+
+        dedupe.insert(absPath);
+        outPicked->append(absPath);
+    };
+
+    if (!q.isEmpty()) {
+        for (auto it = idToPath.constBegin(); it != idToPath.constEnd(); ++it)
+            considerPath(it.value());
+    }
+
+    if (outPicked->isEmpty() && !idToPath.isEmpty()) {
+        for (auto it = idToPath.constBegin(); it != idToPath.constEnd(); ++it) {
+            const QString c = QDir::cleanPath(it.value());
+            if (c.isEmpty() || dedupe.contains(c)) continue;
+            dedupe.insert(c);
+            outPicked->append(c);
+        }
+    }
+}
+
+static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootPathRaw,
+                                                            int maxFiles,
+                                                            const QHash<QString, QString> &summaryByPath,
+                                                            TagManager *tagMgr,
+                                                            QMutex *tagMutex,
+                                                            LlamaEngine *llama,
+                                                            const QString &userQuery)
+{
+    SemanticSearchWorkerResult out;
+    if (!tagMgr || !tagMutex || !llama) return out;
+    if (rootPathRaw.trimmed().isEmpty()) return out;
+    const QString root = QDir::cleanPath(rootPathRaw);
+
+    const QString idLines = sfBuildWorkspaceSemanticIdLines(root, summaryByPath, tagMgr, tagMutex, maxFiles,
+                                                              &out.idToPathSnapshot, &out.validWorkspacePathsSnapshot);
+    if (idLines.isEmpty()) return out;
+
+    const QString fullPrompt = sfBuildSemanticRetrieverPromptWorker(userQuery, idLines);
+    std::string rawStd;
+    try {
+        rawStd = llama->generateResponse(fullPrompt.toStdString(), LlamaEngine::kMaxNewTokensSemanticRetriever);
+    } catch (...) {
+        out.rawLlmText = QStringLiteral("Error: Llama generateResponse exception");
+        return out;
+    }
+    out.rawLlmText = QString::fromStdString(rawStd);
+    if (out.rawLlmText.size() > 400000)
+        out.rawLlmText.truncate(400000);
+
+    QVector<int> ids;
+    try {
+        ids = parseSemanticRetrieverIdList(out.rawLlmText);
+    } catch (...) {
+        ids.clear();
+    }
+
+    const bool llmTextLooksLikeError = out.rawLlmText.contains(QStringLiteral("Error"), Qt::CaseInsensitive);
+    const bool useKeywordFallback = ids.isEmpty() || llmTextLooksLikeError;
+
+    if (!useKeywordFallback) {
+        QSet<QString> dedupe;
+        for (int idv : ids) {
+            const QString p = out.idToPathSnapshot.value(idv);
+            if (!p.isEmpty()) {
+                const QString c = QDir::cleanPath(p);
+                if (!dedupe.contains(c)) {
+                    dedupe.insert(c);
+                    out.pickedAbsolutePaths.append(c);
+                }
+            }
+        }
+    } else {
+        sfSemanticSearchKeywordFallback(userQuery, out.idToPathSnapshot, summaryByPath, tagMgr, tagMutex,
+                                        &out.pickedAbsolutePaths);
+    }
+    return out;
+}
+
+static TagClusterWorkerResult sfParseTagClusterJsonIntoDrawerMap(const QString &rawIn, const QSet<QString> &aiTagSet)
+{
+    TagClusterWorkerResult out;
     try {
         QString capped = rawIn;
         if (capped.size() > 500000)
             capped.truncate(500000);
-
         const QString jsonText = extractFirstBalancedJsonObject(capped);
-
         QJsonParseError err{};
         const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &err);
         if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-            QMessageBox::warning(this, QStringLiteral("Smartflie"),
-                                 QStringLiteral("Invalid JSON: %1").arg(err.errorString()));
-            return;
+            out.parseError = err.errorString();
+            return out;
         }
-
-        QSet<QString> aiTagSet;
-        {
-            std::vector<QString> allTags;
-            {
-                QMutexLocker locker(&tagMutex);
-                allTags = tagManager.getAllTags();
-            }
-            for (const QString &t : allTags) {
-                const QString tt = t.trimmed();
-                if (TagManager::hasAiPrefix(tt))
-                    aiTagSet.insert(tt);
-            }
-        }
-
-        auto resolveChild = [&](const QString &raw) -> QString {
-            return fuzzyResolveAiTagKey(raw, aiTagSet);
-        };
-
         const QJsonObject rootObj = doc.object();
-
         QHash<QString, QSet<QString>> bucket;
         for (const QString &k : sfFixedAiClusterDrawerKeys())
             bucket.insert(k, {});
-
-        for (auto it = rootObj.begin(); it != rootObj.end(); ++it) {
-            const QString canonKey = sfNormalizeDrawerJsonKeyToCanon(it.key());
+        for (auto jt = rootObj.begin(); jt != rootObj.end(); ++jt) {
+            const QString canonKey = sfNormalizeDrawerJsonKeyToCanon(jt.key());
             if (canonKey.isEmpty()) continue;
-
             QStringList members;
-            const QJsonValue v = it.value();
+            const QJsonValue v = jt.value();
             if (v.isArray()) {
                 for (const auto &el : v.toArray()) {
                     const QString s = el.toString().trimmed();
@@ -6069,57 +6563,46 @@ void MainWindow::applyTagFolderClustersFromRaw(const QString &rawIn)
                 const QString s = v.toString().trimmed();
                 if (!s.isEmpty()) members << s;
             }
-
             for (const QString &m : members) {
-                const QString child = resolveChild(m);
+                const QString child = fuzzyResolveAiTagKey(m, aiTagSet);
                 if (child.isEmpty()) continue;
                 bucket[canonKey].insert(child);
             }
         }
-
-        QHash<QString, QString> newAiTagToDrawerKey;
         for (const QString &drawerKey : sfFixedAiClusterDrawerKeys()) {
             const QSet<QString> kids = bucket.value(drawerKey);
             for (const QString &child : kids)
-                newAiTagToDrawerKey.insert(child, drawerKey);
+                out.newAiTagToDrawerKey.insert(child, drawerKey);
         }
-
-        QStringList synthParents;
-        for (const QString &dk : sfFixedAiClusterDrawerKeys())
-            synthParents.append(sfAiFolderTagForDrawerCanon(dk));
-        {
-            QMutexLocker locker(&tagMutex);
-            tagManager.stripAiTagParentsForSyntheticFolders(synthParents, false);
-            tagManager.saveTags();
-        }
-
-        QTimer::singleShot(0, this, [this, newAiTagToDrawerKey]() mutable {
-            try {
-                m_aiTagToDrawerKey.swap(newAiTagToDrawerKey);
-                saveAiUiDrawerAssignments();
-                if (m_systemTagListWidget && m_aiTagTreeWidget)
-                    updateTagList();
-                QMessageBox::information(
-                    this, QStringLiteral("Smartflie"),
-                    QStringLiteral("已套用 %1 個 AI 標籤的 UI 分類（未修改檔案標籤）。")
-                        .arg(m_aiTagToDrawerKey.size()));
-            } catch (const std::exception &e) {
-                QMessageBox::critical(this, QStringLiteral("Smartflie"),
-                                      QStringLiteral("套用 AI 分類 UI 時發生錯誤：%1")
-                                          .arg(QString::fromUtf8(e.what())));
-            } catch (...) {
-                QMessageBox::critical(this, QStringLiteral("Smartflie"),
-                                      QStringLiteral("套用 AI 分類 UI 時發生未知錯誤。"));
-            }
-        });
+        out.parseOk = true;
     } catch (const std::exception &e) {
-        QMessageBox::warning(this, QStringLiteral("Smartflie"),
-                             QStringLiteral("解析 AI 分類回應時發生錯誤：%1")
-                                 .arg(QString::fromUtf8(e.what())));
+        out.parseError = QString::fromUtf8(e.what());
     } catch (...) {
-        QMessageBox::warning(this, QStringLiteral("Smartflie"),
-                             QStringLiteral("解析 AI 分類回應時發生未知錯誤。"));
+        out.parseError = QStringLiteral("unknown exception");
     }
+    return out;
+}
+
+void MainWindow::applyTagClusterDrawerUi_commit(QHash<QString, QString> newMap)
+{
+    try {
+        m_aiTagToDrawerKey.swap(newMap);
+        saveAiUiDrawerAssignments();
+        if (m_systemTagListWidget && m_aiTagTreeWidget)
+            updateTagList();
+        QMessageBox::information(
+            this, QStringLiteral("Smartflie"),
+            QStringLiteral("已套用 %1 個 AI 標籤的 UI 分類（未修改檔案標籤）。").arg(m_aiTagToDrawerKey.size()));
+    } catch (const std::exception &e) {
+        QMessageBox::critical(this, QStringLiteral("Smartflie"),
+                              QStringLiteral("套用 AI 分類 UI 時發生錯誤：%1")
+                                  .arg(QString::fromUtf8(e.what())));
+    } catch (...) {
+        QMessageBox::critical(this, QStringLiteral("Smartflie"),
+                              QStringLiteral("套用 AI 分類 UI 時發生未知錯誤。"));
+    }
+    m_isConsolidatingTags = false;
+    updateAllTexts();
 }
 
 void MainWindow::onTagFolderClustersFinished()
@@ -6130,21 +6613,43 @@ void MainWindow::onTagFolderClustersFinished()
         return;
     }
 
-    QString raw = QString::fromStdString(m_consolidateWatcher->result());
-    if (raw.size() > 500000)
-        raw.truncate(500000);
-
-    if (raw.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive)) {
+    TagClusterWorkerResult wr;
+    try {
+        wr = m_consolidateWatcher->result();
+    } catch (...) {
         m_isConsolidatingTags = false;
         updateAllTexts();
-        QMessageBox::critical(this, QStringLiteral("Smartflie"), raw);
         return;
     }
 
-    QTimer::singleShot(0, this, [this, raw]() {
-        applyTagFolderClustersFromRaw(raw);
+    if (wr.rawIsLlmError || wr.rawLlmText.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive)) {
         m_isConsolidatingTags = false;
         updateAllTexts();
+        qWarning() << "[tag-cluster] LLM error:" << wr.rawLlmText;
+        return;
+    }
+
+    if (!wr.parseOk) {
+        m_isConsolidatingTags = false;
+        updateAllTexts();
+        qWarning() << "[tag-cluster] JSON parse failed:"
+                     << (wr.parseError.isEmpty() ? QStringLiteral("Invalid JSON") : wr.parseError);
+        return;
+    }
+
+    QStringList synthParents;
+    for (const QString &dk : sfFixedAiClusterDrawerKeys())
+        synthParents.append(sfAiFolderTagForDrawerCanon(dk));
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.stripAiTagParentsForSyntheticFolders(synthParents, false);
+        tagManager.saveTags();
+    }
+
+    QHash<QString, QString> newMap = wr.newAiTagToDrawerKey;
+    // Use `this` as receiver so the call is dropped if the window is destroyed before delivery.
+    QTimer::singleShot(0, this, [this, newMap = std::move(newMap)]() mutable {
+        applyTagClusterDrawerUi_commit(std::move(newMap));
     });
 }
 

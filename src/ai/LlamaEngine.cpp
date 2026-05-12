@@ -1,5 +1,7 @@
 #include "LlamaEngine.h"
+#include <QByteArray>
 #include <QDebug>
+#include <QtGlobal>
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QMutexLocker>
@@ -28,22 +30,23 @@ static void batch_add(llama_batch &batch, llama_token id, llama_pos pos,
   batch.n_tokens++;
 }
 
+/// Serializes all llama.cpp access (single shared ctx/model). Held for the full inference, not just a counter bump.
 struct InferenceGuard {
-  LlamaEngine *e = nullptr;
-  explicit InferenceGuard(LlamaEngine *engine) : e(engine) {
-    if (!e) return;
-    e->stopIdleTimerAsync();
-    QMutexLocker locker(&e->m_mutex);
-    ++e->m_activeInferences;
-  }
-  ~InferenceGuard() {
-    if (!e) return;
+    LlamaEngine *e = nullptr;
+    explicit InferenceGuard(LlamaEngine *engine) : e(engine)
     {
-      QMutexLocker locker(&e->m_mutex);
-      --e->m_activeInferences;
+        if (!e) return;
+        e->stopIdleTimerAsync();
+        e->m_mutex.lock();
+        ++e->m_activeInferences;
     }
-    e->startIdleTimerAsync();
-  }
+    ~InferenceGuard()
+    {
+        if (!e) return;
+        --e->m_activeInferences;
+        e->m_mutex.unlock();
+        e->startIdleTimerAsync();
+    }
 };
 
 LlamaEngine::LlamaEngine(QObject *parent) : QObject(parent) {
@@ -62,7 +65,7 @@ LlamaEngine::~LlamaEngine() {
 }
 
 void LlamaEngine::setOutputLanguage(const QString &lang) {
-  QMutexLocker locker(&m_mutex);
+  QMutexLocker<QRecursiveMutex> locker(&m_mutex);
   const QString cleaned = lang.trimmed();
   if (cleaned.isEmpty()) return;
   m_currentLanguage = cleaned;
@@ -91,7 +94,7 @@ void LlamaEngine::startIdleTimerAsync() {
 }
 
 void LlamaEngine::unloadModel() {
-  QMutexLocker locker(&m_mutex);
+  QMutexLocker<QRecursiveMutex> locker(&m_mutex);
   if (m_activeInferences > 0) {
     // Still in use; postpone unload.
     if (idleTimer) idleTimer->start();
@@ -111,7 +114,7 @@ void LlamaEngine::unloadModel() {
 
 bool LlamaEngine::ensureModelLoaded() {
   // Avoid holding the mutex while calling into Qt file APIs too long? We'll keep it simple and safe.
-  QMutexLocker locker(&m_mutex);
+  QMutexLocker<QRecursiveMutex> locker(&m_mutex);
   if (model && ctx) return true;
   if (m_modelPath.empty()) return false;
 
@@ -141,6 +144,8 @@ bool LlamaEngine::ensureModelLoaded() {
 
   llama_context_params ctx_params = llama_context_default_params();
   ctx_params.n_ctx = 2048;
+  // Default n_batch is often smaller than n_ctx; our decode path submits the full prompt in one batch.
+  ctx_params.n_batch = std::max(ctx_params.n_batch, ctx_params.n_ctx);
   ctx = llama_init_from_model(model, ctx_params);
 
   if (!ctx) {
@@ -155,9 +160,21 @@ bool LlamaEngine::ensureModelLoaded() {
   return true;
 }
 
-bool LlamaEngine::loadModel(const std::string &modelPath) {
+bool LlamaEngine::isModelLoaded() const
+{
+  QMutexLocker<QRecursiveMutex> locker(&m_mutex);
+  return model != nullptr;
+}
+
+bool LlamaEngine::loadModel(const std::string &modelPath)
+{
+  return loadModelImpl(modelPath);
+}
+
+bool LlamaEngine::loadModelImpl(const std::string &modelPath)
+{
   {
-    QMutexLocker locker(&m_mutex);
+    QMutexLocker<QRecursiveMutex> locker(&m_mutex);
     m_modelPath = modelPath;
   }
 
@@ -167,9 +184,27 @@ bool LlamaEngine::loadModel(const std::string &modelPath) {
   return ok;
 }
 
-std::string LlamaEngine::generateResponse(const std::string &prompt) {
+std::string LlamaEngine::generateResponse(const std::string &prompt, int maxNewTokens)
+{
+  const int cap = std::max(1, std::min(maxNewTokens, 32768));
+  return generateResponseImpl(prompt, cap);
+}
+
+std::string LlamaEngine::generateResponseImpl(const std::string &prompt, int maxNewTokens)
+{
   InferenceGuard guard(this);
   if (!ensureModelLoaded()) return "Error: Model not loaded";
+
+  struct LlamaKvCacheFinalClear {
+    llama_context *c;
+    explicit LlamaKvCacheFinalClear(llama_context *ctx) : c(ctx) {}
+    ~LlamaKvCacheFinalClear()
+    {
+#if defined(LLAMA_API_VERSION)
+      if (c) llama_kv_cache_clear(c);
+#endif
+    }
+  } kvFinalClear(ctx);
 
   // Clear context/KV cache to avoid cross-file leakage.
   // Prefer llama_kv_cache_clear when available; keep legacy memory clear as a fallback.
@@ -180,18 +215,34 @@ std::string LlamaEngine::generateResponse(const std::string &prompt) {
   llama_memory_seq_rm(mem, -1, -1, -1);
 
   const llama_vocab *vocab = llama_model_get_vocab(model);
+  if (!vocab) return "Error: vocabulary not available";
 
   // 1. Tokenize
-  const int n_prompt = -llama_tokenize(vocab, prompt.c_str(), prompt.length(),
-                                       NULL, 0, true, false);
-  std::vector<llama_token> prompt_tokens(n_prompt);
+  const int n_prompt_raw = -llama_tokenize(vocab, prompt.c_str(), prompt.length(),
+                                           NULL, 0, true, false);
+  if (n_prompt_raw <= 0 || n_prompt_raw > 100000)
+    return "Error: Tokenization size";
+  std::vector<llama_token> prompt_tokens(static_cast<size_t>(n_prompt_raw));
   if (llama_tokenize(vocab, prompt.c_str(), prompt.length(),
-                     prompt_tokens.data(), n_prompt, true, false) < 0) {
+                     prompt_tokens.data(), n_prompt_raw, true, false) < 0) {
     return "Error: Tokenization failed";
   }
 
+  const int n_ctx = static_cast<int>(llama_n_ctx(ctx));
+  const int n_batch = static_cast<int>(llama_n_batch(ctx));
+  constexpr int kReserveGenTokens = 200;
+  const int maxByCtx = std::max(1, n_ctx - kReserveGenTokens);
+  const int maxByBatch = std::max(1, n_batch - 8);
+  const size_t maxPromptTokens = static_cast<size_t>(std::min(maxByCtx, maxByBatch));
+  if (prompt_tokens.size() > maxPromptTokens) {
+    qWarning() << "[AI] Prompt token count exceeds context window; refusing decode.";
+    return "Error: Prompt length exceeds context window";
+  }
+  const int n_prompt = static_cast<int>(prompt_tokens.size());
+
   // 2. Initial Batch
-  llama_batch batch = llama_batch_init(2048, 0, 1);
+  const int batchAlloc = std::max(n_prompt + 256, 512);
+  llama_batch batch = llama_batch_init(batchAlloc, 0, 1);
   for (int i = 0; i < n_prompt; i++) {
     batch_add(batch, prompt_tokens[i], i, {0}, false);
   }
@@ -206,9 +257,9 @@ std::string LlamaEngine::generateResponse(const std::string &prompt) {
   int n_curr = batch.n_tokens;
   llama_batch_free(batch);
 
-  // 4. Sample loop
+  // 4. Sample loop (hard cap: always stop after maxNewTokens, even without EOS)
   std::stringstream response_ss;
-  int n_predict = 128;
+  const int n_predict = std::max(1, std::min(maxNewTokens, 32768));
 
   auto sparams = llama_sampler_chain_default_params();
   struct llama_sampler *smpl = llama_sampler_chain_init(sparams);
@@ -257,14 +308,25 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
                                      const std::string &rejectedTagsCsv,
                                      const std::string &existingTags,
                                      bool contentReadable,
-                                     const std::string &fileExt) {
+                                     const std::string &fileExt)
+{
+  return suggestTagsImpl(filename, content, rejectedTagsCsv, existingTags, contentReadable, fileExt);
+}
+
+std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
+                                         const std::string &content,
+                                         const std::string &rejectedTagsCsv,
+                                         const std::string &existingTags,
+                                         bool contentReadable,
+                                         const std::string &fileExt)
+{
   InferenceGuard guard(this);
   if (!ensureModelLoaded()) return "Error: Model not loaded";
 
   // --- Language awareness ---
   QString lang;
   {
-    QMutexLocker locker(&m_mutex);
+    QMutexLocker<QRecursiveMutex> locker(&m_mutex);
     lang = m_currentLanguage.trimmed();
   }
   const bool en = (lang.compare(QStringLiteral("en_US"), Qt::CaseInsensitive) == 0);
@@ -311,7 +373,7 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
           "3) 標籤必須是名詞或專有名詞，不能是長句。\n"
           "\n只能輸出 JSON 物件本體。\n";
     }
-    return generateResponse(prompt);
+    return generateResponseImpl(prompt, kMaxNewTokensSuggestTagsJson);
   }
 
   // Force structured JSON output (summary + tags) with strict rules
@@ -363,7 +425,11 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
   if (content.empty()) {
     prompt = instruction + (en ? "\nFilename: " : "\n檔名: ") + filename + (en ? "\nOutput JSON:" : "\n請輸出 JSON：");
   } else {
-    std::string safeContent = content.substr(0, 3000);
+    // Hard cap prompt size: first 1000 QString characters (not raw bytes) for stable UTF-8 handling.
+    const QString qContent =
+        QString::fromUtf8(QByteArray::fromRawData(content.data(), static_cast<int>(content.size())));
+    const QByteArray snippetUtf8 = qContent.left(1000).toUtf8();
+    const std::string safeContent(snippetUtf8.constData(), static_cast<size_t>(snippetUtf8.size()));
     prompt = instruction + (en ? "\nFilename: " : "\n檔名: ") + filename +
              (en ? "\nContent snippet: " : "\n內容片段: ") + safeContent + (en ? "\nOutput JSON:" : "\n請輸出 JSON：");
   }
@@ -383,6 +449,6 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
               : "\n只能輸出 JSON 物件本體，不要 markdown，不要反引號，不要任何額外文字。\n";
 
   // Return raw model output (JSON expected). C++ side will sanitize/parse with fallback.
-  return generateResponse(prompt);
+  return generateResponseImpl(prompt, kMaxNewTokensSuggestTagsJson);
 }
 

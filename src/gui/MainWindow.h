@@ -46,6 +46,21 @@
 #include "../ai/LlamaEngine.h"
 #include "../core/TagManager.h"
 
+struct SemanticSearchWorkerResult {
+    QList<QString> pickedAbsolutePaths;
+    QMap<int, QString> idToPathSnapshot;
+    QSet<QString> validWorkspacePathsSnapshot;
+    QString rawLlmText;
+};
+
+struct TagClusterWorkerResult {
+    QHash<QString, QString> newAiTagToDrawerKey;
+    QString parseError;
+    QString rawLlmText;
+    bool parseOk = false;
+    bool rawIsLlmError = false;
+};
+
 class QStackedWidget;
 
 class WorkspaceFilterProxyModel : public QSortFilterProxyModel {
@@ -120,6 +135,7 @@ private slots:
     void removeGlobalTag();
 
     void onHeroOmniboxReturnPressed();
+    void onHeroSearchModeChanged();
     void syncAiTagHierarchyFromTree();
     void loadColdArchiveYearsSetting();
 
@@ -127,7 +143,6 @@ private slots:
     void onBackgroundScanFinished();
     void generateTagFoldersWithAI();
     void onTagFolderClustersFinished();
-    void applyTagFolderClustersFromRaw(const QString &raw);
     void onBackgroundAutoAnalyzeDebounce();
 
     void onWorkspaceClearAiCache();
@@ -155,6 +170,7 @@ private:
 
     QWidget *m_workspaceTopBar = nullptr;
     QLineEdit *m_heroOmnibox = nullptr;
+    QComboBox *m_cmbSearchMode = nullptr;
     QPushButton *m_btnSemanticSearch = nullptr;
     BusyChip *m_heroSearchBusyChip = nullptr;
     QTimer *m_heroSemanticSpinTimer = nullptr;
@@ -167,12 +183,12 @@ private:
     void refreshSemanticGlobalBanner();
     void populateSemanticResultFiles();
     void reloadCurrentFileListPanel();
-    QString buildWorkspaceSemanticIdLines(int maxFiles);
+    void applyTagClusterDrawerUi_commit(QHash<QString, QString> newMap);
     void loadAiUiDrawerAssignments();
     void saveAiUiDrawerAssignments() const;
     QString aiUiDrawerStorePath() const;
     void setHeroSemanticBusy(bool busy);
-    QString buildSemanticRetrieverPrompt(const QString &userQuery, const QString &idContextLines) const;
+
     QWidget *tagsPanel = nullptr;
     QLabel *lblTagLibraryTitle = nullptr;
     QTabWidget *m_tagTabWidget = nullptr;
@@ -260,11 +276,11 @@ private:
     QString currentPath;
 
     TagManager tagManager;
-    LlamaEngine llamaEngine;
+    LlamaEngine *m_llamaEngine = nullptr;
 
     QFutureWatcher<std::string> *watcher = nullptr;
-    QFutureWatcher<std::string> *m_consolidateWatcher = nullptr;
-    QFutureWatcher<std::string> *m_semanticSearchWatcher = nullptr;
+    QFutureWatcher<TagClusterWorkerResult> *m_consolidateWatcher = nullptr;
+    QFutureWatcher<SemanticSearchWorkerResult> *m_semanticSearchWatcher = nullptr;
     QFutureWatcher<bool> *modelLoadWatcher = nullptr;
     QFutureWatcher<void> *initialScanWatcher = nullptr;
 
@@ -419,6 +435,9 @@ private:
     QStringList getFastPathTags(const QString &filename);
 
     bool isAnalyzableFile(const QFileInfo &fi) const;
+
+    /// Solid analysis badge only when we have a persisted summary that is non-empty and not an LLM error echo.
+    bool pathHasUsableAnalysisSummary(const QString &absPath) const;
 };
 
 #endif // MAINWINDOW_H
