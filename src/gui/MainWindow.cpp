@@ -11,6 +11,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDesktopServices>
+#include <QDropEvent>
 #include <QDir>
 #include <QDirIterator>
 #include <QDialog>
@@ -44,6 +45,7 @@
 #include <QStyledItemDelegate>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QFont>
 #include <QFontMetrics>
 #include <QStyleOptionViewItem>
 #include <QStyle>
@@ -105,6 +107,34 @@ protected:
 
 private:
     int m_phase = 0;
+};
+
+class AiTagDropTreeWidget final : public QTreeWidget {
+    MainWindow *m_mainWindow = nullptr;
+
+public:
+    explicit AiTagDropTreeWidget(MainWindow *mw, QWidget *parent = nullptr) : QTreeWidget(parent), m_mainWindow(mw)
+    {
+        setColumnCount(1);
+        setHeaderHidden(true);
+        setRootIsDecorated(true);
+        setUniformRowHeights(true);
+        setDragEnabled(true);
+        setAcceptDrops(true);
+        setDropIndicatorShown(true);
+        setDragDropMode(QAbstractItemView::InternalMove);
+        setDefaultDropAction(Qt::MoveAction);
+        setSelectionMode(QAbstractItemView::SingleSelection);
+        setContextMenuPolicy(Qt::CustomContextMenu);
+    }
+
+protected:
+    void dropEvent(QDropEvent *event) override
+    {
+        QTreeWidget::dropEvent(event);
+        if (m_mainWindow)
+            QTimer::singleShot(0, m_mainWindow, &MainWindow::syncAiTagHierarchyFromTree);
+    }
 };
 
 namespace {
@@ -565,6 +595,7 @@ void MainWindow::prependSingleFileToAnalysisQueueFront(const QString &absPath)
     updateBackgroundStatusLabel();
     m_priorityFolderBannerPath.clear();
     refreshCurrentAnalysisTargetUi();
+    m_coldArchiveBypassPaths.insert(p);
 }
 
 void MainWindow::enqueuePriorityAnalyzeForFileIfNeeded(const QString &absPath)
@@ -582,6 +613,7 @@ void MainWindow::enqueuePriorityAnalyzeForFileIfNeeded(const QString &absPath)
 
     if (watcher && watcher->isRunning()) {
         m_pendingPrioritySingleFile = p;
+        m_coldArchiveBypassPaths.insert(p);
         refreshCurrentAnalysisTargetUi();
         return;
     }
@@ -647,6 +679,9 @@ void MainWindow::prependUnanalyzedFromFolderToAnalysisQueue(const QString &folde
         refreshCurrentAnalysisTargetUi();
         return;
     }
+
+    for (const QString &p : prepend)
+        m_coldArchiveBypassPaths.insert(p);
 
     QQueue<QString> newQueue;
     for (const QString &p : prepend) newQueue.enqueue(p);
@@ -1218,11 +1253,67 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     m_workspaceTab = new QWidget(this);
     auto *workspaceLayout = new QVBoxLayout(m_workspaceTab);
-    workspaceLayout->setContentsMargins(0, 0, 0, 0);
+    workspaceLayout->setContentsMargins(8, 8, 8, 0);
+
+    m_workspaceTopBar = new QWidget(m_workspaceTab);
+    auto *heroLay = new QHBoxLayout(m_workspaceTopBar);
+    heroLay->setContentsMargins(12, 0, 12, 10);
+    m_heroOmnibox = new QLineEdit(m_workspaceTopBar);
+    m_heroOmnibox->setFixedHeight(40);
+    m_heroOmnibox->setClearButtonEnabled(true);
+    {
+        QFont hf = m_heroOmnibox->font();
+        hf.setPointSize(qMax(hf.pointSize() + 1, 12));
+        m_heroOmnibox->setFont(hf);
+    }
+    m_heroOmnibox->setMinimumWidth(320);
+    m_heroOmnibox->setMaximumWidth(920);
+    m_heroOmnibox->setStyleSheet(QStringLiteral(
+        "QLineEdit {"
+        "  border: 1px solid rgba(255,255,255,90);"
+        "  border-radius: 12px;"
+        "  padding: 6px 14px;"
+        "  background: rgba(255,255,255,12);"
+        "}"));
+    m_heroOmnibox->setPlaceholderText(QStringLiteral(
+        "🔍 輸入關鍵字，或使用自然語言進行語意搜尋... (例如：幫我找出去年關於財務的報告)"));
+
+    auto *heroField = new QWidget(m_workspaceTopBar);
+    auto *heroFieldLay = new QHBoxLayout(heroField);
+    heroFieldLay->setContentsMargins(0, 0, 0, 0);
+    heroFieldLay->setSpacing(10);
+    heroFieldLay->addWidget(m_heroOmnibox, 1);
+
+    m_btnSemanticSearch = new QPushButton(QStringLiteral("🔍 搜尋"), m_workspaceTopBar);
+    m_btnSemanticSearch->setFixedHeight(40);
+    m_btnSemanticSearch->setMinimumWidth(100);
+    m_btnSemanticSearch->setCursor(Qt::PointingHandCursor);
+    m_btnSemanticSearch->setStyleSheet(QStringLiteral(
+        "QPushButton {"
+        "  background: #2b6cb0;"
+        "  color: #ffffff;"
+        "  font-weight: 600;"
+        "  border: 1px solid #1a4d8c;"
+        "  border-radius: 10px;"
+        "  padding: 6px 16px;"
+        "}"
+        "QPushButton:hover:enabled { background: #3182ce; }"
+        "QPushButton:pressed { background: #2c5282; padding-top: 7px; padding-bottom: 5px; }"
+        "QPushButton:disabled { background: rgba(43,108,176,0.35); color: rgba(255,255,255,0.7); }"));
+    heroFieldLay->addWidget(m_btnSemanticSearch, 0, Qt::AlignVCenter);
+
+    heroLay->addStretch(1);
+    heroLay->addWidget(heroField, 0, Qt::AlignHCenter);
+    heroLay->addStretch(1);
+    workspaceLayout->addWidget(m_workspaceTopBar);
 
     setupFourColumnLayout();
-    workspaceLayout->addWidget(mainSplitter);
+    workspaceLayout->addWidget(mainSplitter, 1);
     m_mainTabWidget->addTab(m_workspaceTab, tr("核心工作區"));
+
+    connect(m_heroOmnibox, &QLineEdit::textChanged, this, &MainWindow::filterFiles);
+    connect(m_heroOmnibox, &QLineEdit::returnPressed, this, &MainWindow::onHeroOmniboxReturnPressed);
+    connect(m_btnSemanticSearch, &QPushButton::clicked, this, &MainWindow::onHeroOmniboxReturnPressed);
 
     m_graphTab = new QWidget(this);
     auto *graphLayout = new QVBoxLayout(m_graphTab);
@@ -1273,8 +1364,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_backgroundLogEdit = new QTextEdit(tcLeftPane);
     m_backgroundLogEdit->setReadOnly(true);
     m_backgroundLogEdit->setAcceptRichText(false);
-    m_backgroundLogEdit->setMinimumHeight(120);
-    tcLeftLayout->addWidget(m_backgroundLogEdit, 1);
+    m_backgroundLogEdit->setMinimumHeight(72);
+    m_backgroundLogEdit->setMaximumHeight(220);
+    tcLeftLayout->addWidget(m_backgroundLogEdit, 0);
 
     auto *tcRightPane = new QWidget(m_taskCenterSplitter);
     auto *tcRightLayout = new QVBoxLayout(tcRightPane);
@@ -1294,8 +1386,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     m_taskCenterSplitter->addWidget(tcLeftPane);
     m_taskCenterSplitter->addWidget(tcRightPane);
-    m_taskCenterSplitter->setStretchFactor(0, 55);
-    m_taskCenterSplitter->setStretchFactor(1, 45);
+    m_taskCenterSplitter->setStretchFactor(0, 22);
+    m_taskCenterSplitter->setStretchFactor(1, 78);
 
     tcLayout->addWidget(m_taskCenterSplitter, 1);
 
@@ -1348,7 +1440,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     connect(watcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onAnalysisFinished);
 
     m_consolidateWatcher = new QFutureWatcher<std::string>(this);
-    connect(m_consolidateWatcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onConsolidateTagsFinished);
+    connect(m_consolidateWatcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onTagFolderClustersFinished);
 
     m_analysisSpinTimer = new QTimer(this);
     m_analysisSpinTimer->setInterval(50);
@@ -1615,8 +1707,12 @@ void MainWindow::updateAllTexts() {
     if (btnRemoveTag) btnRemoveTag->setText(lm.getText(QStringLiteral("btn_remove_tag")));
     if (btnAddExistingTag) btnAddExistingTag->setText(lm.getText(QStringLiteral("btn_add_existing_tag")));
     if (btnAutoMergeTags) {
-        const QString normalText = QStringLiteral("🤖 %1").arg(lm.getText(QStringLiteral("AI 自動收斂標籤")));
-        const QString busyText = QStringLiteral("🤖 %1").arg(lm.getText(QStringLiteral("AI 思考中…")));
+        const QString normalText = lm.language() == LanguageManager::Language::EN_US
+                                       ? QStringLiteral("🤖 AI tag folders (Generate Tag Folders)")
+                                       : QStringLiteral("🤖 AI 智能標籤分類 (Generate Tag Folders)");
+        const QString busyText = lm.language() == LanguageManager::Language::EN_US
+                                     ? QStringLiteral("🤖 AI organizing…")
+                                     : QStringLiteral("🤖 AI 思考中…");
         btnAutoMergeTags->setText(m_isConsolidatingTags ? busyText : normalText);
         btnAutoMergeTags->setEnabled(!m_isConsolidatingTags);
     }
@@ -1666,8 +1762,18 @@ void MainWindow::updateAllTexts() {
         cmbSort->setCurrentIndex(std::max(0, idx));
         cmbSort->blockSignals(false);
     }
-    if (txtSearch) {
-        txtSearch->setPlaceholderText(QStringLiteral("🔍 %1").arg(lm.getText(QStringLiteral("搜尋"))));
+    if (m_heroOmnibox) {
+        if (lm.language() == LanguageManager::Language::EN_US) {
+            m_heroOmnibox->setPlaceholderText(QStringLiteral(
+                "🔍 Enter keywords or natural-language semantic search… (e.g. find last year’s finance reports)"));
+        } else {
+            m_heroOmnibox->setPlaceholderText(QStringLiteral(
+                "🔍 輸入關鍵字，或使用自然語言進行語意搜尋... (例如：幫我找出去年關於財務的報告)"));
+        }
+    }
+    if (m_btnSemanticSearch) {
+        m_btnSemanticSearch->setText(lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("🔍 Search")
+                                                                                        : QStringLiteral("🔍 搜尋"));
     }
 
     // Home title (only when currently in Home mode)
@@ -1728,7 +1834,11 @@ void MainWindow::updateAllTexts() {
                                           ? canon
                                           : QStringLiteral("%1 %2").arg(emoji, lm.getText(baseZh));
                 displayName = tagLibraryLabelStripAiBadge(displayName.trimmed());
-                node->setText(0, QStringLiteral("%1 (%2)").arg(displayName).arg(n));
+                const bool isFolder = node->data(0, Qt::UserRole + 3).toInt() == 1;
+                if (isFolder)
+                    node->setText(0, QStringLiteral("📁 %1 (%2)").arg(displayName).arg(n));
+                else
+                    node->setText(0, QStringLiteral("🏷️ %1 (%2)").arg(displayName).arg(n));
             }
             for (int i = 0; i < node->childCount(); ++i) walk(node->child(i));
         };
@@ -1829,12 +1939,7 @@ void MainWindow::setupFourColumnLayout() {
     m_tagTabWidget = new QTabWidget(this);
     m_systemTagListWidget = new QListWidget(this);
     m_systemTagListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_aiTagTreeWidget = new QTreeWidget(this);
-    m_aiTagTreeWidget->setColumnCount(1);
-    m_aiTagTreeWidget->setHeaderHidden(true);
-    m_aiTagTreeWidget->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_aiTagTreeWidget->setRootIsDecorated(true);
-    m_aiTagTreeWidget->setUniformRowHeights(true);
+    m_aiTagTreeWidget = new AiTagDropTreeWidget(this, this);
     connect(m_systemTagListWidget, &QListWidget::itemClicked, this, &MainWindow::onTagSelected);
     connect(m_aiTagTreeWidget, &QTreeWidget::itemClicked, this, &MainWindow::onAiTagTreeItemClicked);
     m_tagTabWidget->addTab(m_systemTagListWidget, LanguageManager::instance().getText(QStringLiteral("預設分類 (System Tags)")));
@@ -1997,10 +2102,7 @@ void MainWindow::setupFourColumnLayout() {
     cmbTagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("All Files")), QStringLiteral("ALL"));
     cmbTagFilter->setToolTip(QStringLiteral("🏷️ 標籤篩選"));
     rowFilter->addWidget(cmbTagFilter, 1);
-
-    txtSearch = new QLineEdit(this);
-    txtSearch->setPlaceholderText(QStringLiteral("🔍 搜尋"));
-    rowFilter->addWidget(txtSearch, 2);
+    rowFilter->addStretch(1);
     controlsCol->addLayout(rowFilter);
 
     filesLayout->addLayout(controlsCol);
@@ -2035,7 +2137,6 @@ void MainWindow::setupFourColumnLayout() {
         renderFileListBatch(remaining);
     });
 
-    connect(txtSearch, &QLineEdit::textChanged, this, &MainWindow::filterFiles);
     connect(cmbTagFilter, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         syncTagListFromTagFilter();
         filterFiles();
@@ -2196,7 +2297,7 @@ void MainWindow::setupFourColumnLayout() {
     tagGroupLayout->addWidget(btnAddExistingTag);
     rebuildAddExistingTagMenu();
 
-    btnAutoMergeTags = new QPushButton(QStringLiteral("🤖 AI 自動收斂標籤"), this);
+    btnAutoMergeTags = new QPushButton(QStringLiteral("🤖 AI 智能標籤分類 (Generate Tag Folders)"), this);
     btnAutoMergeTags->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     btnAutoMergeTags->setMinimumHeight(36);
     btnAutoMergeTags->setStyleSheet(QStringLiteral(
@@ -2217,7 +2318,7 @@ void MainWindow::setupFourColumnLayout() {
         "  border: 1px solid rgba(255,255,255,0.10);"
         "  color: rgba(255,255,255,0.55);"
         "}"));
-    connect(btnAutoMergeTags, &QPushButton::clicked, this, &MainWindow::consolidateTagsWithAI);
+    connect(btnAutoMergeTags, &QPushButton::clicked, this, &MainWindow::generateTagFoldersWithAI);
     tagGroupLayout->addWidget(btnAutoMergeTags);
     tagGroupLayout->addStretch(1);
 
@@ -3325,6 +3426,7 @@ void MainWindow::updateTagListCountsOnly() {
                 for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
                 return;
             }
+            const bool isFolder = it->data(0, Qt::UserRole + 3).toInt() == 1;
             const QString canon = normalizeDisplayTag(role);
             int n = 0;
             {
@@ -3336,11 +3438,13 @@ void MainWindow::updateTagListCountsOnly() {
             const QString displayName = baseZh.isEmpty()
                                             ? canon
                                             : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-            const QString rowLabel = tagLibraryLabelStripAiBadge(displayName);
-            it->setText(0, QStringLiteral("%1 (%2)").arg(rowLabel).arg(n));
-            it->setData(0, Qt::UserRole, canon);
+            const QString nice = tagLibraryLabelStripAiBadge(displayName).trimmed();
             it->setData(0, Qt::UserRole + 1, n);
             it->setData(0, Qt::UserRole + 2, baseZh);
+            if (isFolder)
+                it->setText(0, QStringLiteral("📁 %1 (%2)").arg(nice).arg(n));
+            else
+                it->setText(0, QStringLiteral("🏷️ %1 (%2)").arg(nice).arg(n));
             for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
         };
         for (int i = 0; i < tree->topLevelItemCount(); ++i) walk(tree->topLevelItem(i));
@@ -3433,6 +3537,10 @@ void MainWindow::updateTagList() {
     }
 
     if (m_aiTagTreeWidget) {
+        const int kKindRole = Qt::UserRole + 3;
+        const int kKindFolder = 1;
+        const int kKindLeaf = 0;
+
         QList<QString> aiOrdered;
         for (const QString &c : ordered) {
             if (TagManager::hasAiPrefix(c)) aiOrdered.append(c);
@@ -3440,59 +3548,119 @@ void MainWindow::updateTagList() {
         QSet<QString> aiSet;
         for (const QString &c : aiOrdered) aiSet.insert(c);
 
-        QHash<QString, QVector<QString>> childMap;
-        QVector<QString> roots;
+        QHash<QString, QString> parentOf;
         for (const QString &t : aiOrdered) {
             QString p;
             {
                 QMutexLocker locker(&tagMutex);
                 p = tagManager.tagParent(t);
             }
-            if (!p.isEmpty() && aiSet.contains(p))
-                childMap[p].append(t);
-            else
-                roots.append(t);
+            parentOf.insert(t, p);
         }
+
+        QSet<QString> allTags = aiSet;
+        for (auto pit = parentOf.constBegin(); pit != parentOf.constEnd(); ++pit) {
+            const QString p = pit.value().trimmed();
+            if (!p.isEmpty() && TagManager::hasAiPrefix(p))
+                allTags.insert(p);
+        }
+
+        for (const QString &t : allTags) {
+            if (!parentOf.contains(t)) {
+                QString p;
+                {
+                    QMutexLocker locker(&tagMutex);
+                    p = tagManager.tagParent(t);
+                }
+                parentOf.insert(t, p);
+            }
+        }
+
+        QSet<QString> folderTags;
+        for (auto pit = parentOf.constBegin(); pit != parentOf.constEnd(); ++pit) {
+            const QString child = pit.key();
+            const QString p = pit.value().trimmed();
+            if (!p.isEmpty() && TagManager::hasAiPrefix(p) && allTags.contains(child))
+                folderTags.insert(p);
+        }
+
         auto countFor = [&](const QString &c) -> int {
             if (normToFiles.count(c)) return static_cast<int>(normToFiles[c].size());
             QMutexLocker locker(&tagMutex);
             return static_cast<int>(tagManager.getFilesByTag(c).size());
         };
+
+        auto sortedChildren = [&](const QString &parentKey) {
+            QVector<QString> out;
+            for (const QString &t : allTags) {
+                if (t == parentKey) continue;
+                if (parentOf.value(t).trimmed() != parentKey) continue;
+                out.append(t);
+            }
+            auto isFolderFn = [&](const QString &x) { return folderTags.contains(x); };
+            std::sort(out.begin(), out.end(), [&](const QString &a, const QString &b) {
+                const bool fa = isFolderFn(a);
+                const bool fb = isFolderFn(b);
+                if (fa != fb) return fa;
+                const int na = countFor(a);
+                const int nb = countFor(b);
+                if (na != nb) return na > nb;
+                return a.localeAwareCompare(b) < 0;
+            });
+            return out;
+        };
+
+        QVector<QString> roots;
+        for (const QString &t : allTags) {
+            const QString p = parentOf.value(t).trimmed();
+            if (p.isEmpty() || !allTags.contains(p))
+                roots.append(t);
+        }
         std::sort(roots.begin(), roots.end(), [&](const QString &a, const QString &b) {
+            const bool fa = folderTags.contains(a);
+            const bool fb = folderTags.contains(b);
+            if (fa != fb) return fa;
             const int na = countFor(a);
             const int nb = countFor(b);
             if (na != nb) return na > nb;
             return a.localeAwareCompare(b) < 0;
         });
 
-        std::function<void(QTreeWidgetItem *, const QString &)> addAiNode;
-        addAiNode = [&](QTreeWidgetItem *parentItem, const QString &canon) {
+        std::function<void(QTreeWidgetItem *, const QString &)> addNode;
+        addNode = [&](QTreeWidgetItem *parItem, const QString &canon) {
+            const bool asFolder = folderTags.contains(canon);
             const int n = countFor(canon);
             const QString baseZh = systemTagBaseZh(canon);
             const QString emoji = systemTagEmojiPrefix(canon);
             const QString displayName = baseZh.isEmpty()
                                             ? canon
                                             : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-            const QString rowLabel = tagLibraryLabelStripAiBadge(displayName);
-            QTreeWidgetItem *it = parentItem ? new QTreeWidgetItem(parentItem)
-                                             : new QTreeWidgetItem();
-            it->setText(0, QStringLiteral("%1 (%2)").arg(rowLabel).arg(n));
-            it->setData(0, Qt::UserRole, canon);
-            it->setData(0, Qt::UserRole + 1, n);
-            it->setData(0, Qt::UserRole + 2, baseZh);
-            if (!parentItem)
-                m_aiTagTreeWidget->addTopLevelItem(it);
-            QVector<QString> ch = childMap.value(canon);
-            std::sort(ch.begin(), ch.end(), [&](const QString &a, const QString &b) {
-                const int na = countFor(a);
-                const int nb = countFor(b);
-                if (na != nb) return na > nb;
-                return a.localeAwareCompare(b) < 0;
-            });
-            for (const QString &c : ch) addAiNode(it, c);
+            const QString nice = tagLibraryLabelStripAiBadge(displayName).trimmed();
+
+            QTreeWidgetItem *item = parItem ? new QTreeWidgetItem(parItem) : new QTreeWidgetItem();
+            if (asFolder) {
+                QFont f = item->font(0);
+                f.setBold(true);
+                item->setFont(0, f);
+                item->setText(0, QStringLiteral("📁 %1 (%2)").arg(nice).arg(n));
+                item->setData(0, Qt::UserRole, canon);
+                item->setData(0, kKindRole, kKindFolder);
+            } else {
+                item->setText(0, QStringLiteral("🏷️ %1 (%2)").arg(nice).arg(n));
+                item->setData(0, Qt::UserRole, canon);
+                item->setData(0, kKindRole, kKindLeaf);
+            }
+            item->setData(0, Qt::UserRole + 1, n);
+            item->setData(0, Qt::UserRole + 2, baseZh);
+            if (!parItem)
+                m_aiTagTreeWidget->addTopLevelItem(item);
+
+            for (const QString &ch : sortedChildren(canon))
+                addNode(item, ch);
         };
 
-        for (const QString &r : roots) addAiNode(nullptr, r);
+        for (const QString &r : roots)
+            addNode(nullptr, r);
     }
 
     syncTagFilterFromTagList();
@@ -3529,6 +3697,10 @@ void MainWindow::syncTagFilterFromTagList() {
             if (!node) return;
             const QString rawTag = node->data(0, Qt::UserRole).toString();
             if (rawTag == QStringLiteral("ALL") || rawTag.isEmpty()) {
+                for (int i = 0; i < node->childCount(); ++i) walk(node->child(i));
+                return;
+            }
+            if (node->data(0, Qt::UserRole + 3).toInt() == 1) {
                 for (int i = 0; i < node->childCount(); ++i) walk(node->child(i));
                 return;
             }
@@ -3601,7 +3773,8 @@ void MainWindow::syncTagListFromTagFilter() {
 }
 
 void MainWindow::filterFiles() {
-    const QString query = txtSearch->text().trimmed().toLower();
+    const QString query =
+        m_heroOmnibox ? m_heroOmnibox->text().trimmed().toLower() : QString();
     const QString tagFilter = cmbTagFilter->currentData().toString();
 
     std::vector<QString> filesWithTag;
@@ -3650,6 +3823,77 @@ void MainWindow::filterFiles() {
     }
 }
 
+void MainWindow::onHeroOmniboxReturnPressed()
+{
+    QObject *snd = sender();
+    if (snd != m_btnSemanticSearch && m_btnSemanticSearch)
+        m_btnSemanticSearch->animateClick();
+    runHeroSemanticSearchQuery();
+}
+
+void MainWindow::runHeroSemanticSearchQuery()
+{
+    if (!m_heroOmnibox) return;
+    const QString t = m_heroOmnibox->text();
+    bool hasWs = false;
+    for (QChar c : t) {
+        if (c.isSpace()) {
+            hasWs = true;
+            break;
+        }
+    }
+    if (t.length() > 10 || hasWs)
+        qDebug() << "Trigger Semantic Search";
+}
+
+void MainWindow::syncAiTagHierarchyFromTree()
+{
+    if (!m_aiTagTreeWidget) return;
+
+    const int kKindRole = Qt::UserRole + 3;
+    const int kKindFolder = 1;
+
+    std::function<void(QTreeWidgetItem *, const QString &)> walk;
+    walk = [&](QTreeWidgetItem *it, const QString &parentTag) {
+        if (!it) return;
+        const QString role = it->data(0, Qt::UserRole).toString();
+        if (role == QStringLiteral("ALL")) {
+            for (int i = 0; i < it->childCount(); ++i)
+                walk(it->child(i), QString());
+            return;
+        }
+        const bool isFolder = it->data(0, kKindRole).toInt() == kKindFolder;
+        if (isFolder) {
+            for (int i = 0; i < it->childCount(); ++i)
+                walk(it->child(i), role);
+            return;
+        }
+        if (!role.isEmpty() && TagManager::hasAiPrefix(role)) {
+            {
+                QMutexLocker locker(&tagMutex);
+                tagManager.setAiTagParent(role, parentTag, false);
+            }
+            for (int i = 0; i < it->childCount(); ++i)
+                walk(it->child(i), role);
+            return;
+        }
+        for (int i = 0; i < it->childCount(); ++i)
+            walk(it->child(i), parentTag);
+    };
+
+    for (int ti = 0; ti < m_aiTagTreeWidget->topLevelItemCount(); ++ti) {
+        QTreeWidgetItem *tl = m_aiTagTreeWidget->topLevelItem(ti);
+        if (!tl) continue;
+        walk(tl, QString());
+    }
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.saveTags();
+    }
+    updateTagList();
+}
+
 void MainWindow::onFileSelected(QListWidgetItem *item) {
     if (!item) return;
     const QString absPath = item->data(Qt::UserRole).toString();
@@ -3672,6 +3916,11 @@ void MainWindow::onTagSelected(QListWidgetItem *item) {
 
 void MainWindow::onAiTagTreeItemClicked(QTreeWidgetItem *item, int) {
     if (!item) return;
+    const int kKindRole = Qt::UserRole + 3;
+    if (item->data(0, kKindRole).toInt() == 1) {
+        item->setExpanded(!item->isExpanded());
+        return;
+    }
     applyTagSelectionData(item->data(0, Qt::UserRole).toString());
 }
 
@@ -3926,7 +4175,7 @@ void MainWindow::analyzeFile() {
     analyzeFileForPath(fp);
 }
 
-void MainWindow::analyzeFileForPath(const QString &absPath) {
+void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiveBypass) {
     const QString fp = QDir::cleanPath(absPath);
     if (fp.isEmpty()) return;
 
@@ -3941,6 +4190,22 @@ void MainWindow::analyzeFileForPath(const QString &absPath) {
     if (trySystemBypassPreset(fi, &bypassSummary, &bypassTags)) {
         m_currentAnalyzingFile = fp;
         applyPresetBypassAnalysis(fp, bypassSummary, bypassTags);
+        return;
+    }
+
+    bool fromBypassSet = false;
+    if (m_coldArchiveBypassPaths.contains(fp)) {
+        m_coldArchiveBypassPaths.remove(fp);
+        fromBypassSet = true;
+    }
+    const bool forceLlmCold = forceColdArchiveBypass || fromBypassSet || !m_isBatchMode
+                              || (m_isBatchMode && !m_batchTriggeredByBackgroundAuto);
+
+    QString coldSummary;
+    QStringList coldTags;
+    if (tryColdArchiveBypass(fi, forceLlmCold, &coldSummary, &coldTags)) {
+        m_currentAnalyzingFile = fp;
+        applyColdArchiveAnalysis(fp, coldSummary, coldTags);
         return;
     }
 
@@ -4318,6 +4583,71 @@ void MainWindow::applyPresetBypassAnalysis(const QString &fp, const QString &sum
     ensureAnalysisIndicatorTimer();
 }
 
+void MainWindow::applyColdArchiveAnalysis(const QString &fp, const QString &summary, const QStringList &tags)
+{
+    QJsonObject obj;
+    obj.insert(QStringLiteral("summary"), summary);
+    QJsonArray arr;
+    for (const QString &t : tags) {
+        const QString u = t.trimmed();
+        if (!u.isEmpty()) arr.append(u);
+    }
+    obj.insert(QStringLiteral("tags"), arr);
+    obj.insert(QStringLiteral("tags_are_manual"), true);
+    obj.insert(QStringLiteral("skip_content_hash"), true);
+
+    if (m_isBatchMode) {
+        m_pendingResults.insert(fp, obj);
+        ++m_batchCompletedCount;
+        setUiBusy(false);
+        if (batchProgressBar && m_totalBatchSize > 0) {
+            batchProgressBar->setValue(qMin(m_totalBatchSize, m_batchCompletedCount));
+        }
+        syncBatchProgressBars();
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
+        updateBackgroundStatusLabel();
+        QTimer::singleShot(0, this, &MainWindow::processNextInQueue);
+        refreshCurrentAnalysisTargetUi();
+        return;
+    }
+
+    if (!summary.isEmpty()) m_aiSummaryByPath.insert(fp, summary);
+    {
+        QMutexLocker locker(&tagMutex);
+        for (const QString &t : tags) {
+            const QString u = t.trimmed();
+            if (!u.isEmpty()) tagManager.addTag(fp, u, false);
+        }
+        tagManager.saveTags();
+    }
+    if (m_aiSummaryEdit && currentFilePath() == fp) m_aiSummaryEdit->setPlainText(summary);
+    updateTagDisplayForFile(fp);
+    updateTagList();
+    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
+    else populateVirtualTagFiles(activeVirtualTag);
+    reselectFileInList(fp);
+    lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
+    m_currentAnalyzingFile.clear();
+    refreshCurrentAnalysisTargetUi();
+    refreshFileAndFolderAnalysisIndicators();
+    ensureAnalysisIndicatorTimer();
+}
+
+bool MainWindow::tryColdArchiveBypass(const QFileInfo &fi, bool forceLlm, QString *summaryOut, QStringList *tagsOut) const
+{
+    if (!summaryOut || !tagsOut) return false;
+    summaryOut->clear();
+    tagsOut->clear();
+    if (m_coldArchiveYears <= 0 || forceLlm) return false;
+
+    const QDateTime cutoff = QDateTime::currentDateTime().addYears(-m_coldArchiveYears);
+    if (fi.lastModified() >= cutoff) return false;
+
+    *summaryOut = QStringLiteral("因長時間未修改，系統已將其自動封存以節省分析算力。");
+    *tagsOut << QStringLiteral("[AI] 封存冷資料");
+    return true;
+}
+
 void MainWindow::loadBackgroundAutoAnalyzeSetting()
 {
     QSettings s;
@@ -4328,6 +4658,14 @@ void MainWindow::loadBackgroundAutoAnalyzeSetting()
     updateBackgroundStatusLabel();
     if (m_bgAutoAnalyzeEnabled && m_bgAutoAnalyzeDebounce && !rootPath.trimmed().isEmpty())
         m_bgAutoAnalyzeDebounce->start();
+
+    loadColdArchiveYearsSetting();
+}
+
+void MainWindow::loadColdArchiveYearsSetting()
+{
+    QSettings s;
+    m_coldArchiveYears = s.value(QStringLiteral("workspace/cold_archive_years"), 0).toInt();
 }
 
 void MainWindow::watchDirectoryRecursively(const QString &rootPathParam)
@@ -4937,7 +5275,7 @@ void MainWindow::onAnalysisFinished() {
         const QString nextP = QDir::cleanPath(m_pendingPrioritySingleFile);
         m_pendingPrioritySingleFile.clear();
         if (!nextP.isEmpty() && nextP != fp)
-            QTimer::singleShot(0, this, [this, nextP]() { analyzeFileForPath(nextP); });
+            QTimer::singleShot(0, this, [this, nextP]() { analyzeFileForPath(nextP, true); });
     } else if (m_bgAutoAnalyzeEnabled && m_bgAutoAnalyzeDebounce && !rootPath.trimmed().isEmpty()) {
         m_bgAutoAnalyzeDebounce->start();
     }
@@ -4947,7 +5285,7 @@ void MainWindow::onAnalysisFinished() {
     clearAnalysisWorkFlagsAndSyncUi();
 }
 
-void MainWindow::consolidateTagsWithAI() {
+void MainWindow::generateTagFoldersWithAI() {
     if (m_isConsolidatingTags) return;
     if (!llamaEngine.isModelLoaded()) {
         QMessageBox::warning(this,
@@ -4956,31 +5294,41 @@ void MainWindow::consolidateTagsWithAI() {
         return;
     }
 
-    std::vector<QString> rawTags;
+    struct TagCount {
+        QString tag;
+        int count = 0;
+    };
+    QVector<TagCount> ranked;
+    QSet<QString> seen;
     {
-        QMutexLocker locker(&tagMutex);
-        rawTags = tagManager.getAllTags();
-    }
-
-    QStringList aiTags;
-    QSet<QString> aiTagSet;
-    for (const QString &t : rawTags) {
-        const QString tt = t.trimmed();
-        if (TagManager::hasAiPrefix(tt)) {
-            if (!aiTagSet.contains(tt)) {
-                aiTagSet.insert(tt);
-                aiTags << tt;
+        std::vector<QString> rawTags;
+        {
+            QMutexLocker locker(&tagMutex);
+            rawTags = tagManager.getAllTags();
+        }
+        for (const QString &t : rawTags) {
+            const QString tt = t.trimmed();
+            if (!TagManager::hasAiPrefix(tt) || seen.contains(tt)) continue;
+            seen.insert(tt);
+            int n = 0;
+            {
+                QMutexLocker locker(&tagMutex);
+                n = static_cast<int>(tagManager.getFilesByTag(tt).size());
             }
+            ranked.push_back({tt, n});
         }
     }
 
-    if (aiTags.size() < 2) return;
-
-    std::sort(aiTags.begin(), aiTags.end(), [](const QString &a, const QString &b) {
-        return QString::compare(a, b, Qt::CaseInsensitive) < 0;
+    std::sort(ranked.begin(), ranked.end(), [](const TagCount &a, const TagCount &b) {
+        if (a.count != b.count) return a.count > b.count;
+        return a.tag.localeAwareCompare(b.tag) < 0;
     });
-    if (aiTags.size() > 120)
-        aiTags = aiTags.mid(0, 120);
+
+    QStringList aiTags;
+    const int cap = qMin(100, ranked.size());
+    for (int i = 0; i < cap; ++i) aiTags << ranked[i].tag;
+
+    if (aiTags.size() < 2) return;
 
     m_isConsolidatingTags = true;
     updateAllTexts();
@@ -4988,25 +5336,25 @@ void MainWindow::consolidateTagsWithAI() {
     auto &lm = LanguageManager::instance();
 
     const QString systemPromptEn = QStringLiteral(
-        "You are an expert data taxonomist. I will give you a list of tags. "
-        "Your job is to find tags that have the EXACT SAME meaning or are highly redundant synonyms, and group them. "
-        "You MUST output ONLY a valid JSON dictionary where the Key is the redundant tag (to be removed), and the Value is the target tag (to keep). "
-        "Example: {\"[AI] Reports\": \"[AI] 報告\", \"[AI] SQL\": \"[AI] Database\"}. "
-        "If no merges are needed, output {}. DO NOT output markdown or explanations.");
+        "You are an expert knowledge organizer. I will give you up to 100 existing AI tags (each begins with [AI]). "
+        "Analyze semantic relationships and group them into 5–8 high-level concept folders (e.g. Financial reports, HR, Engineering). "
+        "Each folder name should be short (prefer Chinese if tags are Chinese). "
+        "Output ONLY one JSON object: keys = folder names (without needing the [AI] prefix in keys), values = JSON arrays of tag strings that must match the input list exactly. "
+        "Every tag should appear in at most one folder; omit tags that fit nowhere. "
+        "Do not output markdown or explanations.");
 
     const QString systemPromptZh = QStringLiteral(
-        "你是一位專業的資料分類（Taxonomy）專家。我會給你一份標籤清單。你的任務是找出「意義完全相同」或「高度冗餘的同義標籤」，並提出合併建議。"
-        "你必須只輸出一個合法的 JSON 字典：Key 是要被移除的冗餘標籤，Value 是要保留的目標標籤。"
-        "範例：{\"[AI] Reports\":\"[AI] 報告\",\"[AI] SQL\":\"[AI] Database\"}。"
-        "若不需要合併，輸出 {}。不要輸出 markdown 或任何解釋。");
+        "你是一位知識架構專家。以下最多 100 個既有的 AI 標籤（皆含 [AI] 前綴）。"
+        "請分析其語意關聯與共同點，將它們歸納成 5～8 個高階「概念資料夾」（例如：財務報表、人事管理、技術開發）。"
+        "資料夾名稱請簡短；輸出僅能是一個 JSON 物件：Key 為資料夾名稱（可不寫 [AI] 前綴），Value 為標籤字串陣列，且標籤必須與輸入清單完全一致。"
+        "同一標籤最多出現在一個資料夾；無法歸類者可略過。"
+        "不要輸出 markdown 或任何說明文字。");
 
     const QString systemPrompt = (lm.language() == LanguageManager::Language::EN_US) ? systemPromptEn : systemPromptZh;
 
-    const QString userPrompt = QStringLiteral("Tags:\n- %1\n")
-                                   .arg(aiTags.join(QStringLiteral("\n- ")));
+    const QString userPrompt = QStringLiteral("Tags:\n- %1\n").arg(aiTags.join(QStringLiteral("\n- ")));
 
-    const QString fullPrompt = QStringLiteral("System:\n%1\n\nUser:\n%2")
-                                   .arg(systemPrompt, userPrompt);
+    const QString fullPrompt = QStringLiteral("System:\n%1\n\nUser:\n%2").arg(systemPrompt, userPrompt);
 
     if (!m_consolidateWatcher) {
         m_isConsolidatingTags = false;
@@ -5055,7 +5403,7 @@ static QString extractFirstBalancedJsonObject(const QString &rawIn)
     return QStringLiteral("{}");
 }
 
-void MainWindow::applyConsolidateMergesFromRaw(const QString &rawIn)
+void MainWindow::applyTagFolderClustersFromRaw(const QString &rawIn)
 {
     QString capped = rawIn;
     if (capped.size() > 500000)
@@ -5067,100 +5415,74 @@ void MainWindow::applyConsolidateMergesFromRaw(const QString &rawIn)
     const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &err);
     if (err.error != QJsonParseError::NoError || !doc.isObject()) {
         QMessageBox::warning(this, QStringLiteral("Smartflie"),
-                               QStringLiteral("Invalid JSON: %1").arg(err.errorString()));
+                             QStringLiteral("Invalid JSON: %1").arg(err.errorString()));
         return;
     }
 
-    std::vector<QString> allTags;
-    {
-        QMutexLocker locker(&tagMutex);
-        allTags = tagManager.getAllTags();
-    }
     QSet<QString> aiTagSet;
-    for (const QString &t : allTags) {
-        const QString tt = t.trimmed();
-        if (TagManager::hasAiPrefix(tt))
-            aiTagSet.insert(tt);
-    }
-
-    int merged = 0;
-    const QJsonObject obj = doc.object();
-    QMap<QString, QString> rawEdges;
-    for (auto it = obj.begin(); it != obj.end(); ++it) {
-        const QString key = it.key().trimmed();
-        const QString value = it.value().toString().trimmed();
-        if (key.isEmpty() || value.isEmpty()) continue;
-        if (key == value) continue;
-        if (!aiTagSet.contains(key) || !aiTagSet.contains(value)) continue;
-        rawEdges.insert(key, value);
-    }
-
-    auto followKeepTarget = [&rawEdges](const QString &start) -> QString {
-        QString cur = start;
-        QSet<QString> stack;
-        while (rawEdges.contains(cur)) {
-            if (stack.contains(cur)) return QString();
-            stack.insert(cur);
-            const QString nxt = rawEdges.value(cur).trimmed();
-            if (nxt.isEmpty()) return QString();
-            cur = nxt;
+    {
+        std::vector<QString> allTags;
+        {
+            QMutexLocker locker(&tagMutex);
+            allTags = tagManager.getAllTags();
         }
-        return cur;
+        for (const QString &t : allTags) {
+            const QString tt = t.trimmed();
+            if (TagManager::hasAiPrefix(tt))
+                aiTagSet.insert(tt);
+        }
+    }
+
+    auto resolveChild = [&](const QString &raw) -> QString {
+        QString u = raw.trimmed();
+        if (u.isEmpty()) return QString();
+        if (!TagManager::hasAiPrefix(u))
+            u = QStringLiteral("[AI] ") + u;
+        u = normalizeDisplayTag(u);
+        if (aiTagSet.contains(u))
+            return u;
+        for (const QString &x : aiTagSet) {
+            if (QString::compare(x, u, Qt::CaseInsensitive) == 0)
+                return x;
+        }
+        return QString();
     };
 
-    QMap<QString, QString> planned;
-    for (auto it = rawEdges.constBegin(); it != rawEdges.constEnd(); ++it) {
-        const QString key = it.key();
-        const QString finalTo = followKeepTarget(it.value());
-        if (finalTo.isEmpty() || finalTo == key) continue;
-        if (!aiTagSet.contains(key) || !aiTagSet.contains(finalTo)) continue;
-        planned.insert(key, finalTo);
-    }
+    int linked = 0;
+    const QJsonObject rootObj = doc.object();
+    for (auto it = rootObj.begin(); it != rootObj.end(); ++it) {
+        const QString folderKey = it.key().trimmed();
+        if (folderKey.isEmpty()) continue;
+        QString folderCanon = folderKey;
+        if (!TagManager::hasAiPrefix(folderCanon))
+            folderCanon = QStringLiteral("[AI] ") + TagManager::stripAiPrefix(folderCanon).trimmed();
+        folderCanon = normalizeDisplayTag(folderCanon);
+        if (!TagManager::hasAiPrefix(folderCanon)) continue;
 
-    QVector<QPair<QString, QString>> mergePairs;
-    mergePairs.reserve(planned.size());
-    for (auto it = planned.constBegin(); it != planned.constEnd(); ++it) {
-        mergePairs.append(qMakePair(it.key(), it.value()));
-    }
-    if (mergePairs.size() > 500)
-        mergePairs.resize(500);
-
-    int outerIters = 0;
-    while (!mergePairs.isEmpty()) {
-        if (++outerIters > 5000)
-            break;
-        bool progressed = false;
-        for (int i = 0; i < mergePairs.size();) {
-            if (merged >= 500) {
-                mergePairs.clear();
-                progressed = true;
-                break;
-            }
-            const QString oldT = mergePairs[i].first;
-            const QString newT = mergePairs[i].second;
-            bool newIsSource = false;
-            for (int j = 0; j < mergePairs.size(); ++j) {
-                if (j == i) continue;
-                if (mergePairs[j].first == newT) {
-                    newIsSource = true;
-                    break;
-                }
-            }
-            if (newIsSource) {
-                ++i;
-                continue;
-            }
-            {
-                QMutexLocker locker(&tagMutex);
-                tagManager.mergeTag(oldT, newT, false);
-            }
-            ++merged;
-            mergePairs.removeAt(i);
-            progressed = true;
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.ensureAiFolderParentVisible(folderCanon, false);
         }
-        if (!progressed) break;
-        if (merged >= 500)
-            break;
+
+        QStringList members;
+        const QJsonValue v = it.value();
+        if (v.isArray()) {
+            for (const auto &el : v.toArray()) {
+                const QString s = el.toString().trimmed();
+                if (!s.isEmpty()) members << s;
+            }
+        } else if (v.isString()) {
+            const QString s = v.toString().trimmed();
+            if (!s.isEmpty()) members << s;
+        }
+
+        for (const QString &m : members) {
+            const QString child = resolveChild(m);
+            if (child.isEmpty() || child == folderCanon) continue;
+            QMutexLocker locker(&tagMutex);
+            if (tagManager.setAiTagParent(child, folderCanon, false))
+                ++linked;
+        }
     }
 
     {
@@ -5171,10 +5493,11 @@ void MainWindow::applyConsolidateMergesFromRaw(const QString &rawIn)
     updateTagList();
     QMessageBox::information(this,
                              QStringLiteral("Smartflie"),
-                             LanguageManager::instance().getText(QStringLiteral("已自動合併 %1 組標籤")).arg(merged));
+                             QStringLiteral("已套用 %1 個標籤與概念資料夾關聯").arg(linked));
 }
 
-void MainWindow::onConsolidateTagsFinished() {
+void MainWindow::onTagFolderClustersFinished()
+{
     if (!m_consolidateWatcher) {
         m_isConsolidatingTags = false;
         updateAllTexts();
@@ -5193,7 +5516,7 @@ void MainWindow::onConsolidateTagsFinished() {
     }
 
     QTimer::singleShot(0, this, [this, raw]() {
-        applyConsolidateMergesFromRaw(raw);
+        applyTagFolderClustersFromRaw(raw);
         m_isConsolidatingTags = false;
         updateAllTexts();
     });

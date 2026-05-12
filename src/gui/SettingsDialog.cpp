@@ -20,6 +20,7 @@ namespace {
 static constexpr const char *kSettingsModelPathKey = "ai/model_path";
 static constexpr const char *kSettingsBgAutoAnalyze = "workspace/background_auto_analysis";
 static constexpr const char *kSettingsSystemFileBypass = "workspace/system_file_bypass_filter";
+static constexpr const char *kSettingsColdArchiveYears = "workspace/cold_archive_years";
 } // namespace
 
 SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
@@ -62,6 +63,18 @@ SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
             LanguageManager::instance().getText(QStringLiteral("settings_system_file_bypass")), this);
         m_systemFileBypass->setChecked(true);
         root->addWidget(m_systemFileBypass);
+    }
+
+    {
+        auto *row = new QHBoxLayout();
+        row->addWidget(new QLabel(tr("Ignore & archive files not modified for"), this));
+        m_coldArchiveCombo = new QComboBox(this);
+        m_coldArchiveCombo->addItem(tr("Off (disabled)"), 0);
+        m_coldArchiveCombo->addItem(tr("1 year"), 1);
+        m_coldArchiveCombo->addItem(tr("3 years"), 3);
+        m_coldArchiveCombo->addItem(tr("5 years"), 5);
+        row->addWidget(m_coldArchiveCombo, 1);
+        root->addLayout(row);
     }
 
     {
@@ -143,6 +156,12 @@ bool SettingsDialog::systemFileBypassFilter() const {
     return m_systemFileBypass && m_systemFileBypass->isChecked();
 }
 
+int SettingsDialog::coldArchiveYears() const
+{
+    if (!m_coldArchiveCombo) return 0;
+    return m_coldArchiveCombo->currentData().toInt();
+}
+
 void SettingsDialog::loadFromSettings() {
     QSettings s;
     // Language from LanguageManager (already persisted)
@@ -158,6 +177,12 @@ void SettingsDialog::loadFromSettings() {
     }
     if (m_systemFileBypass) {
         m_systemFileBypass->setChecked(s.value(QString::fromLatin1(kSettingsSystemFileBypass), true).toBool());
+    }
+    if (m_coldArchiveCombo) {
+        const int y = s.value(QString::fromLatin1(kSettingsColdArchiveYears), 0).toInt();
+        int idx = m_coldArchiveCombo->findData(y);
+        if (idx < 0) idx = 0;
+        m_coldArchiveCombo->setCurrentIndex(idx);
     }
 }
 
@@ -188,6 +213,13 @@ void SettingsDialog::saveToSettings() {
     const bool newBypass = systemFileBypassFilter();
     if (prevBypass != newBypass) {
         s.setValue(QString::fromLatin1(kSettingsSystemFileBypass), newBypass);
+        m_changed = true;
+    }
+
+    const int prevCold = s.value(QString::fromLatin1(kSettingsColdArchiveYears), 0).toInt();
+    const int newCold = coldArchiveYears();
+    if (prevCold != newCold) {
+        s.setValue(QString::fromLatin1(kSettingsColdArchiveYears), newCold);
         m_changed = true;
     }
 }

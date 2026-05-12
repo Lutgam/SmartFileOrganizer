@@ -79,6 +79,7 @@ protected:
 class GraphWidget;
 class SettingsDialog;
 class BusyChip;
+class AiTagDropTreeWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -115,11 +116,15 @@ private slots:
     void removeTag();
     void removeGlobalTag();
 
+    void onHeroOmniboxReturnPressed();
+    void syncAiTagHierarchyFromTree();
+    void loadColdArchiveYearsSetting();
+
     void onBackgroundScanProgress();
     void onBackgroundScanFinished();
-    void consolidateTagsWithAI();
-    void onConsolidateTagsFinished();
-    void applyConsolidateMergesFromRaw(const QString &raw);
+    void generateTagFoldersWithAI();
+    void onTagFolderClustersFinished();
+    void applyTagFolderClustersFromRaw(const QString &raw);
     void onBackgroundAutoAnalyzeDebounce();
 
     void onWorkspaceClearAiCache();
@@ -127,6 +132,7 @@ private slots:
     void onWorkspaceFactoryReset();
 
 private:
+    friend class AiTagDropTreeWidget;
     enum class FileListMode { PhysicalFolder, VirtualTag };
 
     // ===== Layout =====
@@ -140,9 +146,12 @@ private:
     QAction *m_actOpenFolder = nullptr;
     QAction *m_actSettings = nullptr;
 
-    void updateAllTexts();
+    QWidget *m_workspaceTopBar = nullptr;
+    QLineEdit *m_heroOmnibox = nullptr;
+    QPushButton *m_btnSemanticSearch = nullptr;
 
-    // Column 1: Tags (tabbed: system / AI)
+    void updateAllTexts();
+    void runHeroSemanticSearchQuery();
     QWidget *tagsPanel = nullptr;
     QLabel *lblTagLibraryTitle = nullptr;
     QTabWidget *m_tagTabWidget = nullptr;
@@ -171,7 +180,6 @@ private:
     bool m_showRestartBackgroundPrompt = false;
     QComboBox *cmbSort = nullptr;
     QComboBox *cmbTagFilter = nullptr;
-    QLineEdit *txtSearch = nullptr;
     QListWidget *fileList = nullptr;
     QPushButton *btnLoadMore = nullptr;
     QPushButton *btnLoadAll = nullptr;
@@ -269,10 +277,13 @@ private:
     QTimer *m_bgAutoAnalyzeDebounce = nullptr;
     int m_bgAnalyzeQueueRetries = 0;
     bool m_systemFileBypassEnabled = true;
+    int m_coldArchiveYears = 0;
+    /// Paths that must skip cold-archive short-circuit (prepend / folder prepend).
+    QSet<QString> m_coldArchiveBypassPaths;
 
     void startBatchAnalysis();
     void processNextInQueue();
-    void analyzeFileForPath(const QString &absPath);
+    void analyzeFileForPath(const QString &absPath, bool forceColdArchiveBypass = false);
     void flushPendingBatchResults();
     void showFolderAnalysisReport();
     void applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached, const QString &contentHashHex);
@@ -322,6 +333,8 @@ private:
 
     void collectUnanalyzedPathsFromWorkspace(int maxFiles, QStringList *out);
     bool trySystemBypassPreset(const QFileInfo &fi, QString *summaryOut, QStringList *tagsOut) const;
+    bool tryColdArchiveBypass(const QFileInfo &fi, bool forceLlm, QString *summaryOut, QStringList *tagsOut) const;
+    void applyColdArchiveAnalysis(const QString &fp, const QString &summary, const QStringList &tags);
     void applyPresetBypassAnalysis(const QString &fp, const QString &summary, const QStringList &tags);
 
     std::vector<QString> m_pendingFilesToDisplay;

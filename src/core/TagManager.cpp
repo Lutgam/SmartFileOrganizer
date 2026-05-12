@@ -236,6 +236,10 @@ void TagManager::loadTags(const std::string& directory) {
                     m_tagParents[child] = parent;
                 }
             }
+            for (const auto &pr : m_tagParents) {
+                if (hasAiPrefix(pr.second) && !m_tagToFilePaths.count(pr.second))
+                    m_tagToFilePaths[pr.second] = {};
+            }
         } else {
             // Legacy: top-level keys are absolute paths → JSON array of tag strings.
             for (auto it = root.begin(); it != root.end(); ++it) {
@@ -767,6 +771,15 @@ QString TagManager::tagParent(const QString &tag) const
     return it->second;
 }
 
+void TagManager::ensureAiFolderParentVisible(const QString &folderCanonTag, bool save)
+{
+    QMutexLocker locker(&m_mutex);
+    const QString nt = normalizeTag(folderCanonTag);
+    if (nt.isEmpty() || !hasAiPrefix(nt)) return;
+    m_tagToFilePaths.insert({nt, {}});
+    if (save) saveTags();
+}
+
 bool TagManager::setAiTagParent(const QString &childTag, const QString &parentTag, bool save)
 {
     QMutexLocker locker(&m_mutex);
@@ -786,6 +799,8 @@ bool TagManager::setAiTagParent(const QString &childTag, const QString &parentTa
             walk = (it == m_tagParents.end()) ? QString() : it->second;
         }
     }
+    if (!parent.isEmpty())
+        m_tagToFilePaths.insert({parent, {}});
     if (parent.isEmpty())
         m_tagParents.erase(child);
     else

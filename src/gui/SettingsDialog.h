@@ -20,6 +20,8 @@ public:
     bool backgroundAutoAnalysis() const;
     /// When true, skip LLM for shortcuts / executables / archives (workspace/system_file_bypass_filter).
     bool systemFileBypassFilter() const;
+    /// 0 = disabled, otherwise years (1, 3, or 5) for cold-archive skip.
+    int coldArchiveYears() const;
 
 signals:
     void settingsApplied();
@@ -40,6 +42,7 @@ private:
     QPushButton *m_browseBtn = nullptr;
     QCheckBox *m_bgAutoAnalyze = nullptr;
     QCheckBox *m_systemFileBypass = nullptr;
+    QComboBox *m_coldArchiveCombo = nullptr;
 
     QPushButton *m_btnClearAi = nullptr;
     QPushButton *m_btnClearHash = nullptr;

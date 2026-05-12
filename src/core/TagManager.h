@@ -63,6 +63,7 @@ public:
 
     QString tagParent(const QString &tag) const;
     bool setAiTagParent(const QString &childTag, const QString &parentTag, bool save = true);
+    void ensureAiFolderParentVisible(const QString &folderCanonTag, bool save = true);
     std::vector<QString> directChildTags(const QString &parentTag) const;
     void deleteTagDissolveChildren(const QString &tag, bool save = true);
     void deleteTagCascadeAi(const QString &tag, bool save = true);
