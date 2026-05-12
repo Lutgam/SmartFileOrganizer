@@ -780,6 +780,28 @@ void TagManager::ensureAiFolderParentVisible(const QString &folderCanonTag, bool
     if (save) saveTags();
 }
 
+void TagManager::stripAiTagParentsForSyntheticFolders(const QStringList &syntheticParentTags, bool save)
+{
+    QMutexLocker locker(&m_mutex);
+    QSet<QString> synth;
+    for (const QString &s : syntheticParentTags) {
+        const QString nt = normalizeTag(s);
+        if (!nt.isEmpty()) synth.insert(nt);
+    }
+    for (auto it = m_tagParents.begin(); it != m_tagParents.end();) {
+        if (hasAiPrefix(it->first) && synth.contains(it->second))
+            it = m_tagParents.erase(it);
+        else
+            ++it;
+    }
+    for (const QString &p : std::as_const(synth)) {
+        auto fi = m_tagToFilePaths.find(p);
+        if (fi == m_tagToFilePaths.end()) continue;
+        if (fi->second.empty()) m_tagToFilePaths.erase(fi);
+    }
+    if (save) saveTags();
+}
+
 bool TagManager::setAiTagParent(const QString &childTag, const QString &parentTag, bool save)
 {
     QMutexLocker locker(&m_mutex);

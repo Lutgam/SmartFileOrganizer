@@ -19,6 +19,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFileIconProvider>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -30,6 +31,7 @@
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QSet>
+#include <QVector>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -42,6 +44,7 @@
 #include <QSizePolicy>
 #include <QSpacerItem>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStyledItemDelegate>
 #include <QPainter>
 #include <QPaintEvent>
@@ -53,6 +56,7 @@
 #include <QThread>
 
 #include <algorithm>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -72,6 +76,10 @@
 #include <QCryptographicHash>
 #include <QByteArrayView>
 #include <QSettings>
+
+static QString extractFirstBalancedJsonObject(const QString &rawIn);
+static QString extractFirstBalancedJsonArray(const QString &rawIn);
+static QVector<int> parseSemanticRetrieverIdList(const QString &raw);
 
 /// Small arc spinner next to status text (matches file-list / folder-tree arc style).
 class BusyChip final : public QWidget {
@@ -559,6 +567,147 @@ static QString sha256HexOfFile(const QString &path)
         h.addData(QByteArrayView(buf, static_cast<qsizetype>(n)));
     }
     return QString::fromLatin1(h.result().toHex());
+}
+
+static const QString &kAiDrawerUncategorizedKey()
+{
+    static const QString k = QStringLiteral("__uncat__");
+    return k;
+}
+
+static QStringList sfFixedAiClusterDrawerKeys()
+{
+    return {QStringLiteral("[營運管理]"),     QStringLiteral("[技術與開發]"), QStringLiteral("[財務與法務]"),
+            QStringLiteral("[行銷與企劃]"), QStringLiteral("[人事與行政]"), QStringLiteral("[多媒體資源]"),
+            QStringLiteral("[會議與報告]"), QStringLiteral("[其他雜項]")};
+}
+
+static QString sfAiFolderTagForDrawerCanon(const QString &canonicalBracketKey)
+{
+    QString s = canonicalBracketKey.trimmed();
+    if (s.startsWith(QLatin1Char('[')) && s.endsWith(QLatin1Char(']')))
+        s = s.mid(1, s.size() - 2).trimmed();
+    return QStringLiteral("[AI] ") + s;
+}
+
+static QString sfNormalizeDrawerJsonKeyToCanon(const QString &raw)
+{
+    const QString t = raw.trimmed();
+    for (const QString &ref : sfFixedAiClusterDrawerKeys()) {
+        if (QString::compare(t, ref, Qt::CaseInsensitive) == 0) return ref;
+        const QString inner = ref.mid(1, ref.size() - 2).trimmed();
+        if (QString::compare(t, inner, Qt::CaseInsensitive) == 0) return ref;
+        const QString withAi = QStringLiteral("[AI] ") + inner;
+        if (QString::compare(t, withAi, Qt::CaseInsensitive) == 0) return ref;
+    }
+    return QString();
+}
+
+static bool sfIsSyntheticAiDrawerFolderTag(const QString &t)
+{
+    const QString nt = t.trimmed();
+    for (const QString &dk : sfFixedAiClusterDrawerKeys()) {
+        if (nt == sfAiFolderTagForDrawerCanon(dk)) return true;
+    }
+    return false;
+}
+
+static QStringList orderedSystemTagWhitelistCanons()
+{
+    return {kTagImage,
+            kTagVideo,
+            kTagAudio,
+            kTagDoc,
+            kTagDb,
+            QStringLiteral("📦壓縮檔"),
+            QStringLiteral("🧩設定"),
+            QStringLiteral("🧩 程式碼"),
+            QStringLiteral("💻安裝檔"),
+            QStringLiteral("💻應用程式"),
+            QStringLiteral("📦備份檔"),
+            QStringLiteral("🗓️會議"),
+            QStringLiteral("🧑‍💼履歷"),
+            QStringLiteral("🎒學校作業"),
+            QStringLiteral("💰財務"),
+            QStringLiteral("🎨設計")};
+}
+
+static QString mapLooseSystemTagToWhitelistCanon(const QString &rawIn)
+{
+    const QString n0 = normalizeDisplayTag(rawIn.trimmed());
+    if (TagManager::hasAiPrefix(n0)) return QString();
+
+    for (const QString &w : orderedSystemTagWhitelistCanons()) {
+        if (QString::compare(n0, w, Qt::CaseInsensitive) == 0) return w;
+    }
+
+    const QString low = n0.toLower();
+    if (low.contains(QStringLiteral("system shortcut")) || low.contains(QStringLiteral("系統捷徑")))
+        return QStringLiteral("🧩設定");
+
+    if (n0.contains(QStringLiteral("安裝檔"))) return QStringLiteral("💻安裝檔");
+
+    if (low == QStringLiteral("application") || low == QStringLiteral("applications") || low.contains(QStringLiteral("[應用程式]"))
+        || n0.contains(QStringLiteral("應用程式"))) {
+        return QStringLiteral("💻應用程式");
+    }
+
+    if (low.contains(QStringLiteral("source code")) || low == QStringLiteral("code") || low == QStringLiteral("script")
+        || n0.contains(QStringLiteral("程式碼")))
+        return QStringLiteral("🧩 程式碼");
+
+    if (n0.contains(QStringLiteral("壓縮檔"))) return QStringLiteral("📦壓縮檔");
+    if (n0.contains(QStringLiteral("備份檔"))) return QStringLiteral("📦備份檔");
+    if (n0.contains(QStringLiteral("會議"))) return QStringLiteral("🗓️會議");
+    if (n0.contains(QStringLiteral("履歷"))) return QStringLiteral("🧑‍💼履歷");
+    if (n0.contains(QStringLiteral("學校作業"))) return QStringLiteral("🎒學校作業");
+    if (n0.contains(QStringLiteral("財務"))) return QStringLiteral("💰財務");
+    if (n0.contains(QStringLiteral("設計"))) return QStringLiteral("🎨設計");
+    if (n0.contains(QStringLiteral("設定"))) return QStringLiteral("🧩設定");
+
+    return QString();
+}
+
+static QString aiCoreKeyForFuzzy(const QString &tagOrRaw)
+{
+    QString u = tagOrRaw.trimmed();
+    u = TagManager::stripAiPrefix(u).trimmed();
+    static const QRegularExpression reWs(QStringLiteral("\\s+"));
+    u.replace(reWs, QStringLiteral(" "));
+    return u.toLower();
+}
+
+static QString fuzzyResolveAiTagKey(const QString &rawIn, const QSet<QString> &aiTagSet)
+{
+    const QString raw = rawIn.trimmed();
+    if (raw.isEmpty()) return QString();
+
+    QStringList variants;
+    variants << raw;
+    if (!TagManager::hasAiPrefix(raw)) {
+        variants << (QStringLiteral("[AI] ") + raw);
+        variants << (QStringLiteral("[AI]") + raw);
+    }
+
+    for (const QString &cand0 : std::as_const(variants)) {
+        const QString k = normalizeDisplayTag(cand0.trimmed());
+        if (k.isEmpty()) continue;
+        if (aiTagSet.contains(k)) {
+            for (const QString &x : aiTagSet) {
+                if (x == k) return x;
+            }
+        }
+        for (const QString &x : aiTagSet) {
+            if (QString::compare(x, k, Qt::CaseInsensitive) == 0) return x;
+        }
+    }
+
+    const QString want = aiCoreKeyForFuzzy(raw);
+    if (want.isEmpty()) return QString();
+    for (const QString &x : aiTagSet) {
+        if (aiCoreKeyForFuzzy(x) == want) return x;
+    }
+    return QString();
 }
 
 } // namespace
@@ -1111,6 +1260,13 @@ void MainWindow::refreshCurrentAnalysisTargetUi()
     const int budget = qMax(120, lblCurrentTarget->width() - 8);
     const QFontMetrics fm(lblCurrentTarget->font());
 
+    if (fileListMode == FileListMode::SemanticResults) {
+        const QString banner =
+            QStringLiteral("🌐 全域語意搜尋結果（扁平列表 · 已脫離目前資料夾範圍）");
+        lblCurrentTarget->setText(fm.elidedText(banner, Qt::ElideRight, budget));
+        return;
+    }
+
     const bool inferBusy = watcher && watcher->isRunning();
     const QString cur = m_currentAnalyzingFile;
 
@@ -1302,6 +1458,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         "QPushButton:disabled { background: rgba(43,108,176,0.35); color: rgba(255,255,255,0.7); }"));
     heroFieldLay->addWidget(m_btnSemanticSearch, 0, Qt::AlignVCenter);
 
+    m_heroSearchBusyChip = new BusyChip(m_workspaceTopBar);
+    m_heroSearchBusyChip->setFixedSize(22, 22);
+    m_heroSearchBusyChip->hide();
+    heroFieldLay->addWidget(m_heroSearchBusyChip, 0, Qt::AlignVCenter);
+
     heroLay->addStretch(1);
     heroLay->addWidget(heroField, 0, Qt::AlignHCenter);
     heroLay->addStretch(1);
@@ -1311,13 +1472,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     workspaceLayout->addWidget(mainSplitter, 1);
     m_mainTabWidget->addTab(m_workspaceTab, tr("核心工作區"));
 
-    connect(m_heroOmnibox, &QLineEdit::textChanged, this, &MainWindow::filterFiles);
+    connect(m_heroOmnibox, &QLineEdit::textChanged, this, &MainWindow::onHeroOmniboxTextChanged);
     connect(m_heroOmnibox, &QLineEdit::returnPressed, this, &MainWindow::onHeroOmniboxReturnPressed);
     connect(m_btnSemanticSearch, &QPushButton::clicked, this, &MainWindow::onHeroOmniboxReturnPressed);
 
     m_graphTab = new QWidget(this);
     auto *graphLayout = new QVBoxLayout(m_graphTab);
     graphLayout->setContentsMargins(0, 0, 0, 0);
+    m_graphTacticalTitle = new QLabel(QStringLiteral("[戰術情報網絡分析]"), m_graphTab);
+    m_graphTacticalTitle->setStyleSheet(QStringLiteral(
+        "QLabel { font-weight: 800; font-size: 15px; padding: 8px 14px; color: #e2e8f0; "
+        "background: rgba(22,22,30,0.98); border-bottom: 1px solid rgba(255,255,255,28); }"));
+    graphLayout->addWidget(m_graphTacticalTitle);
     m_graphWidget = new GraphWidget(&tagManager, m_graphTab);
     graphLayout->addWidget(m_graphWidget, 1);
     m_mainTabWidget->addTab(m_graphTab, tr("關聯圖譜分析"));
@@ -1442,8 +1608,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_consolidateWatcher = new QFutureWatcher<std::string>(this);
     connect(m_consolidateWatcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onTagFolderClustersFinished);
 
+    m_semanticSearchWatcher = new QFutureWatcher<std::string>(this);
+    connect(m_semanticSearchWatcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onSemanticSearchFinished);
+
+    m_heroSemanticSpinTimer = new QTimer(this);
+    m_heroSemanticSpinTimer->setInterval(120);
+    connect(m_heroSemanticSpinTimer, &QTimer::timeout, this, [this]() {
+        if (!m_heroSearchBusyChip || !m_heroSearchBusyChip->isVisible()) return;
+        m_heroSemanticSpinPhase = (m_heroSemanticSpinPhase + 1) & 3;
+        m_heroSearchBusyChip->setPhase(m_heroSemanticSpinPhase);
+    });
+
     m_analysisSpinTimer = new QTimer(this);
-    m_analysisSpinTimer->setInterval(50);
+    m_analysisSpinTimer->setInterval(130);
     connect(m_analysisSpinTimer, &QTimer::timeout, this, &MainWindow::tickAnalysisSpinner);
 
     modelLoadWatcher = new QFutureWatcher<bool>(this);
@@ -1960,8 +2137,7 @@ void MainWindow::setupFourColumnLayout() {
             tagManager.saveTags();
         }
         updateTagList();
-        if (fileListMode == FileListMode::PhysicalFolder) scanFiles();
-        else populateVirtualTagFiles(activeVirtualTag);
+        reloadCurrentFileListPanel();
     });
     tagButtons->addWidget(btnLeftAddTag);
 
@@ -2085,6 +2261,16 @@ void MainWindow::setupFourColumnLayout() {
         "QLabel { color: palette(windowText); font-size: 13px; padding: 2px 0 6px 0; }"));
     filesLayout->addWidget(lblCurrentTarget);
 
+    m_semanticGlobalBanner = new QLabel(this);
+    m_semanticGlobalBanner->setWordWrap(true);
+    m_semanticGlobalBanner->setVisible(false);
+    m_semanticGlobalBanner->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_semanticGlobalBanner->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    m_semanticGlobalBanner->setStyleSheet(QStringLiteral(
+        "QLabel { background-color: #fff3cd; color: #856404; border: 1px solid #ffc107; "
+        "border-radius: 6px; padding: 8px 10px; font-weight: 600; font-size: 13px; }"));
+    filesLayout->addWidget(m_semanticGlobalBanner);
+
     auto *controlsCol = new QVBoxLayout();
 
     auto *rowSort = new QHBoxLayout();
@@ -2119,7 +2305,22 @@ void MainWindow::setupFourColumnLayout() {
         if (absPath.isEmpty()) return;
         QDesktopServices::openUrl(QUrl::fromLocalFile(absPath));
     });
-    filesLayout->addWidget(fileList, 1);
+
+    m_fileListPageStack = new QStackedWidget(this);
+    m_fileListPageStack->addWidget(fileList);
+
+    QWidget *semanticBusyPage = new QWidget(this);
+    auto *busyLay = new QVBoxLayout(semanticBusyPage);
+    busyLay->setContentsMargins(16, 16, 16, 16);
+    auto *busyLabel = new QLabel(QStringLiteral("⏳ 正在全域知識庫中進行語意推論，請稍候..."), semanticBusyPage);
+    busyLabel->setAlignment(Qt::AlignCenter);
+    busyLabel->setWordWrap(true);
+    busyLay->addStretch(1);
+    busyLay->addWidget(busyLabel);
+    busyLay->addStretch(1);
+    m_fileListPageStack->addWidget(semanticBusyPage);
+
+    filesLayout->addWidget(m_fileListPageStack, 1);
 
     auto *loadRow = new QHBoxLayout();
     btnLoadMore = new QPushButton(QStringLiteral("載入更多 (%1)").arg(BATCH_SIZE), this);
@@ -2701,7 +2902,7 @@ void MainWindow::showFileContextMenu(const QPoint &pos) {
         item->setText(newInfo.fileName());
         item->setData(Qt::UserRole, newPath);
 
-        if (fileListMode == FileListMode::VirtualTag) {
+        if (fileListMode == FileListMode::VirtualTag || fileListMode == FileListMode::SemanticResults) {
             QString relativePath = QDir(rootPath).relativeFilePath(newInfo.absolutePath());
             if (relativePath == QStringLiteral(".")) relativePath = QStringLiteral("根目錄");
             item->setData(Qt::UserRole + 1, relativePath);
@@ -2967,6 +3168,12 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     setFolderTreeCurrentPath(rootPath);
 
     tagManager.loadTags(rootPath.toStdString());
+    disableSemanticOverlays();
+    if (m_fileListPageStack)
+        m_fileListPageStack->setCurrentIndex(0);
+    if (fileListMode == FileListMode::SemanticResults)
+        fileListMode = FileListMode::PhysicalFolder;
+    loadAiUiDrawerAssignments();
     m_analysisByContentHash.clear();
     {
         QMutexLocker locker(&tagMutex);
@@ -3010,6 +3217,11 @@ void MainWindow::navigateToFolder(const QString &path, bool pushToHistory) {
     if (path.isEmpty()) return;
     QFileInfo fi(path);
     if (!fi.exists() || !fi.isDir()) return;
+    disableSemanticOverlays();
+    if (m_fileListPageStack)
+        m_fileListPageStack->setCurrentIndex(0);
+    if (fileListMode == FileListMode::SemanticResults)
+        fileListMode = FileListMode::PhysicalFolder;
     currentPath = fi.absoluteFilePath();
     if (pushToHistory) pushHistory(currentPath);
     setFolderTreeCurrentPath(currentPath);
@@ -3022,6 +3234,7 @@ void MainWindow::goBack() {
     --navIndex;
     const QString path = navHistory[navIndex];
     currentPath = path;
+    disableSemanticOverlays();
     fileListMode = FileListMode::PhysicalFolder;
     activeVirtualTag.clear();
     setFolderTreeCurrentPath(currentPath);
@@ -3035,6 +3248,7 @@ void MainWindow::goForward() {
     ++navIndex;
     const QString path = navHistory[navIndex];
     currentPath = path;
+    disableSemanticOverlays();
     fileListMode = FileListMode::PhysicalFolder;
     activeVirtualTag.clear();
     setFolderTreeCurrentPath(currentPath);
@@ -3069,6 +3283,7 @@ void MainWindow::goHome() {
     setFolderTreeCurrentPath(currentPath);
 
     tagManager.loadTags(rootPath.toStdString());
+    loadAiUiDrawerAssignments();
     m_analysisByContentHash.clear();
     {
         QMutexLocker locker(&tagMutex);
@@ -3196,6 +3411,8 @@ bool MainWindow::isAnalyzableFile(const QFileInfo &fi) const {
 void MainWindow::scanFiles() {
     if (fileListMode == FileListMode::VirtualTag) {
         populateVirtualTagFiles(activeVirtualTag);
+    } else if (fileListMode == FileListMode::SemanticResults) {
+        populateSemanticResultFiles();
     } else {
         scanPhysicalFolder();
     }
@@ -3351,7 +3568,24 @@ void MainWindow::renderFileListBatch(int count) {
         if (!fi.exists()) continue;
         if (!isAnalyzableFile(fi)) continue;
 
-        if (fileListMode == FileListMode::VirtualTag) {
+        if (fileListMode == FileListMode::SemanticResults) {
+            QString relFull;
+            if (!rootPath.trimmed().isEmpty()) {
+                relFull = QDir(rootPath).relativeFilePath(filePath);
+                if (relFull == QLatin1String(".") || relFull.isEmpty())
+                    relFull = fi.fileName();
+            } else {
+                relFull = fi.fileName();
+            }
+
+            auto *item = new QListWidgetItem();
+            item->setText(fi.fileName());
+            item->setData(Qt::UserRole, filePath);
+            item->setData(Qt::UserRole + 1, relFull);
+            QFileIconProvider ip;
+            item->setIcon(ip.icon(fi));
+            fileList->addItem(item);
+        } else if (fileListMode == FileListMode::VirtualTag) {
             QString parentPath = fi.absolutePath();
             QDir workspaceDir(rootPath);
             QString relativePath = workspaceDir.relativeFilePath(parentPath);
@@ -3427,6 +3661,20 @@ void MainWindow::updateTagListCountsOnly() {
                 return;
             }
             const bool isFolder = it->data(0, Qt::UserRole + 3).toInt() == 1;
+            if (isFolder && role.startsWith(QStringLiteral("SF_DRAWER:"))) {
+                int sum = 0;
+                for (int i = 0; i < it->childCount(); ++i) {
+                    QTreeWidgetItem *ch = it->child(i);
+                    if (ch) sum += ch->data(0, Qt::UserRole + 1).toInt();
+                }
+                const QString dk = role.mid(QStringLiteral("SF_DRAWER:").size());
+                const QString label =
+                    (dk == kAiDrawerUncategorizedKey()) ? QStringLiteral("[未分類雜項]") : dk;
+                it->setData(0, Qt::UserRole + 1, sum);
+                it->setText(0, QStringLiteral("📁 %1 (%2)").arg(label).arg(sum));
+                for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
+                return;
+            }
             const QString canon = normalizeDisplayTag(role);
             int n = 0;
             {
@@ -3489,49 +3737,32 @@ void MainWindow::updateTagList() {
         for (const QString &fp : files) normToFiles[canon].insert(fp);
     }
 
-    const QStringList defaults = {kTagImage, kTagVideo, kTagDoc, kTagAudio, kTagDb};
-    QSet<QString> keys;
-    for (const auto &kv : normToFiles) keys.insert(kv.first);
-    for (const QString &d : defaults) keys.insert(normalizeDisplayTag(d));
-
-    QList<QString> ordered = keys.values();
-    std::sort(ordered.begin(), ordered.end(), [&normToFiles](const QString &a, const QString &b) {
-        const bool aAi = TagManager::hasAiPrefix(a);
-        const bool bAi = TagManager::hasAiPrefix(b);
-
-        // Frequency sorting for AI tags: count desc, then name (use snapshot only — never call TagManager
-        // from comparator to avoid strict-weak-ordering UB / re-entrancy crashes).
-        if (aAi && bAi) {
-            const int na = normToFiles.contains(a) ? static_cast<int>(normToFiles.at(a).size()) : 0;
-            const int nb = normToFiles.contains(b) ? static_cast<int>(normToFiles.at(b).size()) : 0;
-            if (na != nb) return na > nb;
-            return a.localeAwareCompare(b) < 0;
-        }
-        // Keep system tags before AI tags (stable UX)
-        if (aAi != bAi) return !aAi;
-        return a.localeAwareCompare(b) < 0;
-    });
-
-    for (const QString &canon : ordered) {
-        int n = 0;
-        if (normToFiles.count(canon)) n = static_cast<int>(normToFiles[canon].size());
-        else {
+    QMap<QString, QSet<QString>> systemWhitelistToFiles;
+    for (const QString &t : rawTags) {
+        const QString canon = normalizeDisplayTag(t);
+        if (TagManager::hasAiPrefix(canon)) continue;
+        const QString sysCanon = mapLooseSystemTagToWhitelistCanon(canon);
+        if (sysCanon.isEmpty()) continue;
+        std::vector<QString> files;
+        {
             QMutexLocker locker(&tagMutex);
-            n = static_cast<int>(tagManager.getFilesByTag(canon).size());
+            files = tagManager.getFilesByTag(t);
         }
-        const QString baseZh = systemTagBaseZh(canon);
-        const QString emoji = systemTagEmojiPrefix(canon);
-        const QString displayName = baseZh.isEmpty()
-                                        ? canon
-                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-        const bool isAi = TagManager::hasAiPrefix(canon);
-        if (isAi) continue;
+        for (const QString &fp : files) systemWhitelistToFiles[sysCanon].insert(fp);
+    }
 
+    for (const QString &sysCanon : orderedSystemTagWhitelistCanons()) {
+        const int n = static_cast<int>(systemWhitelistToFiles.value(sysCanon).size());
+        const QString baseZh = systemTagBaseZh(sysCanon);
+        const QString emoji = systemTagEmojiPrefix(sysCanon);
+        const QString displayName = baseZh.isEmpty()
+                                        ? sysCanon
+                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
         QListWidget *target = m_systemTagListWidget;
         if (!target) continue;
         const QString rowLabel = displayName.trimmed();
         auto *it = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(rowLabel).arg(n), target);
-        it->setData(Qt::UserRole, canon);
+        it->setData(Qt::UserRole, sysCanon);
         it->setData(Qt::UserRole + 1, n);
         it->setData(Qt::UserRole + 2, baseZh);
     }
@@ -3541,126 +3772,81 @@ void MainWindow::updateTagList() {
         const int kKindFolder = 1;
         const int kKindLeaf = 0;
 
-        QList<QString> aiOrdered;
-        for (const QString &c : ordered) {
-            if (TagManager::hasAiPrefix(c)) aiOrdered.append(c);
-        }
-        QSet<QString> aiSet;
-        for (const QString &c : aiOrdered) aiSet.insert(c);
-
-        QHash<QString, QString> parentOf;
-        for (const QString &t : aiOrdered) {
-            QString p;
-            {
-                QMutexLocker locker(&tagMutex);
-                p = tagManager.tagParent(t);
-            }
-            parentOf.insert(t, p);
-        }
-
-        QSet<QString> allTags = aiSet;
-        for (auto pit = parentOf.constBegin(); pit != parentOf.constEnd(); ++pit) {
-            const QString p = pit.value().trimmed();
-            if (!p.isEmpty() && TagManager::hasAiPrefix(p))
-                allTags.insert(p);
-        }
-
-        for (const QString &t : allTags) {
-            if (!parentOf.contains(t)) {
-                QString p;
-                {
-                    QMutexLocker locker(&tagMutex);
-                    p = tagManager.tagParent(t);
-                }
-                parentOf.insert(t, p);
-            }
-        }
-
-        QSet<QString> folderTags;
-        for (auto pit = parentOf.constBegin(); pit != parentOf.constEnd(); ++pit) {
-            const QString child = pit.key();
-            const QString p = pit.value().trimmed();
-            if (!p.isEmpty() && TagManager::hasAiPrefix(p) && allTags.contains(child))
-                folderTags.insert(p);
-        }
-
         auto countFor = [&](const QString &c) -> int {
-            if (normToFiles.count(c)) return static_cast<int>(normToFiles[c].size());
+            if (normToFiles.count(c)) return static_cast<int>(normToFiles.at(c).size());
             QMutexLocker locker(&tagMutex);
             return static_cast<int>(tagManager.getFilesByTag(c).size());
         };
 
-        auto sortedChildren = [&](const QString &parentKey) {
-            QVector<QString> out;
-            for (const QString &t : allTags) {
-                if (t == parentKey) continue;
-                if (parentOf.value(t).trimmed() != parentKey) continue;
-                out.append(t);
-            }
-            auto isFolderFn = [&](const QString &x) { return folderTags.contains(x); };
-            std::sort(out.begin(), out.end(), [&](const QString &a, const QString &b) {
-                const bool fa = isFolderFn(a);
-                const bool fb = isFolderFn(b);
-                if (fa != fb) return fa;
+        QSet<QString> aiLeaves;
+        for (const QString &t : rawTags) {
+            const QString tt = t.trimmed();
+            if (!TagManager::hasAiPrefix(tt)) continue;
+            if (sfIsSyntheticAiDrawerFolderTag(tt)) continue;
+            aiLeaves.insert(tt);
+        }
+
+        QHash<QString, QVector<QString>> drawerToLeaves;
+        for (const QString &dk : sfFixedAiClusterDrawerKeys())
+            drawerToLeaves.insert(dk, {});
+        drawerToLeaves.insert(kAiDrawerUncategorizedKey(), {});
+
+        for (const QString &leaf : std::as_const(aiLeaves)) {
+            QString dk = m_aiTagToDrawerKey.value(leaf);
+            if (dk.isEmpty() || !drawerToLeaves.contains(dk))
+                dk = kAiDrawerUncategorizedKey();
+            drawerToLeaves[dk].append(leaf);
+        }
+
+        auto sortLeaves = [&](QVector<QString> &vec) {
+            std::sort(vec.begin(), vec.end(), [&](const QString &a, const QString &b) {
                 const int na = countFor(a);
                 const int nb = countFor(b);
                 if (na != nb) return na > nb;
                 return a.localeAwareCompare(b) < 0;
             });
-            return out;
         };
 
-        QVector<QString> roots;
-        for (const QString &t : allTags) {
-            const QString p = parentOf.value(t).trimmed();
-            if (p.isEmpty() || !allTags.contains(p))
-                roots.append(t);
-        }
-        std::sort(roots.begin(), roots.end(), [&](const QString &a, const QString &b) {
-            const bool fa = folderTags.contains(a);
-            const bool fb = folderTags.contains(b);
-            if (fa != fb) return fa;
-            const int na = countFor(a);
-            const int nb = countFor(b);
-            if (na != nb) return na > nb;
-            return a.localeAwareCompare(b) < 0;
-        });
+        for (auto it = drawerToLeaves.begin(); it != drawerToLeaves.end(); ++it)
+            sortLeaves(it.value());
 
-        std::function<void(QTreeWidgetItem *, const QString &)> addNode;
-        addNode = [&](QTreeWidgetItem *parItem, const QString &canon) {
-            const bool asFolder = folderTags.contains(canon);
-            const int n = countFor(canon);
-            const QString baseZh = systemTagBaseZh(canon);
-            const QString emoji = systemTagEmojiPrefix(canon);
-            const QString displayName = baseZh.isEmpty()
-                                            ? canon
-                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-            const QString nice = tagLibraryLabelStripAiBadge(displayName).trimmed();
+        auto makeDrawerRoot = [&](const QString &drawerKey, const QString &labelText) {
+            QTreeWidgetItem *root = new QTreeWidgetItem();
+            QFont f = root->font(0);
+            f.setBold(true);
+            root->setFont(0, f);
+            const int totalKids = drawerToLeaves.value(drawerKey).size();
+            int sumFiles = 0;
+            for (const QString &lf : drawerToLeaves.value(drawerKey))
+                sumFiles += countFor(lf);
+            root->setText(0, QStringLiteral("📁 %1 (%2)").arg(labelText).arg(sumFiles));
+            root->setData(0, Qt::UserRole, QStringLiteral("SF_DRAWER:%1").arg(drawerKey));
+            root->setData(0, kKindRole, kKindFolder);
+            root->setData(0, Qt::UserRole + 1, sumFiles);
+            root->setData(0, Qt::UserRole + 2, QString());
 
-            QTreeWidgetItem *item = parItem ? new QTreeWidgetItem(parItem) : new QTreeWidgetItem();
-            if (asFolder) {
-                QFont f = item->font(0);
-                f.setBold(true);
-                item->setFont(0, f);
-                item->setText(0, QStringLiteral("📁 %1 (%2)").arg(nice).arg(n));
-                item->setData(0, Qt::UserRole, canon);
-                item->setData(0, kKindRole, kKindFolder);
-            } else {
-                item->setText(0, QStringLiteral("🏷️ %1 (%2)").arg(nice).arg(n));
-                item->setData(0, Qt::UserRole, canon);
-                item->setData(0, kKindRole, kKindLeaf);
+            for (const QString &leaf : drawerToLeaves.value(drawerKey)) {
+                const int n = countFor(leaf);
+                const QString baseZh = systemTagBaseZh(leaf);
+                const QString emoji = systemTagEmojiPrefix(leaf);
+                const QString displayName = baseZh.isEmpty()
+                                                ? leaf
+                                                : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+                const QString nice = tagLibraryLabelStripAiBadge(displayName).trimmed();
+                QTreeWidgetItem *ch = new QTreeWidgetItem(root);
+                ch->setText(0, QStringLiteral("🏷️ %1 (%2)").arg(nice).arg(n));
+                ch->setData(0, Qt::UserRole, leaf);
+                ch->setData(0, kKindRole, kKindLeaf);
+                ch->setData(0, Qt::UserRole + 1, n);
+                ch->setData(0, Qt::UserRole + 2, baseZh);
             }
-            item->setData(0, Qt::UserRole + 1, n);
-            item->setData(0, Qt::UserRole + 2, baseZh);
-            if (!parItem)
-                m_aiTagTreeWidget->addTopLevelItem(item);
-
-            for (const QString &ch : sortedChildren(canon))
-                addNode(item, ch);
+            m_aiTagTreeWidget->addTopLevelItem(root);
         };
 
-        for (const QString &r : roots)
-            addNode(nullptr, r);
+        for (const QString &dk : sfFixedAiClusterDrawerKeys())
+            makeDrawerRoot(dk, dk);
+
+        makeDrawerRoot(kAiDrawerUncategorizedKey(), QStringLiteral("[未分類雜項]"));
     }
 
     syncTagFilterFromTagList();
@@ -3777,6 +3963,10 @@ void MainWindow::filterFiles() {
         m_heroOmnibox ? m_heroOmnibox->text().trimmed().toLower() : QString();
     const QString tagFilter = cmbTagFilter->currentData().toString();
 
+    const bool useSemanticSubset =
+        m_semanticFilterActive && !m_semanticVisiblePaths.isEmpty()
+        && fileListMode != FileListMode::SemanticResults;
+
     std::vector<QString> filesWithTag;
     if (!tagFilter.isEmpty() && tagFilter != QStringLiteral("ALL")) {
         QMutexLocker locker(&tagMutex);
@@ -3788,12 +3978,17 @@ void MainWindow::filterFiles() {
         if (!it) continue;
 
         const QString absPath = it->data(Qt::UserRole).toString();
+        const QString absNorm = QDir::cleanPath(absPath);
         const QString nameLower = baseName(absPath).toLower();
 
         bool match = true;
-        if (!query.isEmpty()) {
-            match = nameLower.contains(query) || parentDirDisplay(absPath).toLower().contains(query);
-            if (!match) {
+        if (useSemanticSubset) {
+            match = m_semanticVisiblePaths.contains(absNorm);
+        }
+
+        if (match && !query.isEmpty()) {
+            bool qm = nameLower.contains(query) || parentDirDisplay(absPath).toLower().contains(query);
+            if (!qm) {
                 std::vector<QString> tags;
                 {
                     QMutexLocker locker(&tagMutex);
@@ -3801,11 +3996,12 @@ void MainWindow::filterFiles() {
                 }
                 for (const auto &t : tags) {
                     if (t.toLower().contains(query)) {
-                        match = true;
+                        qm = true;
                         break;
                     }
                 }
             }
+            match = qm;
         }
 
         if (match && !tagFilter.isEmpty() && tagFilter != QStringLiteral("ALL")) {
@@ -3831,6 +4027,229 @@ void MainWindow::onHeroOmniboxReturnPressed()
     runHeroSemanticSearchQuery();
 }
 
+void MainWindow::onHeroOmniboxTextChanged(const QString &text)
+{
+    if (m_semanticFilterActive) {
+        const QString a = text.trimmed();
+        const QString b = m_semanticLockedQuery.trimmed();
+        if (!m_semanticLockedQuery.isEmpty() && a != b)
+            clearSemanticSearchFilter();
+    }
+    filterFiles();
+}
+
+void MainWindow::disableSemanticOverlays()
+{
+    m_semanticFilterActive = false;
+    m_semanticVisiblePaths.clear();
+    m_semanticLockedQuery.clear();
+    m_semanticValidWorkspacePaths.clear();
+    m_semanticSearchIdToPath.clear();
+    refreshSemanticGlobalBanner();
+}
+
+void MainWindow::clearSemanticSearchFilter()
+{
+    const bool wasSemanticResults = (fileListMode == FileListMode::SemanticResults);
+    disableSemanticOverlays();
+    setHeroSemanticBusy(false);
+    if (wasSemanticResults) {
+        fileListMode = FileListMode::PhysicalFolder;
+        scanFiles();
+    } else {
+        filterFiles();
+    }
+}
+
+QString MainWindow::aiUiDrawerStorePath() const
+{
+    if (rootPath.trimmed().isEmpty()) return {};
+    return QDir(rootPath).filePath(QStringLiteral(".smartfile/ai_ui_drawers.json"));
+}
+
+void MainWindow::loadAiUiDrawerAssignments()
+{
+    m_aiTagToDrawerKey.clear();
+    const QString p = aiUiDrawerStorePath();
+    if (p.isEmpty() || !QFile::exists(p)) return;
+    QFile f(p);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonDocument d = QJsonDocument::fromJson(f.readAll());
+    if (!d.isObject()) return;
+    const QJsonObject o = d.object().value(QStringLiteral("tagToDrawer")).toObject();
+    for (auto it = o.begin(); it != o.end(); ++it) {
+        const QString k = it.key();
+        const QString v = it.value().toString();
+        if (!k.isEmpty() && !v.isEmpty()) m_aiTagToDrawerKey.insert(k, v);
+    }
+}
+
+void MainWindow::saveAiUiDrawerAssignments() const
+{
+    const QString p = aiUiDrawerStorePath();
+    if (p.isEmpty()) return;
+    QDir().mkpath(QFileInfo(p).absolutePath());
+    QJsonObject inner;
+    for (auto it = m_aiTagToDrawerKey.constBegin(); it != m_aiTagToDrawerKey.constEnd(); ++it)
+        inner.insert(it.key(), it.value());
+    QJsonObject root;
+    root.insert(QStringLiteral("tagToDrawer"), inner);
+    QFile f(p);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+}
+
+void MainWindow::refreshSemanticGlobalBanner()
+{
+    if (!m_semanticGlobalBanner) return;
+    if (!m_semanticFilterActive || m_semanticVisiblePaths.isEmpty()) {
+        m_semanticGlobalBanner->hide();
+        return;
+    }
+    const int n = m_semanticVisiblePaths.size();
+    m_semanticGlobalBanner->setText(
+        QStringLiteral("🔍 跨資料夾全域搜尋結果（共找到 %1 筆相關檔案）").arg(n));
+    m_semanticGlobalBanner->setVisible(true);
+}
+
+void MainWindow::populateSemanticResultFiles()
+{
+    if (!fileList) return;
+    fileList->clear();
+    m_pendingFilesToDisplay.clear();
+    m_currentLoadedCount = 0;
+    if (m_semanticVisiblePaths.isEmpty()) {
+        if (btnLoadMore) btnLoadMore->hide();
+        if (btnLoadAll) btnLoadAll->hide();
+        refreshSemanticGlobalBanner();
+        refreshCurrentAnalysisTargetUi();
+        return;
+    }
+    QVector<QString> v;
+    v.reserve(m_semanticVisiblePaths.size());
+    for (const QString &p : std::as_const(m_semanticVisiblePaths))
+        v.push_back(p);
+    std::sort(v.begin(), v.end(), [](const QString &a, const QString &b) {
+        return a.localeAwareCompare(b) < 0;
+    });
+    for (const QString &fp : std::as_const(v)) {
+        const QFileInfo fi(fp);
+        if (!fi.exists()) continue;
+        if (!isAnalyzableFile(fi)) continue;
+        m_pendingFilesToDisplay.push_back(fp);
+    }
+    if (btnLoadMore) btnLoadMore->hide();
+    if (btnLoadAll) btnLoadAll->hide();
+    const int n = static_cast<int>(m_pendingFilesToDisplay.size());
+    if (n > 0)
+        renderFileListBatch(n);
+    refreshSemanticGlobalBanner();
+    refreshCurrentAnalysisTargetUi();
+}
+
+void MainWindow::reloadCurrentFileListPanel()
+{
+    if (fileListMode == FileListMode::PhysicalFolder)
+        scanFiles();
+    else if (fileListMode == FileListMode::SemanticResults)
+        populateSemanticResultFiles();
+    else
+        populateVirtualTagFiles(activeVirtualTag);
+}
+
+QString MainWindow::buildWorkspaceSemanticIdLines(int maxFiles)
+{
+    m_semanticSearchIdToPath.clear();
+    m_semanticValidWorkspacePaths.clear();
+    QStringList lines;
+    if (rootPath.trimmed().isEmpty()) return {};
+    const QString root = QDir::cleanPath(rootPath);
+    QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    int id = 0;
+    while (it.hasNext()) {
+        if (id >= maxFiles) break;
+        const QString absPath = QDir::cleanPath(it.next());
+        const QFileInfo fi(absPath);
+        if (!isAnalyzableFile(fi)) continue;
+        ++id;
+        m_semanticSearchIdToPath.insert(id, absPath);
+        m_semanticValidWorkspacePaths.insert(absPath);
+        const QString fn = baseName(absPath);
+        QString relFromWs = QDir(root).relativeFilePath(absPath);
+        if (relFromWs == QLatin1String(".") || relFromWs.isEmpty())
+            relFromWs = fn;
+
+        if (m_aiSummaryByPath.contains(absPath)) {
+            QString sum = m_aiSummaryByPath.value(absPath).trimmed();
+            if (sum.size() > 420)
+                sum = sum.left(420) + QStringLiteral("…");
+            QStringList tagParts;
+            {
+                QMutexLocker locker(&tagMutex);
+                for (const QString &t : tagManager.getTags(absPath)) {
+                    const QString tt = t.trimmed();
+                    if (!tt.isEmpty())
+                        tagParts.append(tt);
+                }
+            }
+            QString tagsJoined = tagParts.join(QLatin1String(", "));
+            if (tagsJoined.size() > 220)
+                tagsJoined = tagsJoined.left(220) + QStringLiteral("…");
+            if (tagsJoined.isEmpty())
+                tagsJoined = QStringLiteral("(無標籤)");
+            if (sum.isEmpty())
+                sum = QStringLiteral("(無摘要文字)");
+            lines.append(QStringLiteral("[ID: %1] 路徑: %2 | 檔名: %3 | 摘要: %4 | 標籤: %5")
+                             .arg(id)
+                             .arg(relFromWs, fn, sum, tagsJoined));
+        } else {
+            lines.append(QStringLiteral("[ID: %1] 路徑: %2 | 檔名: %3 | (尚未分析) 僅能依檔名與路徑推論")
+                             .arg(id)
+                             .arg(relFromWs, fn));
+        }
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+void MainWindow::setHeroSemanticBusy(bool busy)
+{
+    if (m_heroSearchBusyChip) {
+        m_heroSearchBusyChip->setVisible(busy);
+        if (busy) {
+            m_heroSemanticSpinPhase = 0;
+            m_heroSearchBusyChip->setPhase(0);
+        }
+    }
+    if (m_btnSemanticSearch)
+        m_btnSemanticSearch->setEnabled(!busy);
+    if (m_heroOmnibox) {
+        m_heroOmnibox->setEnabled(!busy);
+        m_heroOmnibox->setReadOnly(busy);
+    }
+    if (m_fileListPageStack)
+        m_fileListPageStack->setCurrentIndex(busy ? 1 : 0);
+    if (m_heroSemanticSpinTimer) {
+        if (busy)
+            m_heroSemanticSpinTimer->start();
+        else
+            m_heroSemanticSpinTimer->stop();
+    }
+}
+
+QString MainWindow::buildSemanticRetrieverPrompt(const QString &userQuery, const QString &idContextLines) const
+{
+    return QStringLiteral(
+               "System:\n"
+               "You are a precise file retrieval assistant. Your reply MUST be ONLY a JSON array of integers — no object wrapper, "
+               "no markdown fences, no explanations, no file paths or names.\n"
+               "Correct format example: [1, 5, 12]\n"
+               "Pick 5 to 10 file IDs from the list below that best match the user query (fewer if fewer are relevant; at least 1 if any match). "
+               "Each integer MUST be copied exactly from an [ID: N] line in the file list. Never invent IDs.\n\n"
+               "User query:\n%1\n\n"
+               "Files (numeric IDs only; use these IDs in your answer):\n%2\n")
+        .arg(userQuery, idContextLines);
+}
+
 void MainWindow::runHeroSemanticSearchQuery()
 {
     if (!m_heroOmnibox) return;
@@ -3842,55 +4261,154 @@ void MainWindow::runHeroSemanticSearchQuery()
             break;
         }
     }
-    if (t.length() > 10 || hasWs)
-        qDebug() << "Trigger Semantic Search";
+    const bool wantSemantic = t.trimmed().length() > 10 || hasWs;
+    if (!wantSemantic) {
+        clearSemanticSearchFilter();
+        return;
+    }
+
+    if (!llamaEngine.isModelLoaded()) {
+        QMessageBox::warning(this,
+                             QStringLiteral("Smartflie"),
+                             LanguageManager::instance().getText(QStringLiteral("模型自動載入失敗 (Auto-load failed)")));
+        return;
+    }
+    if (watcher && watcher->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 LanguageManager::instance().getText(QStringLiteral("分析進行中，請稍後再試語意搜尋。")));
+        return;
+    }
+    if (m_consolidateWatcher && m_consolidateWatcher->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 QStringLiteral("AI 標籤分類進行中，請稍後再試語意搜尋。"));
+        return;
+    }
+    if (m_semanticSearchWatcher && m_semanticSearchWatcher->isRunning())
+        return;
+
+    m_semanticSearchIdToPath.clear();
+    m_semanticValidWorkspacePaths.clear();
+
+    const int maxFiles = 180;
+    const QString idLines = buildWorkspaceSemanticIdLines(maxFiles);
+    if (idLines.isEmpty()) {
+        if (lblStatus)
+            lblStatus->setText(QStringLiteral("⚠️ 目前清單無檔案可供語意搜尋"));
+        return;
+    }
+
+    const QString userQuery = t.trimmed();
+    const QString fullPrompt = buildSemanticRetrieverPrompt(userQuery, idLines);
+
+    setHeroSemanticBusy(true);
+    if (lblStatus)
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("語意搜尋進行中…")));
+
+    if (!m_semanticSearchWatcher)
+        return;
+
+    m_semanticSearchWatcher->setFuture(QtConcurrent::run([this, fullPrompt]() {
+        return llamaEngine.generateResponse(fullPrompt.toStdString());
+    }));
+}
+
+void MainWindow::onSemanticSearchFinished()
+{
+    auto endBusy = [this]() { setHeroSemanticBusy(false); };
+
+    if (!m_semanticSearchWatcher) {
+        endBusy();
+        return;
+    }
+
+    QString raw;
+    try {
+        raw = QString::fromStdString(m_semanticSearchWatcher->result());
+    } catch (const std::exception &e) {
+        endBusy();
+        QMessageBox::warning(this, QStringLiteral("Smartflie"),
+                             QStringLiteral("語意搜尋結果讀取失敗：%1").arg(QString::fromUtf8(e.what())));
+        return;
+    } catch (...) {
+        endBusy();
+        QMessageBox::warning(this, QStringLiteral("Smartflie"),
+                             QStringLiteral("語意搜尋結果讀取時發生未知錯誤。"));
+        return;
+    }
+
+    if (raw.size() > 400000)
+        raw.truncate(400000);
+
+    if (raw.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive)) {
+        endBusy();
+        QMessageBox::critical(this, QStringLiteral("Smartflie"), raw);
+        return;
+    }
+
+    QVector<int> ids;
+    try {
+        ids = parseSemanticRetrieverIdList(raw);
+    } catch (...) {
+        ids.clear();
+    }
+
+    QSet<QString> picked;
+    for (int id : ids) {
+        const QString p = m_semanticSearchIdToPath.value(id);
+        if (!p.isEmpty()) picked.insert(QDir::cleanPath(p));
+    }
+
+    if (picked.isEmpty()) {
+        endBusy();
+        if (lblStatus)
+            lblStatus->setText(QStringLiteral("⚠️ 語意搜尋未解析出有效檔案 ID，請換個描述再試"));
+        return;
+    }
+
+    m_semanticVisiblePaths = picked;
+    m_semanticFilterActive = true;
+    m_semanticLockedQuery = m_heroOmnibox ? m_heroOmnibox->text().trimmed() : QString();
+    fileListMode = FileListMode::SemanticResults;
+    populateSemanticResultFiles();
+    endBusy();
+
+    if (lblStatus) {
+        lblStatus->setText(QStringLiteral("✅ 語意搜尋完成，已為您找到最相關的資料。"));
+    }
 }
 
 void MainWindow::syncAiTagHierarchyFromTree()
 {
     if (!m_aiTagTreeWidget) return;
 
-    const int kKindRole = Qt::UserRole + 3;
-    const int kKindFolder = 1;
+    QHash<QString, QString> rebuilt;
 
-    std::function<void(QTreeWidgetItem *, const QString &)> walk;
-    walk = [&](QTreeWidgetItem *it, const QString &parentTag) {
+    std::function<void(QTreeWidgetItem *)> walk;
+    walk = [&](QTreeWidgetItem *it) {
         if (!it) return;
         const QString role = it->data(0, Qt::UserRole).toString();
         if (role == QStringLiteral("ALL")) {
-            for (int i = 0; i < it->childCount(); ++i)
-                walk(it->child(i), QString());
+            for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
             return;
         }
-        const bool isFolder = it->data(0, kKindRole).toInt() == kKindFolder;
-        if (isFolder) {
-            for (int i = 0; i < it->childCount(); ++i)
-                walk(it->child(i), role);
-            return;
-        }
-        if (!role.isEmpty() && TagManager::hasAiPrefix(role)) {
-            {
-                QMutexLocker locker(&tagMutex);
-                tagManager.setAiTagParent(role, parentTag, false);
+        if (role.startsWith(QStringLiteral("SF_DRAWER:"))) {
+            const QString dkey = role.mid(QStringLiteral("SF_DRAWER:").size());
+            for (int i = 0; i < it->childCount(); ++i) {
+                QTreeWidgetItem *ch = it->child(i);
+                const QString ttag = ch->data(0, Qt::UserRole).toString();
+                if (!ttag.isEmpty() && TagManager::hasAiPrefix(ttag)) rebuilt.insert(ttag, dkey);
+                walk(ch);
             }
-            for (int i = 0; i < it->childCount(); ++i)
-                walk(it->child(i), role);
             return;
         }
-        for (int i = 0; i < it->childCount(); ++i)
-            walk(it->child(i), parentTag);
+        for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
     };
 
-    for (int ti = 0; ti < m_aiTagTreeWidget->topLevelItemCount(); ++ti) {
-        QTreeWidgetItem *tl = m_aiTagTreeWidget->topLevelItem(ti);
-        if (!tl) continue;
-        walk(tl, QString());
-    }
+    for (int ti = 0; ti < m_aiTagTreeWidget->topLevelItemCount(); ++ti)
+        walk(m_aiTagTreeWidget->topLevelItem(ti));
 
-    {
-        QMutexLocker locker(&tagMutex);
-        tagManager.saveTags();
-    }
+    m_aiTagToDrawerKey = std::move(rebuilt);
+    saveAiUiDrawerAssignments();
     updateTagList();
 }
 
@@ -3925,6 +4443,7 @@ void MainWindow::onAiTagTreeItemClicked(QTreeWidgetItem *item, int) {
 }
 
 void MainWindow::applyTagSelectionData(const QString &data) {
+    disableSemanticOverlays();
     if (data == QStringLiteral("ALL")) {
         fileListMode = FileListMode::PhysicalFolder;
         activeVirtualTag.clear();
@@ -4397,8 +4916,7 @@ void MainWindow::processNextInQueue() {
 
         // Refresh once at end for UI correctness
         updateTagList();
-        if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-        else populateVirtualTagFiles(activeVirtualTag);
+        reloadCurrentFileListPanel();
 
         showFolderAnalysisReport();
         if (m_bgAutoAnalyzeEnabled && m_bgAutoAnalyzeDebounce && !rootPath.trimmed().isEmpty()) {
@@ -4573,8 +5091,7 @@ void MainWindow::applyPresetBypassAnalysis(const QString &fp, const QString &sum
     if (m_aiSummaryEdit && currentFilePath() == fp) m_aiSummaryEdit->setPlainText(summary);
     updateTagDisplayForFile(fp);
     updateTagList();
-    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-    else populateVirtualTagFiles(activeVirtualTag);
+    reloadCurrentFileListPanel();
     reselectFileInList(fp);
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
     m_currentAnalyzingFile.clear();
@@ -4623,8 +5140,7 @@ void MainWindow::applyColdArchiveAnalysis(const QString &fp, const QString &summ
     if (m_aiSummaryEdit && currentFilePath() == fp) m_aiSummaryEdit->setPlainText(summary);
     updateTagDisplayForFile(fp);
     updateTagList();
-    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-    else populateVirtualTagFiles(activeVirtualTag);
+    reloadCurrentFileListPanel();
     reselectFileInList(fp);
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
     m_currentAnalyzingFile.clear();
@@ -4868,8 +5384,7 @@ void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObj
     if (m_aiSummaryEdit && currentFilePath() == fp) m_aiSummaryEdit->setPlainText(summary);
     updateTagDisplayForFile(fp);
     updateTagList();
-    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-    else populateVirtualTagFiles(activeVirtualTag);
+    reloadCurrentFileListPanel();
     reselectFileInList(fp);
     m_currentAnalyzingFile.clear();
     refreshCurrentAnalysisTargetUi();
@@ -5262,8 +5777,7 @@ void MainWindow::onAnalysisFinished() {
 
         updateTagDisplayForFile(fp);
         updateTagList();
-        if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-        else populateVirtualTagFiles(activeVirtualTag);
+        reloadCurrentFileListPanel();
         reselectFileInList(fp);
     }
 
@@ -5335,20 +5849,32 @@ void MainWindow::generateTagFoldersWithAI() {
 
     auto &lm = LanguageManager::instance();
 
+    const QString drawersBlock = QStringLiteral(
+        "[營運管理]\n"
+        "[技術與開發]\n"
+        "[財務與法務]\n"
+        "[行銷與企劃]\n"
+        "[人事與行政]\n"
+        "[多媒體資源]\n"
+        "[會議與報告]\n"
+        "[其他雜項]\n");
+
     const QString systemPromptEn = QStringLiteral(
-        "You are an expert knowledge organizer. I will give you up to 100 existing AI tags (each begins with [AI]). "
-        "Analyze semantic relationships and group them into 5–8 high-level concept folders (e.g. Financial reports, HR, Engineering). "
-        "Each folder name should be short (prefer Chinese if tags are Chinese). "
-        "Output ONLY one JSON object: keys = folder names (without needing the [AI] prefix in keys), values = JSON arrays of tag strings that must match the input list exactly. "
-        "Every tag should appear in at most one folder; omit tags that fit nowhere. "
-        "Do not output markdown or explanations.");
+        "You are a constrained taxonomy assistant. You receive up to 100 existing AI tags (each begins with [AI]). "
+        "You MUST assign each tag you output to EXACTLY ONE of the following EIGHT JSON keys. Keys MUST match character-for-character (including square brackets):\n"
+        "%1"
+        "Return ONLY one JSON object mapping each key to a JSON array of tag strings copied EXACTLY from the input list. "
+        "ALL eight keys MUST appear. Use [] for categories with no tags. Each input tag appears at most once overall. "
+        "If a tag fits nowhere, omit it. No markdown, no commentary.")
+        .arg(drawersBlock);
 
     const QString systemPromptZh = QStringLiteral(
-        "你是一位知識架構專家。以下最多 100 個既有的 AI 標籤（皆含 [AI] 前綴）。"
-        "請分析其語意關聯與共同點，將它們歸納成 5～8 個高階「概念資料夾」（例如：財務報表、人事管理、技術開發）。"
-        "資料夾名稱請簡短；輸出僅能是一個 JSON 物件：Key 為資料夾名稱（可不寫 [AI] 前綴），Value 為標籤字串陣列，且標籤必須與輸入清單完全一致。"
-        "同一標籤最多出現在一個資料夾；無法歸類者可略過。"
-        "不要輸出 markdown 或任何說明文字。");
+        "你是一位「受控分類」助理。以下最多 100 個既有的 AI 標籤（每個皆含 [AI] 前綴）。"
+        "你必須將你要輸出的每一個標籤，嚴格分配到下列八個 JSON Key 之一；Key 必須與下列文字完全一致（含方括號）：\n"
+        "%1"
+        "僅輸出一個 JSON 物件：每個 Key 對應一個字串陣列，陣列中的標籤必須與輸入清單逐字一致。"
+        "八個 Key 都必須出現；沒有標籤的類別請輸出空陣列 []。同一輸入標籤最多出現一次。無法歸類者可略過。不要 markdown 或說明。")
+        .arg(drawersBlock);
 
     const QString systemPrompt = (lm.language() == LanguageManager::Language::EN_US) ? systemPromptEn : systemPromptZh;
 
@@ -5403,97 +5929,197 @@ static QString extractFirstBalancedJsonObject(const QString &rawIn)
     return QStringLiteral("{}");
 }
 
+static QString extractFirstBalancedJsonArray(const QString &rawIn)
+{
+    QString raw = rawIn;
+    if (raw.size() > 400000)
+        raw.truncate(400000);
+    const int start = raw.indexOf(QLatin1Char('['));
+    if (start < 0)
+        return QStringLiteral("[]");
+    int depth = 0;
+    bool inStr = false;
+    for (int i = start; i < raw.size(); ++i) {
+        const QChar c = raw.at(i);
+        if (inStr) {
+            if (c == QLatin1Char('\\') && i + 1 < raw.size()) {
+                ++i;
+                continue;
+            }
+            if (c == QLatin1Char('"'))
+                inStr = false;
+            continue;
+        }
+        if (c == QLatin1Char('"')) {
+            inStr = true;
+            continue;
+        }
+        if (c == QLatin1Char('['))
+            ++depth;
+        else if (c == QLatin1Char(']')) {
+            --depth;
+            if (depth == 0)
+                return raw.mid(start, i - start + 1);
+        }
+    }
+    return QStringLiteral("[]");
+}
+
+static void collectIntegersFromJsonArray(const QJsonArray &arr, QVector<int> *out)
+{
+    if (!out) return;
+    for (const QJsonValue &v : arr) {
+        if (v.isDouble()) {
+            const int n = static_cast<int>(v.toDouble());
+            if (n > 0) out->append(n);
+        } else if (v.isString()) {
+            bool ok = false;
+            const int n = v.toString().trimmed().toInt(&ok);
+            if (ok && n > 0) out->append(n);
+        }
+    }
+}
+
+static QVector<int> parseSemanticRetrieverIdList(const QString &raw)
+{
+    try {
+        QVector<int> ids;
+
+        const QString arrText = extractFirstBalancedJsonArray(raw);
+        QJsonParseError e1{};
+        const QJsonDocument d1 = QJsonDocument::fromJson(arrText.toUtf8(), &e1);
+        if (e1.error == QJsonParseError::NoError && d1.isArray()) {
+            collectIntegersFromJsonArray(d1.array(), &ids);
+            if (!ids.isEmpty()) return ids;
+        }
+
+        const QString objText = extractFirstBalancedJsonObject(raw);
+        QJsonParseError e2{};
+        const QJsonDocument d2 = QJsonDocument::fromJson(objText.toUtf8(), &e2);
+        if (e2.error == QJsonParseError::NoError && d2.isObject()) {
+            const QJsonObject o = d2.object();
+            const QStringList keyNames = {QStringLiteral("ids"), QStringLiteral("fileIds"), QStringLiteral("file_ids")};
+            for (const QString &k : keyNames) {
+                if (o.contains(k) && o.value(k).isArray()) {
+                    collectIntegersFromJsonArray(o.value(k).toArray(), &ids);
+                    if (!ids.isEmpty()) return ids;
+                }
+            }
+        }
+
+        return ids;
+    } catch (...) {
+        return {};
+    }
+}
+
 void MainWindow::applyTagFolderClustersFromRaw(const QString &rawIn)
 {
-    QString capped = rawIn;
-    if (capped.size() > 500000)
-        capped.truncate(500000);
+    try {
+        QString capped = rawIn;
+        if (capped.size() > 500000)
+            capped.truncate(500000);
 
-    const QString jsonText = extractFirstBalancedJsonObject(capped);
+        const QString jsonText = extractFirstBalancedJsonObject(capped);
 
-    QJsonParseError err{};
-    const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &err);
-    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-        QMessageBox::warning(this, QStringLiteral("Smartflie"),
-                             QStringLiteral("Invalid JSON: %1").arg(err.errorString()));
-        return;
-    }
+        QJsonParseError err{};
+        const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &err);
+        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+            QMessageBox::warning(this, QStringLiteral("Smartflie"),
+                                 QStringLiteral("Invalid JSON: %1").arg(err.errorString()));
+            return;
+        }
 
-    QSet<QString> aiTagSet;
-    {
-        std::vector<QString> allTags;
+        QSet<QString> aiTagSet;
         {
-            QMutexLocker locker(&tagMutex);
-            allTags = tagManager.getAllTags();
-        }
-        for (const QString &t : allTags) {
-            const QString tt = t.trimmed();
-            if (TagManager::hasAiPrefix(tt))
-                aiTagSet.insert(tt);
-        }
-    }
-
-    auto resolveChild = [&](const QString &raw) -> QString {
-        QString u = raw.trimmed();
-        if (u.isEmpty()) return QString();
-        if (!TagManager::hasAiPrefix(u))
-            u = QStringLiteral("[AI] ") + u;
-        u = normalizeDisplayTag(u);
-        if (aiTagSet.contains(u))
-            return u;
-        for (const QString &x : aiTagSet) {
-            if (QString::compare(x, u, Qt::CaseInsensitive) == 0)
-                return x;
-        }
-        return QString();
-    };
-
-    int linked = 0;
-    const QJsonObject rootObj = doc.object();
-    for (auto it = rootObj.begin(); it != rootObj.end(); ++it) {
-        const QString folderKey = it.key().trimmed();
-        if (folderKey.isEmpty()) continue;
-        QString folderCanon = folderKey;
-        if (!TagManager::hasAiPrefix(folderCanon))
-            folderCanon = QStringLiteral("[AI] ") + TagManager::stripAiPrefix(folderCanon).trimmed();
-        folderCanon = normalizeDisplayTag(folderCanon);
-        if (!TagManager::hasAiPrefix(folderCanon)) continue;
-
-        {
-            QMutexLocker locker(&tagMutex);
-            tagManager.ensureAiFolderParentVisible(folderCanon, false);
+            std::vector<QString> allTags;
+            {
+                QMutexLocker locker(&tagMutex);
+                allTags = tagManager.getAllTags();
+            }
+            for (const QString &t : allTags) {
+                const QString tt = t.trimmed();
+                if (TagManager::hasAiPrefix(tt))
+                    aiTagSet.insert(tt);
+            }
         }
 
-        QStringList members;
-        const QJsonValue v = it.value();
-        if (v.isArray()) {
-            for (const auto &el : v.toArray()) {
-                const QString s = el.toString().trimmed();
+        auto resolveChild = [&](const QString &raw) -> QString {
+            return fuzzyResolveAiTagKey(raw, aiTagSet);
+        };
+
+        const QJsonObject rootObj = doc.object();
+
+        QHash<QString, QSet<QString>> bucket;
+        for (const QString &k : sfFixedAiClusterDrawerKeys())
+            bucket.insert(k, {});
+
+        for (auto it = rootObj.begin(); it != rootObj.end(); ++it) {
+            const QString canonKey = sfNormalizeDrawerJsonKeyToCanon(it.key());
+            if (canonKey.isEmpty()) continue;
+
+            QStringList members;
+            const QJsonValue v = it.value();
+            if (v.isArray()) {
+                for (const auto &el : v.toArray()) {
+                    const QString s = el.toString().trimmed();
+                    if (!s.isEmpty()) members << s;
+                }
+            } else if (v.isString()) {
+                const QString s = v.toString().trimmed();
                 if (!s.isEmpty()) members << s;
             }
-        } else if (v.isString()) {
-            const QString s = v.toString().trimmed();
-            if (!s.isEmpty()) members << s;
+
+            for (const QString &m : members) {
+                const QString child = resolveChild(m);
+                if (child.isEmpty()) continue;
+                bucket[canonKey].insert(child);
+            }
         }
 
-        for (const QString &m : members) {
-            const QString child = resolveChild(m);
-            if (child.isEmpty() || child == folderCanon) continue;
+        QHash<QString, QString> newAiTagToDrawerKey;
+        for (const QString &drawerKey : sfFixedAiClusterDrawerKeys()) {
+            const QSet<QString> kids = bucket.value(drawerKey);
+            for (const QString &child : kids)
+                newAiTagToDrawerKey.insert(child, drawerKey);
+        }
+
+        QStringList synthParents;
+        for (const QString &dk : sfFixedAiClusterDrawerKeys())
+            synthParents.append(sfAiFolderTagForDrawerCanon(dk));
+        {
             QMutexLocker locker(&tagMutex);
-            if (tagManager.setAiTagParent(child, folderCanon, false))
-                ++linked;
+            tagManager.stripAiTagParentsForSyntheticFolders(synthParents, false);
+            tagManager.saveTags();
         }
-    }
 
-    {
-        QMutexLocker locker(&tagMutex);
-        tagManager.saveTags();
+        QTimer::singleShot(0, this, [this, newAiTagToDrawerKey]() mutable {
+            try {
+                m_aiTagToDrawerKey.swap(newAiTagToDrawerKey);
+                saveAiUiDrawerAssignments();
+                if (m_systemTagListWidget && m_aiTagTreeWidget)
+                    updateTagList();
+                QMessageBox::information(
+                    this, QStringLiteral("Smartflie"),
+                    QStringLiteral("已套用 %1 個 AI 標籤的 UI 分類（未修改檔案標籤）。")
+                        .arg(m_aiTagToDrawerKey.size()));
+            } catch (const std::exception &e) {
+                QMessageBox::critical(this, QStringLiteral("Smartflie"),
+                                      QStringLiteral("套用 AI 分類 UI 時發生錯誤：%1")
+                                          .arg(QString::fromUtf8(e.what())));
+            } catch (...) {
+                QMessageBox::critical(this, QStringLiteral("Smartflie"),
+                                      QStringLiteral("套用 AI 分類 UI 時發生未知錯誤。"));
+            }
+        });
+    } catch (const std::exception &e) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"),
+                             QStringLiteral("解析 AI 分類回應時發生錯誤：%1")
+                                 .arg(QString::fromUtf8(e.what())));
+    } catch (...) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"),
+                             QStringLiteral("解析 AI 分類回應時發生未知錯誤。"));
     }
-
-    updateTagList();
-    QMessageBox::information(this,
-                             QStringLiteral("Smartflie"),
-                             QStringLiteral("已套用 %1 個標籤與概念資料夾關聯").arg(linked));
 }
 
 void MainWindow::onTagFolderClustersFinished()
@@ -5550,8 +6176,7 @@ void MainWindow::addTag() {
     }
     updateTagDisplayForFile(fp);
     updateTagList();
-    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-    else populateVirtualTagFiles(activeVirtualTag);
+    reloadCurrentFileListPanel();
 }
 
 void MainWindow::removeTag() {
@@ -5586,8 +6211,7 @@ void MainWindow::removeTag() {
     }
     updateTagDisplayForFile(fp);
     updateTagList();
-    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-    else populateVirtualTagFiles(activeVirtualTag);
+    reloadCurrentFileListPanel();
 }
 
 void MainWindow::removeGlobalTag() {
@@ -5614,7 +6238,10 @@ void MainWindow::removeGlobalTag() {
         QMessageBox::warning(this, tr("Warning"), tr("Cannot delete All Files"));
         return;
     }
-
+    if (data.startsWith(QStringLiteral("SF_DRAWER:"))) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"), QStringLiteral("請選擇具體的 AI 標籤，而非分類資料夾。"));
+        return;
+    }
     const QString tag = normalizeDisplayTag(data);
     auto &lm = LanguageManager::instance();
 
@@ -5672,10 +6299,15 @@ void MainWindow::removeGlobalTag() {
         }
     }
 
+    if (TagManager::hasAiPrefix(tag)) {
+        m_aiTagToDrawerKey.remove(tag);
+        saveAiUiDrawerAssignments();
+    }
+
     fileListMode = FileListMode::PhysicalFolder;
     activeVirtualTag.clear();
     updateTagList();
-    scanFiles();
+    reloadCurrentFileListPanel();
 }
 
 void MainWindow::rebuildAddExistingTagMenu() {
@@ -5711,8 +6343,7 @@ void MainWindow::rebuildAddExistingTagMenu() {
                 }
                 updateTagDisplayForFile(fp);
                 updateTagList();
-                if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-                else populateVirtualTagFiles(activeVirtualTag);
+                reloadCurrentFileListPanel();
             });
         }
         if (!history.isEmpty()) {
@@ -5739,8 +6370,7 @@ void MainWindow::rebuildAddExistingTagMenu() {
                     }
                     updateTagDisplayForFile(fp);
                     updateTagList();
-                    if (fileListMode == FileListMode::PhysicalFolder) scanPhysicalFolder();
-                    else populateVirtualTagFiles(activeVirtualTag);
+                    reloadCurrentFileListPanel();
                 });
             }
         }

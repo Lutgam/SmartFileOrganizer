@@ -32,10 +32,11 @@
 #include <QTimer>
 #include <QVector>
 #include <QHash>
+#include <QMap>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QQueue>
 #include <QProgressBar>
-#include <QMap>
 #include <QPropertyAnimation>
 
 #include <atomic>
@@ -44,6 +45,8 @@
 
 #include "../ai/LlamaEngine.h"
 #include "../core/TagManager.h"
+
+class QStackedWidget;
 
 class WorkspaceFilterProxyModel : public QSortFilterProxyModel {
     Q_OBJECT
@@ -131,15 +134,19 @@ private slots:
     void onWorkspaceClearHashCache();
     void onWorkspaceFactoryReset();
 
+    void onHeroOmniboxTextChanged(const QString &text);
+    void onSemanticSearchFinished();
+
 private:
     friend class AiTagDropTreeWidget;
-    enum class FileListMode { PhysicalFolder, VirtualTag };
+    enum class FileListMode { PhysicalFolder, VirtualTag, SemanticResults };
 
     // ===== Layout =====
     QSplitter *mainSplitter = nullptr;
     QTabWidget *m_mainTabWidget = nullptr;
     QWidget *m_workspaceTab = nullptr;
     QWidget *m_graphTab = nullptr;
+    QLabel *m_graphTacticalTitle = nullptr;
     QWidget *m_taskCenterTab = nullptr;
     GraphWidget *m_graphWidget = nullptr;
 
@@ -149,9 +156,23 @@ private:
     QWidget *m_workspaceTopBar = nullptr;
     QLineEdit *m_heroOmnibox = nullptr;
     QPushButton *m_btnSemanticSearch = nullptr;
+    BusyChip *m_heroSearchBusyChip = nullptr;
+    QTimer *m_heroSemanticSpinTimer = nullptr;
+    int m_heroSemanticSpinPhase = 0;
 
     void updateAllTexts();
     void runHeroSemanticSearchQuery();
+    void clearSemanticSearchFilter();
+    void disableSemanticOverlays();
+    void refreshSemanticGlobalBanner();
+    void populateSemanticResultFiles();
+    void reloadCurrentFileListPanel();
+    QString buildWorkspaceSemanticIdLines(int maxFiles);
+    void loadAiUiDrawerAssignments();
+    void saveAiUiDrawerAssignments() const;
+    QString aiUiDrawerStorePath() const;
+    void setHeroSemanticBusy(bool busy);
+    QString buildSemanticRetrieverPrompt(const QString &userQuery, const QString &idContextLines) const;
     QWidget *tagsPanel = nullptr;
     QLabel *lblTagLibraryTitle = nullptr;
     QTabWidget *m_tagTabWidget = nullptr;
@@ -175,12 +196,15 @@ private:
     QWidget *filesPanel = nullptr;
     QLabel *lblFileListTitle = nullptr;
     QLabel *lblCurrentTarget = nullptr;
+    QLabel *m_semanticGlobalBanner = nullptr;
     QLabel *lblBackgroundStatus = nullptr;
     QPushButton *m_btnRestartBackgroundAnalyze = nullptr;
     bool m_showRestartBackgroundPrompt = false;
     QComboBox *cmbSort = nullptr;
     QComboBox *cmbTagFilter = nullptr;
     QListWidget *fileList = nullptr;
+    /// Index 0: file list; index 1: global semantic search progress placeholder.
+    QStackedWidget *m_fileListPageStack = nullptr;
     QPushButton *btnLoadMore = nullptr;
     QPushButton *btnLoadAll = nullptr;
 
@@ -240,6 +264,7 @@ private:
 
     QFutureWatcher<std::string> *watcher = nullptr;
     QFutureWatcher<std::string> *m_consolidateWatcher = nullptr;
+    QFutureWatcher<std::string> *m_semanticSearchWatcher = nullptr;
     QFutureWatcher<bool> *modelLoadWatcher = nullptr;
     QFutureWatcher<void> *initialScanWatcher = nullptr;
 
@@ -252,6 +277,13 @@ private:
     FileListMode fileListMode = FileListMode::PhysicalFolder;
     QString activeVirtualTag;
     QHash<QString, QString> m_aiSummaryByPath;
+
+    bool m_semanticFilterActive = false;
+    QSet<QString> m_semanticVisiblePaths;
+    QString m_semanticLockedQuery;
+    QSet<QString> m_semanticValidWorkspacePaths;
+    QMap<int, QString> m_semanticSearchIdToPath;
+    QHash<QString, QString> m_aiTagToDrawerKey;
 
     // ===== Batch AI analysis queue =====
     QQueue<QString> m_analysisQueue;

@@ -370,21 +370,16 @@ void GraphWidget::ensureToolbar() {
     connect(m_tagFilter, &QComboBox::currentIndexChanged, this, [this](int) { buildGraph(); });
     connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() {
         if (m_filterLabel) m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
-        if (m_maxNodesLabel)
-            m_maxNodesLabel->setText(LanguageManager::instance().getText(QStringLiteral("graph_max_nodes")));
+        if (m_maxNodesHint) {
+            m_maxNodesHint->setText(LanguageManager::instance().language() == LanguageManager::Language::EN_US
+                                        ? QStringLiteral("Max nodes: 50 (fixed)")
+                                        : QStringLiteral("節點上限：50（固定）"));
+        }
         rebuildTagFilterOptions();
     });
 
-    m_maxNodesLabel = new QLabel(LanguageManager::instance().getText(QStringLiteral("graph_max_nodes")), m_toolbar);
-    row->addWidget(m_maxNodesLabel);
-
-    m_maxNodesCombo = new QComboBox(m_toolbar);
-    for (int n : {10, 30, 50}) {
-        m_maxNodesCombo->addItem(QString::number(n), n);
-    }
-    m_maxNodesCombo->setCurrentIndex(1); // 30
-    row->addWidget(m_maxNodesCombo);
-    connect(m_maxNodesCombo, &QComboBox::currentIndexChanged, this, [this](int) { buildGraph(); });
+    m_maxNodesHint = new QLabel(QStringLiteral("節點上限：50（固定）"), m_toolbar);
+    row->addWidget(m_maxNodesHint);
 
     m_toolbar->show();
 }
@@ -454,10 +449,7 @@ void GraphWidget::buildGraph() {
         return a.localeAwareCompare(b) < 0;
     });
 
-    int userCap = MAX_NODES_RENDER;
-    if (m_maxNodesCombo && m_maxNodesCombo->currentData().isValid()) {
-        userCap = qBound(1, m_maxNodesCombo->currentData().toInt(), MAX_NODES_RENDER);
-    }
+    const int userCap = MAX_NODES_RENDER;
     if (candidateFiles.size() > userCap) {
         candidateFiles = candidateFiles.mid(0, userCap);
     }

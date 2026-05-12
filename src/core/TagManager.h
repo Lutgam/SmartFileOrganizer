@@ -68,6 +68,9 @@ public:
     void deleteTagDissolveChildren(const QString &tag, bool save = true);
     void deleteTagCascadeAi(const QString &tag, bool save = true);
 
+    /// Drop `[AI]` child → synthetic folder parent edges (and empty folder keys). Does not change file tag arrays.
+    void stripAiTagParentsForSyntheticFolders(const QStringList &syntheticParentTags, bool save);
+
     void addRejectedTag(const QString& tag);
     QStringList getRejectedTags() const;
 
