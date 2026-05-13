@@ -869,6 +869,7 @@ void MainWindow::prependSingleFileToAnalysisQueueFront(const QString &absPath)
 
     QFileInfo finfo(p);
     if (!isAnalyzableFile(finfo)) return;
+    if (!sfPathHasAnalyzableTextOrDocSuffix(p)) return;
     if (pathHasUsableAnalysisSummary(p)) return;
 
     if (!m_currentAnalyzingFile.isEmpty() && m_currentAnalyzingFile == p) return;
@@ -903,6 +904,7 @@ void MainWindow::enqueuePriorityAnalyzeForFileIfNeeded(const QString &absPath)
     if (p.isEmpty()) return;
     QFileInfo fi(p);
     if (!isAnalyzableFile(fi)) return;
+    if (!sfPathHasAnalyzableTextOrDocSuffix(p)) return;
     if (pathHasUsableAnalysisSummary(p)) return;
 
     if (m_isBatchMode) {
@@ -954,6 +956,7 @@ void MainWindow::prependUnanalyzedFromFolderToAnalysisQueue(const QString &folde
         if (p.contains(QStringLiteral("/.smartfile")) || p.contains(QStringLiteral("\\.smartfile"))) continue;
         const QFileInfo finfo(p);
         if (!isAnalyzableFile(finfo)) continue;
+        if (!sfPathHasAnalyzableTextOrDocSuffix(p)) continue;
         if (pathHasUsableAnalysisSummary(p)) continue;
         found << p;
     }
@@ -1461,6 +1464,15 @@ void MainWindow::refreshCurrentAnalysisTargetUi()
     if (fileListMode == FileListMode::SemanticResults) {
         const QString banner =
             QStringLiteral("🔍 跨資料夾全域搜尋結果 (虛擬視圖) — 已脫離實體資料夾範圍");
+        lblCurrentTarget->setText(fm.elidedText(banner, Qt::ElideRight, budget));
+        return;
+    }
+
+    if (fileListMode == FileListMode::VirtualTag && !activeVirtualTag.isEmpty()) {
+        QString tagLabel = activeVirtualTag;
+        if (TagManager::hasAiPrefix(tagLabel))
+            tagLabel = TagManager::stripAiPrefix(tagLabel);
+        const QString banner = QStringLiteral("🏷️ 標籤篩選結果: %1").arg(tagLabel);
         lblCurrentTarget->setText(fm.elidedText(banner, Qt::ElideRight, budget));
         return;
     }
@@ -3987,6 +3999,12 @@ void MainWindow::scanPhysicalFolder() {
 
 void MainWindow::populateVirtualTagFiles(const QString &tag) {
     snapshotFileListSelectionForListRebuild();
+    fileListMode = FileListMode::VirtualTag;
+    if (cmbTagFilter) {
+        cmbTagFilter->blockSignals(true);
+        cmbTagFilter->setCurrentIndex(0);
+        cmbTagFilter->blockSignals(false);
+    }
     if (fileList)
         fileList->clear();
     m_pendingFilesToDisplay.clear();
@@ -4049,6 +4067,7 @@ void MainWindow::populateVirtualTagFiles(const QString &tag) {
     }
 
     renderFileListBatch(BATCH_SIZE);
+    refreshCurrentAnalysisTargetUi();
 }
 
 void MainWindow::renderFileListBatch(int count) {
@@ -4540,7 +4559,9 @@ void MainWindow::filterFiles() {
         m_cmbSearchMode && m_cmbSearchMode->currentData().toInt() == HeroSearchScope_GlobalSemantic;
     const QString query =
         (!heroGlobalSemantic && m_heroOmnibox) ? m_heroOmnibox->text().trimmed().toLower() : QString();
-    const QString tagFilter = cmbTagFilter->currentData().toString();
+    QString tagFilter = cmbTagFilter->currentData().toString();
+    if (fileListMode == FileListMode::VirtualTag)
+        tagFilter = QStringLiteral("ALL");
 
     const bool useSemanticSubset =
         m_semanticFilterActive && !m_semanticVisiblePaths.isEmpty()
@@ -5156,8 +5177,11 @@ void MainWindow::applyTagSelectionData(const QString &data) {
     const QString tag = normalizeDisplayTag(data);
     fileListMode = FileListMode::VirtualTag;
     activeVirtualTag = tag;
-    const int idx = cmbTagFilter->findData(tag);
-    if (idx >= 0) cmbTagFilter->setCurrentIndex(idx);
+    if (cmbTagFilter) {
+        cmbTagFilter->blockSignals(true);
+        cmbTagFilter->setCurrentIndex(0);
+        cmbTagFilter->blockSignals(false);
+    }
     populateVirtualTagFiles(tag);
 }
 
@@ -5403,6 +5427,10 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("此項目不可分析")));
         return;
     }
+    if (!sfPathHasAnalyzableTextOrDocSuffix(fp)) {
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("此項目不可分析")));
+        return;
+    }
 
     QString bypassSummary;
     QStringList bypassTags;
@@ -5560,9 +5588,20 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
 }
 
 void MainWindow::cancelAnalysis() {
-    cancelFlag.store(true);
+    cancelFlag.store(true, std::memory_order_release);
     m_pendingPrioritySingleFile.clear();
     m_analysisUiWorkActive = false;
+    if (m_isBatchMode) {
+        m_analysisQueue.clear();
+        m_isBatchMode = false;
+        m_batchTriggeredByBackgroundAuto = false;
+        m_currentAnalyzingFile.clear();
+        m_backgroundAnalyzeFolderLabel.clear();
+        if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
+        if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
+        syncBatchAnalyzeButtonLabel();
+        updateBackgroundStatusLabel();
+    }
     stopAnalysisSpinner();
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("取消中…")));
 }
@@ -5584,6 +5623,7 @@ void MainWindow::startBatchAnalysis() {
         QFileInfo fi(absPath);
         if (!fi.exists() || !fi.isFile()) continue;
         if (!isAnalyzableFile(fi)) continue;
+        if (!sfPathHasAnalyzableTextOrDocSuffix(absPath)) continue;
         batchPaths << QDir::cleanPath(absPath);
     }
     const QString focus = (fileListMode == FileListMode::PhysicalFolder) ? QDir::cleanPath(currentPath) : QString();
@@ -5605,6 +5645,22 @@ void MainWindow::startBatchAnalysis() {
 
 void MainWindow::processNextInQueue() {
     if (!m_isBatchMode) return;
+
+    if (cancelFlag.load(std::memory_order_acquire)) {
+        m_analysisQueue.clear();
+        m_isBatchMode = false;
+        m_batchTriggeredByBackgroundAuto = false;
+        m_currentAnalyzingFile.clear();
+        m_backgroundAnalyzeFolderLabel.clear();
+        stopAnalysisSpinner();
+        if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
+        if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
+        if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
+        syncBatchAnalyzeButtonLabel();
+        updateBackgroundStatusLabel();
+        refreshCurrentAnalysisTargetUi();
+        return;
+    }
 
     if (m_analysisQueue.isEmpty()) {
         // Completed
@@ -5707,6 +5763,7 @@ void MainWindow::collectUnanalyzedPathsFromWorkspace(int maxFiles, QStringList *
             seen.insert(p);
             const QFileInfo finfo(p);
             if (!isAnalyzableFile(finfo)) continue;
+            if (!sfPathHasAnalyzableTextOrDocSuffix(p)) continue;
             if (!sfSuffixEligibleForBackgroundAutoAnalysis(finfo)) continue;
             if (pathHasUsableAnalysisSummary(p)) continue;
             *out << p;
@@ -6324,10 +6381,16 @@ void MainWindow::onAnalysisFinished() {
     const QString qRaw = QString::fromStdString(raw);
 
     if (raw.rfind("Error:", 0) == 0) {
-        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析失敗")));
-        qWarning() << "[analyze]" << qRaw;
-        if (!fp.isEmpty()) m_aiSummaryByPath.remove(fp);
-        if (m_isBatchMode) {
+        const bool cancelled = raw.rfind("Error: Cancelled", 0) == 0
+                               || cancelFlag.load(std::memory_order_acquire);
+        if (cancelled) {
+            lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("已取消")));
+        } else {
+            lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析失敗")));
+            qWarning() << "[analyze]" << qRaw;
+            if (!fp.isEmpty()) m_aiSummaryByPath.remove(fp);
+        }
+        if (m_isBatchMode && !cancelled) {
             ++m_batchCompletedCount;
             setUiBusy(false);
             updateBackgroundStatusLabel();
@@ -6339,14 +6402,8 @@ void MainWindow::onAnalysisFinished() {
         return;
     }
 
-    if (cancelFlag.load()) {
+    if (cancelFlag.load(std::memory_order_acquire)) {
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("已取消")));
-        if (m_isBatchMode) {
-            ++m_batchCompletedCount;
-            setUiBusy(false);
-            updateBackgroundStatusLabel();
-            QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
-        }
         m_currentAnalyzingFile.clear();
         refreshCurrentAnalysisTargetUi();
         clearAnalysisWorkFlagsAndSyncUi();

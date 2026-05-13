@@ -206,6 +206,9 @@ std::string LlamaEngine::generateResponseImpl(const std::string &prompt, int max
 {
   InferenceGuard guard(this);
   if (!ensureModelLoaded()) return "Error: Model not loaded";
+  if (m_cancelFlag && m_cancelFlag->load(std::memory_order_acquire)) {
+    return "Error: Cancelled";
+  }
 
   struct LlamaKvCacheFinalClear {
     llama_context *c;
@@ -281,7 +284,7 @@ std::string LlamaEngine::generateResponseImpl(const std::string &prompt, int max
 
   for (int i = 0; i < n_predict; ++i) {
     // Check cancel flag before each token
-    if (m_cancelFlag && m_cancelFlag->load()) {
+    if (m_cancelFlag && m_cancelFlag->load(std::memory_order_acquire)) {
       break; // Abort inference gracefully
     }
 
@@ -438,6 +441,12 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
         "- [行動] 檔名「MainActivity.kt」 -> tags 類似：Kotlin, Android, 行動開發, 應用程式\n"
         "- [人文] 檔名「近代歐洲史_期末報告.docx」 -> tags 類似：歐洲史, 歷史, 期末報告, 人文學科\n"
         "- [數據] 檔名「sales_dashboard_2024Q4.xlsx」 -> tags 類似：Excel, 儀表板, 銷售分析, 財務報表\n"
+        "- [弱語意-暫存] 檔名「report_final_v3.docx」 -> tags 類似：暫存, 草稿, Word文件\n"
+        "- [弱語意-掃描] 檔名「掃描0042.jpg」 -> tags 類似：掃描圖片, 暫存\n"
+        "- [弱語意-截圖] 檔名「Screenshot_2024.png」 -> tags 類似：截圖, 暫存\n"
+        "- [弱語意-備份] 檔名「backup_2024.zip」 -> tags 類似：備份壓縮, 系統備份\n"
+        "- [弱語意-多義] 檔名「data.csv」 -> tags 類似：數據, 暫存\n"
+        "若檔名與內容資訊不足，只能輸出保守、可驗證的標籤；禁止臆測主題、組織或領域。\n"
         "請依此精準度與領域極端多樣性產出 tags；summary 與 tags 必須使用繁體中文。\n"
         "\n"
         "摘要規則：\n"
