@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "../core/DocumentParser.h"
+#include "../core/DrawerCategoryLut.h"
 
 #include <QAbstractItemView>
 #include <QAbstractProxyModel>
@@ -697,39 +698,12 @@ static QString sha256HexOfFile(const QString &path)
 
 static QStringList sfFixedAiClusterDrawerKeys()
 {
-    return {QStringLiteral("💼 工作專案"), QStringLiteral("📚 學習研究"), QStringLiteral("💰 財務帳務"),
-            QStringLiteral("🎬 多媒體"), QStringLiteral("⚙️ 系統開發"), QStringLiteral("📝 筆記文件"),
-            QStringLiteral("🗄️ 數據資料"), QStringLiteral("🗓️ 企劃時程"), QStringLiteral("📥 暫存下載"),
-            QStringLiteral("📦 雜項")};
+    return sfActiveDrawerCategoryLut().drawerKeys();
 }
 
-/// Map legacy drawer keys saved on disk to the current ten canonical drawers.
 static QString sfLegacyAiDrawerKeyToCanon(const QString &rawIn)
 {
-    const QString t = rawIn.trimmed();
-    static const QMap<QString, QString> kLegacyToNew = {
-        {QStringLiteral("💼 工作"), QStringLiteral("💼 工作專案")},
-        {QStringLiteral("📚 學習"), QStringLiteral("📚 學習研究")},
-        {QStringLiteral("💰 財務"), QStringLiteral("💰 財務帳務")},
-        {QStringLiteral("🎬 媒體"), QStringLiteral("🎬 多媒體")},
-        {QStringLiteral("⚙️ 系統"), QStringLiteral("⚙️ 系統開發")},
-        {QStringLiteral("[營運管理]"), QStringLiteral("💼 工作專案")},
-        {QStringLiteral("[技術與開發]"), QStringLiteral("⚙️ 系統開發")},
-        {QStringLiteral("[財務與法務]"), QStringLiteral("💰 財務帳務")},
-        {QStringLiteral("[行銷與企劃]"), QStringLiteral("🗓️ 企劃時程")},
-        {QStringLiteral("[人事與行政]"), QStringLiteral("💼 工作專案")},
-        {QStringLiteral("[多媒體資源]"), QStringLiteral("🎬 多媒體")},
-        {QStringLiteral("[會議與報告]"), QStringLiteral("💼 工作專案")},
-        {QStringLiteral("[其他雜項]"), QStringLiteral("📦 雜項")},
-    };
-    auto it = kLegacyToNew.constFind(t);
-    if (it != kLegacyToNew.cend()) return it.value();
-
-    for (auto jt = kLegacyToNew.cbegin(); jt != kLegacyToNew.cend(); ++jt) {
-        const QString inner = jt.key().mid(1, jt.key().size() - 2).trimmed();
-        if (QString::compare(t, inner, Qt::CaseInsensitive) == 0) return jt.value();
-    }
-    return QString();
+    return sfActiveDrawerCategoryLut().normalizeDrawerKey(rawIn);
 }
 
 static QString sfAiFolderTagForDrawerCanon(const QString &canonicalDrawerKey)
@@ -740,55 +714,17 @@ static QString sfAiFolderTagForDrawerCanon(const QString &canonicalDrawerKey)
 
 static QString sfNormalizeDrawerJsonKeyToCanon(const QString &raw)
 {
-    const QString t = raw.trimmed();
-    for (const QString &ref : sfFixedAiClusterDrawerKeys()) {
-        if (QString::compare(t, ref, Qt::CaseInsensitive) == 0) return ref;
-    }
-    static const QMap<QString, QString> kBracketToShort = {
-        {QStringLiteral("[工作與專案]"), QStringLiteral("💼 工作專案")},
-        {QStringLiteral("[學習與研究]"), QStringLiteral("📚 學習研究")},
-        {QStringLiteral("[財務與紀錄]"), QStringLiteral("💰 財務帳務")},
-        {QStringLiteral("[多媒體與素材]"), QStringLiteral("🎬 多媒體")},
-        {QStringLiteral("[系統與備份]"), QStringLiteral("⚙️ 系統開發")},
-        {QStringLiteral("[未分類雜項]"), QStringLiteral("📦 雜項")},
-        {QStringLiteral("💼 工作"), QStringLiteral("💼 工作專案")},
-        {QStringLiteral("📚 學習"), QStringLiteral("📚 學習研究")},
-        {QStringLiteral("💰 財務"), QStringLiteral("💰 財務帳務")},
-        {QStringLiteral("🎬 媒體"), QStringLiteral("🎬 多媒體")},
-        {QStringLiteral("⚙️ 系統"), QStringLiteral("⚙️ 系統開發")},
-    };
-    auto itb = kBracketToShort.constFind(t);
-    if (itb != kBracketToShort.cend()) return itb.value();
-    for (auto jt = kBracketToShort.cbegin(); jt != kBracketToShort.cend(); ++jt) {
-        const QString inner = jt.key().mid(1, jt.key().size() - 2).trimmed();
-        if (QString::compare(t, inner, Qt::CaseInsensitive) == 0) return jt.value();
-        const QString withAi = QStringLiteral("[AI] ") + inner;
-        if (QString::compare(t, withAi, Qt::CaseInsensitive) == 0) return jt.value();
-    }
-    return QString();
+    return sfActiveDrawerCategoryLut().normalizeDrawerKey(raw);
 }
 
 static QString sfNormalizePersistedDrawerValue(const QString &vIn)
 {
-    QString v = vIn.trimmed();
-    if (v.startsWith(QStringLiteral("SF_DRAWER:")))
-        v = v.mid(QStringLiteral("SF_DRAWER:").size()).trimmed();
-    if (v.isEmpty() || v == QStringLiteral("__uncat__"))
-        return QStringLiteral("📦 雜項");
-    QString canon = sfNormalizeDrawerJsonKeyToCanon(v);
-    if (!canon.isEmpty()) return canon;
-    canon = sfLegacyAiDrawerKeyToCanon(v);
-    if (!canon.isEmpty()) return canon;
-    return QStringLiteral("📦 雜項");
+    return sfActiveDrawerCategoryLut().normalizeDrawerKey(vIn);
 }
 
 static bool sfIsSyntheticAiDrawerFolderTag(const QString &t)
 {
-    const QString nt = t.trimmed();
-    for (const QString &dk : sfFixedAiClusterDrawerKeys()) {
-        if (nt == sfAiFolderTagForDrawerCanon(dk)) return true;
-    }
-    return false;
+    return sfActiveDrawerCategoryLut().isSyntheticDrawerFolderTag(t);
 }
 
 static QString sfHeuristicDrawerKeyForAiTag(const QString &rawAiTag)
@@ -796,72 +732,7 @@ static QString sfHeuristicDrawerKeyForAiTag(const QString &rawAiTag)
     const QString core = TagManager::stripAiPrefix(rawAiTag).trimmed();
     if (core.isEmpty())
         return QStringLiteral("📦 雜項");
-
-    const QString coreLower = core.toLower();
-
-    auto hitList = [&core, &coreLower](const QStringList &keys, bool asciiLower = false) {
-        for (const QString &kw : keys) {
-            if (kw.isEmpty()) continue;
-            if (asciiLower) {
-                if (coreLower.contains(kw.toLower())) return true;
-            } else if (core.contains(kw)) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    // LUT priority: specific drawers before broad overlaps (e.g. 統計 → 數據資料 before 學習研究).
-    static const QStringList kStaging = {QStringLiteral("暫存"), QStringLiteral("下載"), QStringLiteral("temp"),
-                                         QStringLiteral("備份"), QStringLiteral("未命名"), QStringLiteral("新建")};
-    static const QStringList kStagingAscii = {QStringLiteral("download")};
-    static const QStringList kStudy = {QStringLiteral("學習"), QStringLiteral("教學"), QStringLiteral("課程"),
-                                       QStringLiteral("筆記"), QStringLiteral("論文"), QStringLiteral("研究"),
-                                       QStringLiteral("考"), QStringLiteral("學校"), QStringLiteral("作業"),
-                                       QStringLiteral("講義"), QStringLiteral("教材"), QStringLiteral("知識"),
-                                       QStringLiteral("課"), QStringLiteral("題")};
-    static const QStringList kFin = {QStringLiteral("財務"), QStringLiteral("帳"), QStringLiteral("發票"),
-                                     QStringLiteral("收據"), QStringLiteral("薪"), QStringLiteral("匯款"),
-                                     QStringLiteral("交易"), QStringLiteral("報價"), QStringLiteral("銀行"),
-                                     QStringLiteral("成本"), QStringLiteral("預算"), QStringLiteral("投資"),
-                                     QStringLiteral("金")};
-    static const QStringList kSchedule = {QStringLiteral("企劃"), QStringLiteral("計畫"), QStringLiteral("時程"),
-                                          QStringLiteral("排程"), QStringLiteral("規劃"), QStringLiteral("進度"),
-                                          QStringLiteral("日曆")};
-    static const QStringList kWork = {QStringLiteral("工作"), QStringLiteral("專案"), QStringLiteral("業務"),
-                                      QStringLiteral("客戶"), QStringLiteral("提案"), QStringLiteral("會議"),
-                                      QStringLiteral("合約"), QStringLiteral("報告"), QStringLiteral("履歷"),
-                                      QStringLiteral("公文"), QStringLiteral("簡報"), QStringLiteral("紀錄"),
-                                      QStringLiteral("專題")};
-    static const QStringList kData = {QStringLiteral("數據"), QStringLiteral("資料庫"), QStringLiteral("報表"),
-                                      QStringLiteral("統計"), QStringLiteral("清單"), QStringLiteral("表")};
-    static const QStringList kDataAscii = {QStringLiteral("sql"), QStringLiteral("csv")};
-    static const QStringList kNotes = {QStringLiteral("文件"), QStringLiteral("草稿"), QStringLiteral("文章"),
-                                       QStringLiteral("日記"), QStringLiteral("手冊"), QStringLiteral("說明"),
-                                       QStringLiteral("信")};
-    static const QStringList kNotesAscii = {QStringLiteral("doc")};
-    static const QStringList kMedia = {QStringLiteral("圖"), QStringLiteral("照片"), QStringLiteral("影片"),
-                                       QStringLiteral("影音"), QStringLiteral("音樂"), QStringLiteral("錄音"),
-                                       QStringLiteral("素材"), QStringLiteral("設計"), QStringLiteral("畫"),
-                                       QStringLiteral("截圖"), QStringLiteral("音檔")};
-    static const QStringList kMediaAscii = {QStringLiteral("img"), QStringLiteral("video"), QStringLiteral("audio")};
-    static const QStringList kSys = {QStringLiteral("系統"), QStringLiteral("設定"), QStringLiteral("程式"),
-                                     QStringLiteral("代碼"), QStringLiteral("腳本"), QStringLiteral("環境"),
-                                     QStringLiteral("日誌"), QStringLiteral("軟體"), QStringLiteral("碼"),
-                                     QStringLiteral("配置")};
-    static const QStringList kSysAscii = {QStringLiteral("code"), QStringLiteral("config"), QStringLiteral("script"),
-                                          QStringLiteral("db")};
-
-    if (hitList(kStaging) || hitList(kStagingAscii, true)) return QStringLiteral("📥 暫存下載");
-    if (hitList(kStudy)) return QStringLiteral("📚 學習研究");
-    if (hitList(kFin)) return QStringLiteral("💰 財務帳務");
-    if (hitList(kSchedule)) return QStringLiteral("🗓️ 企劃時程");
-    if (hitList(kWork)) return QStringLiteral("💼 工作專案");
-    if (hitList(kData) || hitList(kDataAscii, true)) return QStringLiteral("🗄️ 數據資料");
-    if (hitList(kNotes) || hitList(kNotesAscii, true)) return QStringLiteral("📝 筆記文件");
-    if (hitList(kMedia) || hitList(kMediaAscii, true)) return QStringLiteral("🎬 多媒體");
-    if (hitList(kSys) || hitList(kSysAscii, true)) return QStringLiteral("⚙️ 系統開發");
-    return QStringLiteral("📦 雜項");
+    return sfActiveDrawerCategoryLut().matchText(core);
 }
 
 static TagClusterWorkerResult sfRunHeuristicTagClusterJob(TagManager *tm, QMutex *mx)
@@ -3722,6 +3593,7 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     setFolderTreeCurrentPath(rootPath);
 
     tagManager.loadTags(rootPath.toStdString());
+    reloadCategoriesConfigFromWorkspace();
     disableSemanticOverlays();
     if (m_fileListPageStack)
         m_fileListPageStack->setCurrentIndex(0);
@@ -4801,6 +4673,27 @@ QString MainWindow::aiUiDrawerStorePath() const
 {
     if (rootPath.trimmed().isEmpty()) return {};
     return QDir(rootPath).filePath(QStringLiteral(".smartfile/ai_ui_drawers.json"));
+}
+
+QString MainWindow::categoriesConfigPath() const
+{
+    if (rootPath.trimmed().isEmpty())
+        return QString();
+    return QDir(rootPath).filePath(QStringLiteral("categories_config.json"));
+}
+
+void MainWindow::reloadCategoriesConfigFromWorkspace()
+{
+    const QString path = categoriesConfigPath();
+    if (path.isEmpty()) {
+        m_categoryLut = SfDrawerCategoryLut::builtinDefault();
+    } else if (!QFileInfo::exists(path)) {
+        SfDrawerCategoryLut::writeDefaultToFile(path);
+        m_categoryLut = SfDrawerCategoryLut::loadFromFile(path);
+    } else {
+        m_categoryLut = SfDrawerCategoryLut::loadFromFile(path);
+    }
+    sfSetActiveDrawerCategoryLut(m_categoryLut);
 }
 
 void MainWindow::loadAiUiDrawerAssignments()

@@ -59,6 +59,8 @@ add_executable(SmartFileOrganizer
     src/core/FileScanner.h
     src/core/TagManager.cpp
     src/core/TagManager.h
+    src/core/DrawerCategoryLut.cpp
+    src/core/DrawerCategoryLut.h
     src/ai/LlamaEngine.cpp
     src/ai/LlamaEngine.h
     src/core/DocumentParser.cpp

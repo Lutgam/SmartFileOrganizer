@@ -46,6 +46,7 @@
 
 #include "../ai/LlamaEngine.h"
 #include "../core/TagManager.h"
+#include "../core/DrawerCategoryLut.h"
 
 /// Result of a single-file LLM analysis job; `workspaceEpochAtSubmit` is captured on the UI thread when the
 /// future is submitted so stale completions after a workspace switch can be discarded without touching disk.
@@ -200,6 +201,8 @@ private:
     void loadAiUiDrawerAssignments();
     void saveAiUiDrawerAssignments() const;
     QString aiUiDrawerStorePath() const;
+    QString categoriesConfigPath() const;
+    void reloadCategoriesConfigFromWorkspace();
     void setHeroSemanticBusy(bool busy);
 
     QWidget *tagsPanel = nullptr;
@@ -319,6 +322,7 @@ private:
     QSet<QString> m_semanticValidWorkspacePaths;
     QMap<int, QString> m_semanticSearchIdToPath;
     QHash<QString, QString> m_aiTagToDrawerKey;
+    SfDrawerCategoryLut m_categoryLut;
     /// While true, directory debounce must not refresh the file list (avoids racing semantic-search UI).
     bool m_semanticSearchUiApplying = false;
     /// After a full list rebuild, re-select this absolute path once it appears (paged loads).
