@@ -193,6 +193,9 @@ private:
     void refreshSemanticGlobalBanner();
     void populateSemanticResultFiles();
     void reloadCurrentFileListPanel();
+    void updateFloatingQueueMonitor();
+    void repositionFloatingQueueMonitor();
+    void onSaveSemanticResultsAsAiCategory();
     void applyTagClusterDrawerUi_commit(QHash<QString, QString> newMap);
     void loadAiUiDrawerAssignments();
     void saveAiUiDrawerAssignments() const;
@@ -223,6 +226,9 @@ private:
     QLabel *lblFileListTitle = nullptr;
     QLabel *lblCurrentTarget = nullptr;
     QLabel *m_semanticGlobalBanner = nullptr;
+    QPushButton *m_btnSaveSemanticResultsAsCategory = nullptr;
+    QWidget *m_bgQueueFloatingMonitor = nullptr;
+    QLabel *m_bgQueueFloatingMonitorLabel = nullptr;
     QLabel *lblBackgroundStatus = nullptr;
     QPushButton *m_btnRestartBackgroundAnalyze = nullptr;
     bool m_showRestartBackgroundPrompt = false;
@@ -461,6 +467,9 @@ private:
 
     /// Solid analysis badge only when we have a persisted summary that is non-empty and not an LLM error echo.
     bool pathHasUsableAnalysisSummary(const QString &absPath) const;
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 };
 
 #endif // MAINWINDOW_H

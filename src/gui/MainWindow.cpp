@@ -12,6 +12,7 @@
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDropEvent>
+#include <QEvent>
 #include <QDir>
 #include <QDirIterator>
 #include <QDialog>
@@ -1692,6 +1693,7 @@ void MainWindow::updateBackgroundStatusLabel()
     }
 
     applyDualTrackBatchProgressVisibility();
+    updateFloatingQueueMonitor();
 }
 
 void MainWindow::appendTaskCenterLog(const QString &text)
@@ -2652,7 +2654,17 @@ void MainWindow::setupFourColumnLayout() {
     m_semanticGlobalBanner->setStyleSheet(QStringLiteral(
         "QLabel { background-color: #fff3cd; color: #856404; border: 1px solid #ffc107; "
         "border-radius: 6px; padding: 8px 10px; font-weight: 600; font-size: 13px; }"));
-    filesLayout->addWidget(m_semanticGlobalBanner);
+    m_btnSaveSemanticResultsAsCategory = new QPushButton(QStringLiteral("💾 儲存為新分類"), this);
+    m_btnSaveSemanticResultsAsCategory->setVisible(false);
+    m_btnSaveSemanticResultsAsCategory->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    connect(m_btnSaveSemanticResultsAsCategory, &QPushButton::clicked, this,
+            &MainWindow::onSaveSemanticResultsAsAiCategory);
+    auto *semanticBannerRow = new QHBoxLayout();
+    semanticBannerRow->setContentsMargins(0, 0, 0, 0);
+    semanticBannerRow->setSpacing(8);
+    semanticBannerRow->addWidget(m_semanticGlobalBanner, 1);
+    semanticBannerRow->addWidget(m_btnSaveSemanticResultsAsCategory, 0, Qt::AlignTop);
+    filesLayout->addLayout(semanticBannerRow);
 
     auto *controlsCol = new QVBoxLayout();
 
@@ -2688,6 +2700,26 @@ void MainWindow::setupFourColumnLayout() {
         if (absPath.isEmpty()) return;
         QDesktopServices::openUrl(QUrl::fromLocalFile(absPath));
     });
+    fileList->installEventFilter(this);
+
+    m_bgQueueFloatingMonitor = new QWidget(fileList);
+    m_bgQueueFloatingMonitor->setObjectName(QStringLiteral("bgQueueFloatingMonitor"));
+    m_bgQueueFloatingMonitor->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_bgQueueFloatingMonitor->setVisible(false);
+    m_bgQueueFloatingMonitor->setStyleSheet(QStringLiteral(
+        "#bgQueueFloatingMonitor {"
+        "  background-color: rgba(15, 23, 42, 210);"
+        "  border: 1px solid rgba(148, 163, 184, 120);"
+        "  border-radius: 10px;"
+        "}"));
+    auto *monitorLayout = new QVBoxLayout(m_bgQueueFloatingMonitor);
+    monitorLayout->setContentsMargins(12, 10, 12, 10);
+    m_bgQueueFloatingMonitorLabel = new QLabel(m_bgQueueFloatingMonitor);
+    m_bgQueueFloatingMonitorLabel->setWordWrap(true);
+    m_bgQueueFloatingMonitorLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_bgQueueFloatingMonitorLabel->setStyleSheet(QStringLiteral(
+        "QLabel { color: #f8fafc; font-size: 12px; font-weight: 600; background: transparent; border: none; }"));
+    monitorLayout->addWidget(m_bgQueueFloatingMonitorLabel);
 
     m_fileListPageStack = new QStackedWidget(this);
     m_fileListPageStack->addWidget(fileList);
@@ -4806,15 +4838,129 @@ void MainWindow::saveAiUiDrawerAssignments() const
 
 void MainWindow::refreshSemanticGlobalBanner()
 {
+    const bool showSemantic = m_semanticFilterActive && !m_semanticVisiblePaths.isEmpty()
+                              && fileListMode == FileListMode::SemanticResults;
     if (!m_semanticGlobalBanner) return;
-    if (!m_semanticFilterActive || m_semanticVisiblePaths.isEmpty()) {
+    if (!showSemantic) {
         m_semanticGlobalBanner->hide();
+        if (m_btnSaveSemanticResultsAsCategory)
+            m_btnSaveSemanticResultsAsCategory->hide();
         return;
     }
     const int n = m_semanticVisiblePaths.size();
     m_semanticGlobalBanner->setText(
         QStringLiteral("🔍 跨資料夾全域搜尋結果 (虛擬視圖)　共 %1 筆相關檔案").arg(n));
     m_semanticGlobalBanner->setVisible(true);
+    if (m_btnSaveSemanticResultsAsCategory)
+        m_btnSaveSemanticResultsAsCategory->setVisible(true);
+}
+
+void MainWindow::updateFloatingQueueMonitor()
+{
+    if (!m_bgQueueFloatingMonitor || !m_bgQueueFloatingMonitorLabel || !fileList)
+        return;
+
+    const int remaining = m_analysisQueue.size();
+    if (remaining <= 0) {
+        m_bgQueueFloatingMonitor->hide();
+        return;
+    }
+
+    QString currentName;
+    if (!m_currentAnalyzingFile.isEmpty()) {
+        currentName = QFileInfo(m_currentAnalyzingFile).fileName();
+    } else {
+        currentName = QFileInfo(m_analysisQueue.head()).fileName();
+    }
+
+    m_bgQueueFloatingMonitorLabel->setText(
+        QStringLiteral("🤖 AI 正在整理中... 剩餘 %1 筆檔案 (正在處理: %2)")
+            .arg(remaining)
+            .arg(currentName.isEmpty() ? QStringLiteral("—") : currentName));
+    m_bgQueueFloatingMonitor->adjustSize();
+    m_bgQueueFloatingMonitor->setVisible(true);
+    repositionFloatingQueueMonitor();
+}
+
+void MainWindow::repositionFloatingQueueMonitor()
+{
+    if (!m_bgQueueFloatingMonitor || !fileList || !m_bgQueueFloatingMonitor->isVisible())
+        return;
+
+    constexpr int margin = 12;
+    const int maxWidth = qMax(220, fileList->width() - margin * 2);
+    m_bgQueueFloatingMonitor->setMaximumWidth(maxWidth);
+    m_bgQueueFloatingMonitor->adjustSize();
+
+    const int x = qMax(margin, fileList->width() - m_bgQueueFloatingMonitor->width() - margin);
+    const int y = qMax(margin, fileList->height() - m_bgQueueFloatingMonitor->height() - margin);
+    m_bgQueueFloatingMonitor->move(x, y);
+    m_bgQueueFloatingMonitor->raise();
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == fileList && event->type() == QEvent::Resize) {
+        repositionFloatingQueueMonitor();
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::onSaveSemanticResultsAsAiCategory()
+{
+    if (m_semanticPickedPaths.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 QStringLiteral("目前沒有可儲存的搜尋結果。"));
+        return;
+    }
+
+    bool ok = false;
+    QString name = QInputDialog::getText(
+        this,
+        QStringLiteral("儲存為新分類"),
+        QStringLiteral("請輸入新 AI 分類名稱（例如：專案 A）"),
+        QLineEdit::Normal,
+        QString(),
+        &ok);
+    if (!ok) return;
+
+    name = TagManager::stripAiPrefix(name.trimmed());
+    if (name.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("分類名稱不可為空。"));
+        return;
+    }
+
+    const QString newTag = QStringLiteral("[AI] ") + name;
+    int touched = 0;
+
+    {
+        QMutexLocker locker(&tagMutex);
+        for (const QString &pathRaw : std::as_const(m_semanticPickedPaths)) {
+            const QString path = QDir::cleanPath(pathRaw);
+            if (path.isEmpty()) continue;
+
+            std::vector<QString> kept;
+            kept.reserve(8);
+            for (const QString &t : tagManager.getTags(path)) {
+                if (!TagManager::hasAiPrefix(t))
+                    kept.push_back(t);
+            }
+            kept.push_back(newTag);
+            tagManager.setTags(path, kept);
+            ++touched;
+        }
+    }
+
+    if (touched <= 0) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("沒有任何檔案被更新。"));
+        return;
+    }
+
+    updateTagList();
+    populateSemanticResultFiles();
+    if (lblStatus) {
+        lblStatus->setText(QStringLiteral("✅ 已將 %1 個檔案歸類為「%2」。").arg(touched).arg(name));
+    }
 }
 
 void MainWindow::populateSemanticResultFiles()
@@ -6382,7 +6528,7 @@ void MainWindow::onAnalysisFinished() {
             if (tagsV.isArray()) {
                 const QJsonArray arr = tagsV.toArray();
                 for (const auto &v : arr) {
-                    if (tagsList.size() >= 3) break; // hard limit across all blocks
+                    if (tagsList.size() >= 5) break; // hard limit across all blocks
                     QString t = normalizeAiTag(v.toString());
                     if (t.isEmpty()) continue;
                     if (t == QStringLiteral("ai")) continue; // drop meaningless tag
@@ -6391,14 +6537,14 @@ void MainWindow::onAnalysisFinished() {
                 }
             }
 
-            if (sfSummaryAcceptableForStorage(summary) && tagsList.size() >= 3) break;
+            if (sfSummaryAcceptableForStorage(summary) && tagsList.size() >= 5) break;
         }
 
         if (!tagsList.isEmpty()) {
             QSet<QString> seen;
             tags.clear();
             for (const QString &raw : tagsList) {
-                if (tags.size() >= 3) break;
+                if (tags.size() >= 5) break;
                 QString t = TagManager::stripAiPrefix(raw.trimmed());
                 t = normalizeAiTag(t);
                 if (t.isEmpty()) continue;
@@ -6422,7 +6568,7 @@ void MainWindow::onAnalysisFinished() {
         std::vector<QString> filtered;
         QSet<QString> seen;
         for (const auto &t0 : rawTags) {
-            if (filtered.size() >= 3) break;
+            if (filtered.size() >= 5) break;
             QString t = normalizeAiTag(t0);
             if (t.isEmpty()) continue;
             if (t == QStringLiteral("ai")) continue;

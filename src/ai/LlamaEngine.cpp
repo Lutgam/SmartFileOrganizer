@@ -365,8 +365,9 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
           "1) The \"summary\" field MUST equal EXACTLY:\n"
           "\"" +
           fixedSummaryEn + "\"\n"
-          "2) The \"tags\" field MUST contain at most 2 tags describing the file type/topic inferred ONLY from filename and extension.\n"
+          "2) The \"tags\" field MUST contain 2 to 3 tags describing the file type/topic inferred ONLY from filename and extension.\n"
           "3) Tags must be concrete nouns or proper nouns. No long sentences.\n"
+          "4) NEVER use generic words such as file, document, data, or content.\n"
           "\nONLY output the JSON object.\n";
     } else {
       prompt =
@@ -381,8 +382,9 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
           "要求：\n"
           "1) \"summary\" 欄位必須完全等於：「" +
           fixedSummaryZh + "」。\n"
-          "2) \"tags\" 欄位最多給出 2 個描述檔案類型或主題的標籤（只能依據檔名與副檔名推測）。\n"
+          "2) \"tags\" 欄位必須給出 2 到 3 個描述檔案類型或主題的標籤（只能依據檔名與副檔名推測）。\n"
           "3) 標籤必須是名詞或專有名詞，不能是長句。\n"
+          "4) 嚴禁使用「檔案、文件、資料、內容」等無意義通用詞。\n"
           "\n只能輸出 JSON 物件本體。\n";
     }
     return generateResponseImpl(prompt, kMaxNewTokensSuggestTagsJson);
@@ -404,12 +406,14 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
         "- Prefer a topic statement like: \"SQL scripts for a university database (departments, instructors, students).\"\n"
         "\n"
         "TAG RULES:\n"
-        "- Output at most 3 tags.\n"
-        "- Each tag MUST be a concrete noun or proper noun.\n"
-        "- Tags MUST NOT be long sentences.\n"
-        "- CRITICAL: Tags MUST strictly describe the functional type of the document (e.g., 'Score Sheet', 'Exam Paper', 'Financial Report', 'Resume', 'Receipt', 'Database SQL').\n"
-        "- DO NOT use broad environment tags (e.g., 'School', 'Work', 'Company').\n"
-        "- ABSOLUTELY DO NOT generate specific institution or university names (e.g., 'TCUS', 'Ministry of Education') unless it is the absolute core subject of the file.\n"
+        "- Output 3 to 5 tags (never fewer than 3 when the file topic is clear).\n"
+        "- Each tag MUST combine topic/subject AND document-type signal (e.g., year, project name, technology keyword, document nature).\n"
+        "- Prefer concrete signals: years (e.g., 2024), project names, technologies (Python, SQL), and document kinds (report, invoice, notes, exam paper).\n"
+        "- Each tag MUST be a short concrete noun or proper noun (no long sentences).\n"
+        "- NEVER use meaningless generic words such as: file, document, data, material, content, info, item.\n"
+        "- DO NOT use broad environment-only tags (school, work, company) without a specific topic.\n"
+        "- DO NOT invent institution names unless they are the core subject.\n"
+        "- Example tags for a database exam: [\"2024\", \"database\", \"exam paper\", \"SQL\"].\n"
         "- Tags MUST be in English.\n";
   } else {
     instruction =
@@ -425,11 +429,14 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
         "- 請直接用「主題句」描述，例如：「校務資料庫的 SQL 建表與資料填充腳本（系所、教師、學生）。」。\n"
         "\n"
         "標籤規則：\n"
-        "- 最多只能輸出 3 個標籤。\n"
-        "- 每個標籤必須是具體的名詞或專有名詞。\n"
-        "- 標籤絕不能是長句子。\n"
-        "【極度重要】：標籤必須精確描述檔案的「實體功能或格式類型」（例如：計分表、測驗卷、財務報表、履歷）。\n"
-        "絕對禁止使用廣泛的場域標籤（如：學校、工作、公司），也【絕對禁止】擅自生成特定的機構、大學或專有名詞（如：台綜大、台大、教育部），除非該名詞是檔案的絕對核心主題。\n"
+        "- 必須輸出 3 到 5 個標籤（主題清楚時不可少於 3 個）。\n"
+        "- 每個標籤需同時帶有「主旨」與「文件類型」訊號（年份、專案名稱、技術關鍵字、文件性質）。\n"
+        "- 優先辨識：年份（如 2024）、專案名稱、技術關鍵字（如 Python、SQL）、文件性質（如 報告、發票、筆記、考卷）。\n"
+        "- 每個標籤必須是簡短具體名詞或專有名詞，不能是長句。\n"
+        "- 嚴禁使用無意義通用詞：檔案、文件、資料、素材、內容、資訊、項目。\n"
+        "- 禁止僅用廣泛場域標籤（學校、工作、公司）而無具體主題。\n"
+        "- 禁止擅自生成機構或大學名稱，除非為檔案絕對核心主題。\n"
+        "- 範例標籤：[2024, 數據庫, 考卷, SQL]。\n"
         "- summary 與 tags 必須使用繁體中文。\n";
   }
 
