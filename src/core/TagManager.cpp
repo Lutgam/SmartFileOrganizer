@@ -2,6 +2,7 @@
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <vector>
 #include <QDebug>
 #include <QFileInfo>
 #include <QHash>
@@ -544,6 +545,97 @@ void TagManager::exportHashAnalysisCache(QHash<QString, QJsonObject> *dst) const
         if (err.error != QJsonParseError::NoError || !d.isObject()) continue;
         dst->insert(h, d.object());
     }
+}
+
+void TagManager::purgeInvalidHashAnalysisCache(bool save)
+{
+    QMutexLocker locker(&m_mutex);
+
+    auto summaryOk = [](const QString &sum) {
+        const QString t = sum.trimmed();
+        if (t.isEmpty()) return false;
+        return !t.contains(QStringLiteral("Error"), Qt::CaseInsensitive);
+    };
+
+    auto suffixAnalyzable = [](const QString &sfxLower) -> bool {
+        if (sfxLower.isEmpty()) return false;
+        static const QSet<QString> kPlain = [] {
+            QSet<QString> u = {QStringLiteral("txt"), QStringLiteral("md"), QStringLiteral("csv")};
+            u.insert(QStringLiteral("sql"));
+            u.insert(QStringLiteral("db"));
+            u.insert(QStringLiteral("json"));
+            u.insert(QStringLiteral("xml"));
+            u.insert(QStringLiteral("py"));
+            u.insert(QStringLiteral("cpp"));
+            u.insert(QStringLiteral("js"));
+            u.insert(QStringLiteral("html"));
+            u.insert(QStringLiteral("htm"));
+            u.insert(QStringLiteral("h"));
+            u.insert(QStringLiteral("c"));
+            u.insert(QStringLiteral("hpp"));
+            u.insert(QStringLiteral("log"));
+            u.insert(QStringLiteral("yaml"));
+            u.insert(QStringLiteral("yml"));
+            u.insert(QStringLiteral("ts"));
+            u.insert(QStringLiteral("ini"));
+            return u;
+        }();
+        static const QSet<QString> kZipPdf = {QStringLiteral("pdf"),     QStringLiteral("docx"),
+                                              QStringLiteral("docm"),   QStringLiteral("dotx"),
+                                              QStringLiteral("dotm"),   QStringLiteral("xlsx"),
+                                              QStringLiteral("xlsm"),   QStringLiteral("xltx"),
+                                              QStringLiteral("xltm"),   QStringLiteral("pptx"),
+                                              QStringLiteral("pptm"),   QStringLiteral("potx"),
+                                              QStringLiteral("potm"),   QStringLiteral("odt"),
+                                              QStringLiteral("ods"),   QStringLiteral("odp"),
+                                              QStringLiteral("epub")};
+        return kPlain.contains(sfxLower) || kZipPdf.contains(sfxLower);
+    };
+
+    std::vector<QString> toErase;
+    for (const auto &pr : m_hashAnalysisCache) {
+        const QString &hx = pr.first;
+        QJsonParseError err{};
+        const QByteArray raw = QByteArray::fromStdString(pr.second.dump());
+        const QJsonDocument d = QJsonDocument::fromJson(raw, &err);
+        if (err.error != QJsonParseError::NoError || !d.isObject()) {
+            toErase.push_back(hx);
+            continue;
+        }
+        const QJsonObject obj = d.object();
+        const QString summary = obj.value(QStringLiteral("summary")).toString();
+        if (!summaryOk(summary)) {
+            toErase.push_back(hx);
+            continue;
+        }
+
+        QStringList paths;
+        for (const auto &pe : m_pathToContentHash) {
+            if (pe.second.compare(hx, Qt::CaseInsensitive) == 0)
+                paths << pe.first;
+        }
+        paths.removeDuplicates();
+        if (paths.isEmpty()) {
+            toErase.push_back(hx);
+            continue;
+        }
+
+        bool anyGood = false;
+        for (const QString &p : paths) {
+            if (suffixAnalyzable(QFileInfo(p).suffix().toLower())) {
+                anyGood = true;
+                break;
+            }
+        }
+        if (!anyGood)
+            toErase.push_back(hx);
+    }
+
+    for (const QString &hx : toErase)
+        m_hashAnalysisCache.erase(hx);
+
+    if (save && !toErase.empty())
+        saveTags();
 }
 
 QStringList TagManager::filePathsWithFileName(const QString &baseFileName) const

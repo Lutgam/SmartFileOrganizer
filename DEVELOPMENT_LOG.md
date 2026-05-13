@@ -344,6 +344,24 @@
 
 戰功: 將系統的核心業務邏輯封裝進「絕對不會失敗」的防護罩內。在維持強大 AI 體感的同時，徹底消除了 Demo 現場的一切風險，打造出無可挑剔的軟體穩定度。
 
+### 11.16 - 11.17 UI 狀態機收斂與體驗持久化 (State Machine & Persistence)
+* **技術挑戰**: 檔案清單頻繁重繪導致選取狀態 (Selection) 遺失，打斷預覽體驗；全域搜尋結果的視圖 (View) 遭到實體資料夾事件異常覆蓋；幽靈快取導致分析狀態 (Badge) 指示錯誤。
+* **解決方案**: 導入「狀態持久化 (State Persistence)」、「視圖鎖定 (View Locking)」與「記憶體淨化」。
+* **核心邏輯**: 
+  - **選取持久化**: 在清單 `clear()` 前記錄目標路徑，重繪後透過 `setSelected` 與 `scrollToItem` 無縫恢復焦點。
+  - **事件覆蓋防護**: 當處於 `SemanticResults` 模式時，實作狀態機鎖定，嚴格攔截非預期的 `populatePhysicalFolderFiles` 呼叫。
+  - **快取淨化與即時渲染**: 啟動時徹底清除 `metadata.json` 內的失效快取 (Empty/Error)。於 Item 建立階段預載 `kAnalysisStateRole`，強制委託 (Delegate) 繪製即時且準確的藍色狀態圈。
+* **戰功**: 軟體的交互邏輯達到完美的狀態同步，徹底消除畫面閃爍與體驗中斷的挫折感。
+
+### 11.18 佇列毒化防護與工作區世代控制 (Workspace Epoch Control)
+* **技術挑戰**: 使用者在切換主工作區 (Workspace) 時，舊工作區殘留的巨量背景 AI 分析佇列會引發「佇列毒化 (Queue Poisoning)」。Llama 推論引擎在跨代執行緒回傳結果時，遭遇指標失效與狀態競爭 (Race Condition)，導致 UI 執行緒嚴重死鎖與應用程式卡死。
+* **解決方案**: 實作「樂觀鎖 / 世代 ID (Epoch/Session ID)」防護機制與背景任務靜默拋棄。
+* **核心邏輯**: 
+  - **世代隔離**: 於核心實作 `std::atomic<uint64_t> m_workspaceEpoch`。每次成功切換工作區時，遞增 Epoch 值。
+  - **核彈級清理**: 切換瞬間強制清空 `m_analysisQueue` 與 `m_pendingResults`，並撤銷所有 `QFileSystemWatcher` 舊路徑監控，瞬間釋放 Event Loop 壓力。
+  - **靜默拋棄 (Stale Task Bailout)**: 允許已進入 GPU 的舊推論任務跑完，但在 Callback (`onAnalysisFinished`) 階段進行嚴格的 Epoch 校驗。若攜帶的 Epoch 與當前全域 Epoch 不符，直接 `return` 丟棄結果，阻斷任何越界寫入 `metadata.json` 或重繪 UI 的行為。
+* **戰功**: 徹底解決了軟體在頻繁切換工作區時的穩定性瓶頸，實現了毫秒級的無縫工作區切換，並保證了跨代非同步任務的絕對記憶體安全。
+
 
 ## 🌍 深度技術探討：跨國軟體架構 (i18n) 與 MVC 顯示解耦
 

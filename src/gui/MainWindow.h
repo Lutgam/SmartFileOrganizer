@@ -40,17 +40,27 @@
 #include <QPropertyAnimation>
 
 #include <atomic>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 #include "../ai/LlamaEngine.h"
 #include "../core/TagManager.h"
 
+/// Result of a single-file LLM analysis job; `workspaceEpochAtSubmit` is captured on the UI thread when the
+/// future is submitted so stale completions after a workspace switch can be discarded without touching disk.
+struct SfAnalysisOutcome {
+    std::string raw;
+    quint64 workspaceEpochAtSubmit = 0;
+};
+
 struct SemanticSearchWorkerResult {
     QList<QString> pickedAbsolutePaths;
     QMap<int, QString> idToPathSnapshot;
     QSet<QString> validWorkspacePathsSnapshot;
     QString rawLlmText;
+    /// Epoch captured when the search was started (UI thread); mismatched handlers must drop results silently.
+    quint64 workspaceEpochAtSubmit = 0;
 };
 
 struct TagClusterWorkerResult {
@@ -278,7 +288,7 @@ private:
     TagManager tagManager;
     LlamaEngine *m_llamaEngine = nullptr;
 
-    QFutureWatcher<std::string> *watcher = nullptr;
+    QFutureWatcher<SfAnalysisOutcome> *watcher = nullptr;
     QFutureWatcher<TagClusterWorkerResult> *m_consolidateWatcher = nullptr;
     QFutureWatcher<SemanticSearchWorkerResult> *m_semanticSearchWatcher = nullptr;
     QFutureWatcher<bool> *modelLoadWatcher = nullptr;
@@ -287,6 +297,8 @@ private:
     bool m_isConsolidatingTags = false;
     std::atomic<bool> cancelFlag{false};
     std::atomic<int> backgroundScanProgress{0};
+    /// Incremented on primary workspace / root-folder switches; async completions must match or be dropped.
+    std::atomic<uint64_t> m_workspaceEpoch{0};
 
     mutable QMutex tagMutex;
 
@@ -300,6 +312,10 @@ private:
     QSet<QString> m_semanticValidWorkspacePaths;
     QMap<int, QString> m_semanticSearchIdToPath;
     QHash<QString, QString> m_aiTagToDrawerKey;
+    /// While true, directory debounce must not refresh the file list (avoids racing semantic-search UI).
+    bool m_semanticSearchUiApplying = false;
+    /// After a full list rebuild, re-select this absolute path once it appears (paged loads).
+    QString m_fileListReselectPendingPath;
 
     // ===== Batch AI analysis queue =====
     QQueue<QString> m_analysisQueue;
@@ -316,6 +332,8 @@ private:
     int m_batchCompletedCount = 0;
     int m_folderReportAiTagAdds = 0;
     bool m_batchTriggeredByBackgroundAuto = false;
+    /// `m_workspaceEpoch` when the current batch began; used to reject stale `flushPendingBatchResults`.
+    quint64 m_batchFlushWorkspaceEpoch = 0;
     /// Immediate parent folder name for the file currently processed in batch (status label).
     QString m_backgroundAnalyzeFolderLabel;
     QString m_pendingPrioritySingleFile;
@@ -342,6 +360,7 @@ private:
     void applyFilesystemWatchPolicy();
     void ensureRecursiveWatchCoversWorkspace();
     void primeAnalysisCacheFromDisk(const QString &sha256Hex);
+    void purgeStaleAiCacheAfterMetadataLoad();
 
     void recordBatchPathForContentHash(const QString &hashHex, const QString &filePath);
     void noteSameNameDifferentHashConflicts(const QString &filePath, const QString &hashHex);
@@ -364,7 +383,9 @@ private:
     void tickAnalysisSpinner();
     void refreshFileAndFolderAnalysisIndicators();
     void ensureAnalysisIndicatorTimer();
-    void reselectFileInList(const QString &absPath);
+    bool reselectFileInList(const QString &absPath);
+    void snapshotFileListSelectionForListRebuild();
+    void tryRestoreFileListSelectionAfterBatchPaint(int totalPendingCount);
     void syncPreviewBusySpinner();
     void clearAnalysisWorkFlagsAndSyncUi();
 
@@ -408,6 +429,7 @@ private:
     void setupFourColumnLayout();
     void setupContextMenus();
 
+    void bumpWorkspaceEpochAndPurgeStaleAsyncWork();
     void mapsHomeFixAndSetRoot(const QString &dir);
     void setFolderTreeCurrentPath(const QString &absDir);
     void pushHistory(const QString &path);

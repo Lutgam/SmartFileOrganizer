@@ -55,6 +55,9 @@ public:
     bool tryGetHashAnalysis(const QString& sha256Hex, QJsonObject* out) const;
     void exportHashAnalysisCache(QHash<QString, QJsonObject>* dst) const;
 
+    /// Remove hash cache rows with bad summaries or only tied to non-text / non-document file extensions (in-memory; persist with saveTags if save).
+    void purgeInvalidHashAnalysisCache(bool save = true);
+
     QStringList filePathsWithFileName(const QString &baseFileName) const;
     QStringList filePathsWithContentHash(const QString &sha256Hex) const;
 

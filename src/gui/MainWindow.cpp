@@ -98,7 +98,8 @@ static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootP
                                                             TagManager *tagMgr,
                                                             QMutex *tagMutex,
                                                             LlamaEngine *llama,
-                                                            const QString &userQuery);
+                                                            const QString &userQuery,
+                                                            quint64 workspaceEpochAtSubmit);
 static TagClusterWorkerResult sfParseTagClusterJsonIntoDrawerMap(const QString &rawIn, const QSet<QString> &aiTagSet);
 
 enum HeroSearchScopeComboData : int {
@@ -273,6 +274,14 @@ static bool sfSuffixEligibleForManualOrSemanticTextAnalysis(const QFileInfo &fi)
     if (sfx.isEmpty()) return false;
     if (dailyTextSuffixes().contains(sfx) || devTextSuffixes().contains(sfx)) return true;
     return zipOrPdfTextExtractSuffixes().contains(sfx);
+}
+
+/// True when path extension is in plain-text union ∪ PDF/Office extractable (for summary badge + cache purge).
+static bool sfPathHasAnalyzableTextOrDocSuffix(const QString &absPath)
+{
+    const QString sfx = QFileInfo(absPath).suffix().toLower();
+    if (sfx.isEmpty()) return false;
+    return plainTextFileSuffixes().contains(sfx) || zipOrPdfTextExtractSuffixes().contains(sfx);
 }
 
 const QSet<QString> &officeZipPreviewSuffixes()
@@ -1409,19 +1418,49 @@ void MainWindow::ensureAnalysisIndicatorTimer()
     }
 }
 
-void MainWindow::reselectFileInList(const QString &absPath)
+bool MainWindow::reselectFileInList(const QString &absPath)
 {
-    if (!fileList || absPath.isEmpty()) return;
+    if (!fileList || absPath.isEmpty()) return false;
     const QString fp = QDir::cleanPath(absPath);
     for (int i = 0; i < fileList->count(); ++i) {
         auto *it = fileList->item(i);
         if (!it) continue;
         if (QDir::cleanPath(it->data(Qt::UserRole).toString()) != fp) continue;
         fileList->setCurrentItem(it);
+        it->setSelected(true);
         fileList->scrollToItem(it);
         onFileSelected(it);
-        break;
+        return true;
     }
+    return false;
+}
+
+void MainWindow::snapshotFileListSelectionForListRebuild()
+{
+    if (!fileList) {
+        m_fileListReselectPendingPath.clear();
+        return;
+    }
+    const QList<QListWidgetItem *> sel = fileList->selectedItems();
+    if (!sel.isEmpty()) {
+        m_fileListReselectPendingPath = QDir::cleanPath(sel.first()->data(Qt::UserRole).toString());
+        return;
+    }
+    if (QListWidgetItem *cur = fileList->currentItem()) {
+        m_fileListReselectPendingPath = QDir::cleanPath(cur->data(Qt::UserRole).toString());
+        return;
+    }
+    m_fileListReselectPendingPath.clear();
+}
+
+void MainWindow::tryRestoreFileListSelectionAfterBatchPaint(int totalPendingCount)
+{
+    if (m_fileListReselectPendingPath.isEmpty())
+        return;
+    if (reselectFileInList(m_fileListReselectPendingPath))
+        m_fileListReselectPendingPath.clear();
+    else if (totalPendingCount > 0 && m_currentLoadedCount >= totalPendingCount)
+        m_fileListReselectPendingPath.clear();
 }
 
 void MainWindow::syncPreviewBusySpinner()
@@ -1440,6 +1479,8 @@ void MainWindow::clearAnalysisWorkFlagsAndSyncUi()
     m_analysisUiWorkActive = false;
     refreshFileAndFolderAnalysisIndicators();
     ensureAnalysisIndicatorTimer();
+    if (fileList && fileList->viewport())
+        fileList->viewport()->update();
 }
 
 void MainWindow::startAnalysisSpinnerForPath(const QString &absPath)
@@ -1483,7 +1524,7 @@ void MainWindow::refreshCurrentAnalysisTargetUi()
 
     if (fileListMode == FileListMode::SemanticResults) {
         const QString banner =
-            QStringLiteral("🌐 全域語意搜尋結果（扁平列表 · 已脫離目前資料夾範圍）");
+            QStringLiteral("🔍 跨資料夾全域搜尋結果 (虛擬視圖) — 已脫離實體資料夾範圍");
         lblCurrentTarget->setText(fm.elidedText(banner, Qt::ElideRight, budget));
         return;
     }
@@ -1811,6 +1852,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                           || (m_consolidateWatcher && m_consolidateWatcher->isRunning())
                           || m_isBatchMode;
         if (busy) return;
+        if (m_semanticSearchUiApplying) return;
+        if (m_semanticSearchWatcher && m_semanticSearchWatcher->isRunning()) return;
         if (rootPath.trimmed().isEmpty()) return;
 
         scanFiles();
@@ -1832,8 +1875,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     int maxThreads = qMax(1, idealThreads - 1); // 如果單核就維持 1，多核則減 1
     QThreadPool::globalInstance()->setMaxThreadCount(maxThreads);
 
-    watcher = new QFutureWatcher<std::string>(this);
-    connect(watcher, &QFutureWatcher<std::string>::finished, this, &MainWindow::onAnalysisFinished);
+    watcher = new QFutureWatcher<SfAnalysisOutcome>(this);
+    connect(watcher, &QFutureWatcher<SfAnalysisOutcome>::finished, this, &MainWindow::onAnalysisFinished);
 
     m_consolidateWatcher = new QFutureWatcher<TagClusterWorkerResult>(this);
     connect(m_consolidateWatcher, &QFutureWatcher<TagClusterWorkerResult>::finished, this, &MainWindow::onTagFolderClustersFinished);
@@ -3234,6 +3277,28 @@ QString sanitizeTagFolderName(const QString &tag) {
     }
     return s;
 }
+
+/// Physical archive destination folder: AI-tagged files use the six drawer roots (from UI map + heuristics).
+static QString sfPhysicalArchiveFolderNameForPrimaryTag(const QString &rawTag,
+                                                        const QHash<QString, QString> &aiTagToDrawer)
+{
+    const QString trimmed = rawTag.trimmed();
+    if (trimmed.isEmpty())
+        return QStringLiteral("_未命名標籤");
+    if (TagManager::hasAiPrefix(trimmed)) {
+        if (sfIsSyntheticAiDrawerFolderTag(trimmed)) {
+            const QString core = TagManager::stripAiPrefix(trimmed).trimmed();
+            return sanitizeTagFolderName(sfNormalizePersistedDrawerValue(core));
+        }
+        auto it = aiTagToDrawer.constFind(trimmed);
+        QString drawer = (it != aiTagToDrawer.cend()) ? it.value() : QString();
+        if (drawer.isEmpty())
+            drawer = sfHeuristicDrawerKeyForAiTag(trimmed);
+        drawer = sfNormalizePersistedDrawerValue(drawer);
+        return sanitizeTagFolderName(drawer);
+    }
+    return sanitizeTagFolderName(trimmed);
+}
 } // namespace
 
 void MainWindow::physicalArchiveFiles() {
@@ -3303,7 +3368,7 @@ void MainWindow::physicalArchiveFiles() {
             continue;
         }
 
-        const QString folderName = sanitizeTagFolderName(rawTag);
+        const QString folderName = sfPhysicalArchiveFolderNameForPrimaryTag(rawTag, m_aiTagToDrawerKey);
         const QString destDir = QDir(rootClean).absoluteFilePath(folderName);
         const QString destPath = QDir(destDir).absoluteFilePath(fiSrc.fileName());
 
@@ -3421,7 +3486,51 @@ void MainWindow::undoLastPhysicalArchive() {
     }
 }
 
+void MainWindow::bumpWorkspaceEpochAndPurgeStaleAsyncWork()
+{
+    cancelFlag.store(true, std::memory_order_release);
+
+    m_analysisQueue.clear();
+    m_pendingResults.clear();
+    m_pendingPrioritySingleFile.clear();
+
+    m_isBatchMode = false;
+    m_totalBatchSize = 0;
+    m_batchCompletedCount = 0;
+    m_batchHashToPaths.clear();
+    m_batchNameConflictPaths.clear();
+    m_batchTriggeredByBackgroundAuto = false;
+    m_backgroundAnalyzeFolderLabel.clear();
+
+    if (m_dirDebounceTimer)
+        m_dirDebounceTimer->stop();
+    if (m_bgAutoAnalyzeDebounce)
+        m_bgAutoAnalyzeDebounce->stop();
+
+    if (m_dirWatcher) {
+        const QStringList dirs = m_dirWatcher->directories();
+        if (!dirs.isEmpty())
+            m_dirWatcher->removePaths(dirs);
+    }
+    m_recursiveWatchPaths.clear();
+
+    setUiBusy(false);
+    setHeroSemanticBusy(false);
+    m_semanticSearchUiApplying = false;
+
+    // Do NOT call QFuture::cancel() on futures tied to QFutureWatcher::finished handlers that read
+    // watcher->result() — cancellation can leave the result store invalid and crash in result() (SIGSEGV).
+
+    m_workspaceEpoch.fetch_add(1, std::memory_order_acq_rel);
+
+    m_analysisUiWorkActive = false;
+    m_currentAnalyzingFile.clear();
+    cancelFlag.store(false, std::memory_order_release);
+    m_isConsolidatingTags = false;
+}
+
 void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
+    bumpWorkspaceEpochAndPurgeStaleAsyncWork();
     QFileInfo fi(dir);
     const QString abs = fi.exists() ? fi.absoluteFilePath() : QDir::homePath();
     rootPath = abs;
@@ -3453,6 +3562,7 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
         QMutexLocker locker(&tagMutex);
         tagManager.exportHashAnalysisCache(&m_analysisByContentHash);
     }
+    purgeStaleAiCacheAfterMetadataLoad();
     applyFilesystemWatchPolicy();
     ensureRecursiveWatchCoversWorkspace();
     updateBackgroundStatusLabel();
@@ -3501,6 +3611,8 @@ void MainWindow::navigateToFolder(const QString &path, bool pushToHistory) {
     setFolderTreeCurrentPath(currentPath);
     scanFiles();
     sortFileList();
+    if (fileList && fileList->viewport())
+        fileList->viewport()->update();
 }
 
 void MainWindow::goBack() {
@@ -3515,6 +3627,8 @@ void MainWindow::goBack() {
     syncNavigationButtons();
     scanFiles();
     sortFileList();
+    if (fileList && fileList->viewport())
+        fileList->viewport()->update();
 }
 
 void MainWindow::goForward() {
@@ -3529,9 +3643,12 @@ void MainWindow::goForward() {
     syncNavigationButtons();
     scanFiles();
     sortFileList();
+    if (fileList && fileList->viewport())
+        fileList->viewport()->update();
 }
 
 void MainWindow::goHome() {
+    bumpWorkspaceEpochAndPurgeStaleAsyncWork();
     const QString home = QDir::homePath();
     rootPath = home;
     currentPath = home;
@@ -3563,10 +3680,13 @@ void MainWindow::goHome() {
         QMutexLocker locker(&tagMutex);
         tagManager.exportHashAnalysisCache(&m_analysisByContentHash);
     }
+    purgeStaleAiCacheAfterMetadataLoad();
     applyFilesystemWatchPolicy();
 
     scanFiles();
     sortFileList();
+    if (fileList && fileList->viewport())
+        fileList->viewport()->update();
 }
 
 void MainWindow::onSortChanged(int) {
@@ -3575,6 +3695,8 @@ void MainWindow::onSortChanged(int) {
 
 void MainWindow::sortFileList() {
     if (!fileList) return;
+    const QString sortKeep = !m_fileListReselectPendingPath.isEmpty() ? m_fileListReselectPendingPath
+                                                                       : currentFilePath();
     const int mode = cmbSort ? cmbSort->currentIndex() : 0;
     if (mode == 0) {
         QList<QListWidgetItem *> items;
@@ -3585,6 +3707,10 @@ void MainWindow::sortFileList() {
             return baseName(pa).localeAwareCompare(baseName(pb)) < 0;
         });
         for (auto *it : items) fileList->addItem(it);
+        if (!sortKeep.isEmpty()) {
+            if (reselectFileInList(sortKeep))
+                m_fileListReselectPendingPath.clear();
+        }
         return;
     }
 
@@ -3609,6 +3735,10 @@ void MainWindow::sortFileList() {
     });
 
     for (auto *it : items) fileList->addItem(it);
+    if (!sortKeep.isEmpty()) {
+        if (reselectFileInList(sortKeep))
+            m_fileListReselectPendingPath.clear();
+    }
 }
 
 void MainWindow::openFolder() {
@@ -3633,6 +3763,8 @@ void MainWindow::openFolder() {
     activeVirtualTag.clear();
     scanFiles();
     sortFileList();
+    if (fileList && fileList->viewport())
+        fileList->viewport()->update();
 }
 
 QString MainWindow::currentFilePath() const {
@@ -3700,6 +3832,7 @@ bool MainWindow::pathHasUsableAnalysisSummary(const QString &absPathIn) const
 {
     const QString path = QDir::cleanPath(absPathIn);
     if (path.isEmpty()) return false;
+    if (!sfPathHasAnalyzableTextOrDocSuffix(path)) return false;
     if (m_aiSummaryByPath.contains(path)) {
         if (sfSummaryAcceptableForStorage(m_aiSummaryByPath.value(path)))
             return true;
@@ -3711,6 +3844,29 @@ bool MainWindow::pathHasUsableAnalysisSummary(const QString &absPathIn) const
             return true;
     }
     return false;
+}
+
+void MainWindow::purgeStaleAiCacheAfterMetadataLoad()
+{
+    QStringList removePaths;
+    for (auto it = m_aiSummaryByPath.constBegin(); it != m_aiSummaryByPath.constEnd(); ++it) {
+        const QString path = it.key();
+        const QString sum = it.value();
+        if (!sfSummaryAcceptableForStorage(sum) || !sfPathHasAnalyzableTextOrDocSuffix(path))
+            removePaths.append(path);
+    }
+    for (const QString &p : removePaths)
+        m_aiSummaryByPath.remove(p);
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.purgeInvalidHashAnalysisCache(false);
+    }
+    m_analysisByContentHash.clear();
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.exportHashAnalysisCache(&m_analysisByContentHash);
+    }
 }
 
 void MainWindow::scanFiles() {
@@ -3728,7 +3884,7 @@ void MainWindow::scanFiles() {
 }
 
 void MainWindow::scanPhysicalFolder() {
-    fileList->clear();
+    snapshotFileListSelectionForListRebuild();
     m_pendingFilesToDisplay.clear();
     m_currentLoadedCount = 0;
 
@@ -3781,17 +3937,21 @@ void MainWindow::scanPhysicalFolder() {
                                .arg(scope));
     }
 
-    fileList->clear();
+    if (fileList)
+        fileList->clear();
     renderFileListBatch(BATCH_SIZE);
 }
 
 void MainWindow::populateVirtualTagFiles(const QString &tag) {
-    fileList->clear();
+    snapshotFileListSelectionForListRebuild();
+    if (fileList)
+        fileList->clear();
     m_pendingFilesToDisplay.clear();
     m_currentLoadedCount = 0;
     if (tag.isEmpty()) {
         if (btnLoadMore) btnLoadMore->hide();
         if (btnLoadAll) btnLoadAll->hide();
+        m_fileListReselectPendingPath.clear();
         return;
     }
 
@@ -3849,19 +4009,26 @@ void MainWindow::populateVirtualTagFiles(const QString &tag) {
 
 void MainWindow::renderFileListBatch(int count) {
     if (!fileList) return;
+    const int totalPending = static_cast<int>(m_pendingFilesToDisplay.size());
     if (count <= 0) {
-        const bool hasMore = m_currentLoadedCount < static_cast<int>(m_pendingFilesToDisplay.size());
+        const bool hasMore = m_currentLoadedCount < totalPending;
         if (btnLoadMore) btnLoadMore->setVisible(hasMore);
         if (btnLoadAll) btnLoadAll->setVisible(hasMore);
+        tryRestoreFileListSelectionAfterBatchPaint(totalPending);
+        if (fileList->viewport())
+            fileList->viewport()->update();
         return;
     }
 
-    const int total = static_cast<int>(m_pendingFilesToDisplay.size());
+    const int total = totalPending;
     const int remaining = total - m_currentLoadedCount;
     const int take = std::min(count, remaining);
     if (take <= 0) {
         if (btnLoadMore) btnLoadMore->hide();
         if (btnLoadAll) btnLoadAll->hide();
+        tryRestoreFileListSelectionAfterBatchPaint(total);
+        if (fileList->viewport())
+            fileList->viewport()->update();
         return;
     }
 
@@ -3934,6 +4101,9 @@ void MainWindow::renderFileListBatch(int count) {
     sortFileList();
     refreshFileAndFolderAnalysisIndicators();
     ensureAnalysisIndicatorTimer();
+    tryRestoreFileListSelectionAfterBatchPaint(total);
+    if (fileList && fileList->viewport())
+        fileList->viewport()->update();
 }
 
 void MainWindow::updateTagListCountsOnly() {
@@ -4470,19 +4640,21 @@ void MainWindow::refreshSemanticGlobalBanner()
     }
     const int n = m_semanticVisiblePaths.size();
     m_semanticGlobalBanner->setText(
-        QStringLiteral("🔍 跨資料夾全域搜尋結果（共找到 %1 筆相關檔案）").arg(n));
+        QStringLiteral("🔍 跨資料夾全域搜尋結果 (虛擬視圖)　共 %1 筆相關檔案").arg(n));
     m_semanticGlobalBanner->setVisible(true);
 }
 
 void MainWindow::populateSemanticResultFiles()
 {
     if (!fileList) return;
+    snapshotFileListSelectionForListRebuild();
     fileList->clear();
     m_pendingFilesToDisplay.clear();
     m_currentLoadedCount = 0;
     if (m_semanticVisiblePaths.isEmpty()) {
         if (btnLoadMore) btnLoadMore->hide();
         if (btnLoadAll) btnLoadAll->hide();
+        m_fileListReselectPendingPath.clear();
         refreshSemanticGlobalBanner();
         refreshCurrentAnalysisTargetUi();
         return;
@@ -4603,16 +4775,19 @@ void MainWindow::runHeroSemanticSearchQuery()
     if (lblStatus)
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("語意搜尋進行中…")));
 
+    const quint64 searchEpoch = static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire));
     m_semanticSearchWatcher->setFuture(QtConcurrent::run(
-        [rootSnap, maxFiles, summarySnap, userQuery](TagManager *tm, QMutex *mx, LlamaEngine *eng) -> SemanticSearchWorkerResult {
+        [rootSnap, maxFiles, summarySnap, userQuery, searchEpoch](TagManager *tm, QMutex *mx, LlamaEngine *eng) -> SemanticSearchWorkerResult {
             try {
-                return sfRunSemanticSearchWorker(rootSnap, maxFiles, summarySnap, tm, mx, eng, userQuery);
+                return sfRunSemanticSearchWorker(rootSnap, maxFiles, summarySnap, tm, mx, eng, userQuery, searchEpoch);
             } catch (const std::exception &e) {
                 SemanticSearchWorkerResult errOut;
+                errOut.workspaceEpochAtSubmit = searchEpoch;
                 errOut.rawLlmText = QStringLiteral("Error: %1").arg(QString::fromUtf8(e.what()));
                 return errOut;
             } catch (...) {
                 SemanticSearchWorkerResult errOut;
+                errOut.workspaceEpochAtSubmit = searchEpoch;
                 errOut.rawLlmText = QStringLiteral("Error: semantic search worker failed (unknown exception)");
                 return errOut;
             }
@@ -4626,6 +4801,8 @@ void MainWindow::onSemanticSearchFinished()
 
     if (!m_semanticSearchWatcher)
         return;
+    if (m_semanticSearchWatcher->isCanceled())
+        return;
 
     SemanticSearchWorkerResult res;
     try {
@@ -4637,6 +4814,9 @@ void MainWindow::onSemanticSearchFinished()
         qWarning() << "[semantic-search] failed to read worker result (unknown exception)";
         return;
     }
+
+    if (res.workspaceEpochAtSubmit != static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire)))
+        return;
 
     if (res.rawLlmText.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive))
         qWarning() << "[semantic-search] LLM reported error (fallback may have been used):" << res.rawLlmText;
@@ -4654,6 +4834,9 @@ void MainWindow::onSemanticSearchFinished()
         return;
     }
 
+    const QScopeGuard semanticUiReset([this]() { m_semanticSearchUiApplying = false; });
+    m_semanticSearchUiApplying = true;
+
     m_semanticVisiblePaths = picked;
     m_semanticSearchIdToPath = res.idToPathSnapshot;
     m_semanticValidWorkspacePaths = res.validWorkspacePathsSnapshot;
@@ -4661,6 +4844,8 @@ void MainWindow::onSemanticSearchFinished()
     m_semanticLockedQuery = m_heroOmnibox ? m_heroOmnibox->text().trimmed() : QString();
     fileListMode = FileListMode::SemanticResults;
     populateSemanticResultFiles();
+    refreshSemanticGlobalBanner();
+    refreshCurrentAnalysisTargetUi();
 
     if (lblStatus) {
         lblStatus->setText(QStringLiteral("✅ 語意搜尋完成，已為您找到最相關的資料。"));
@@ -4761,7 +4946,7 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     txtPreviewText->setVisible(false);
     if (m_aiSummaryEdit) {
         const QString s = m_aiSummaryByPath.value(absPath).trimmed();
-        if (!sfSummaryAcceptableForStorage(s)) {
+        if (!sfSummaryAcceptableForStorage(s) || !sfPathHasAnalyzableTextOrDocSuffix(absPath)) {
             m_aiSummaryEdit->clear();
         } else {
             m_aiSummaryEdit->setPlainText(s);
@@ -5133,15 +5318,17 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
 
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析中…")));
 
-    QFuture<std::string> future = QtConcurrent::run([this, filename, content, rejectedTagsCsv, existingTags, contentReadable, suffix]() {
-        // existingTags param is used for "historical tags"; rejectedTagsCsv used to constrain outputs
-        return m_llamaEngine->suggestTags(filename.toStdString(),
-                                      content,
-                                      rejectedTagsCsv.toStdString(),
-                                      existingTags.toStdString(),
-                                      contentReadable,
-                                      suffix.toStdString());
-    });
+    const quint64 flightEpoch = static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire));
+    QFuture<SfAnalysisOutcome> future = QtConcurrent::run(
+        [this, flightEpoch, filename, content, rejectedTagsCsv, existingTags, contentReadable, suffix]() {
+            std::string raw = m_llamaEngine->suggestTags(filename.toStdString(),
+                                                       content,
+                                                       rejectedTagsCsv.toStdString(),
+                                                       existingTags.toStdString(),
+                                                       contentReadable,
+                                                       suffix.toStdString());
+            return SfAnalysisOutcome{std::move(raw), flightEpoch};
+        });
     watcher->setFuture(future);
     refreshFileAndFolderAnalysisIndicators();
     ensureAnalysisIndicatorTimer();
@@ -5631,6 +5818,7 @@ void MainWindow::onBackgroundAutoAnalyzeDebounce()
 
 void MainWindow::beginBatchAnalysisUi()
 {
+    m_batchFlushWorkspaceEpoch = static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire));
     m_showRestartBackgroundPrompt = false;
     if (m_btnRestartBackgroundAnalyze)
         m_btnRestartBackgroundAnalyze->setVisible(false);
@@ -5803,6 +5991,10 @@ void MainWindow::showFolderAnalysisReport()
 
 void MainWindow::flushPendingBatchResults() {
     if (m_pendingResults.isEmpty()) return;
+    if (m_batchFlushWorkspaceEpoch != static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire))) {
+        m_pendingResults.clear();
+        return;
+    }
 
     int tagAddBatch = 0;
     for (auto it = m_pendingResults.constBegin(); it != m_pendingResults.constEnd(); ++it) {
@@ -5856,10 +6048,42 @@ void MainWindow::flushPendingBatchResults() {
 }
 
 void MainWindow::onAnalysisFinished() {
+    if (!watcher)
+        return;
+    if (watcher->isCanceled()) {
+        setUiBusy(false);
+        m_analysisUiWorkActive = false;
+        m_currentAnalyzingFile.clear();
+        cancelFlag.store(false);
+        clearAnalysisWorkFlagsAndSyncUi();
+        return;
+    }
+
+    SfAnalysisOutcome outcome;
+    try {
+        outcome = watcher->result();
+    } catch (...) {
+        setUiBusy(false);
+        m_analysisUiWorkActive = false;
+        m_currentAnalyzingFile.clear();
+        cancelFlag.store(false);
+        clearAnalysisWorkFlagsAndSyncUi();
+        return;
+    }
+
+    if (outcome.workspaceEpochAtSubmit != static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire))) {
+        setUiBusy(false);
+        m_analysisUiWorkActive = false;
+        m_currentAnalyzingFile.clear();
+        stopAnalysisSpinner();
+        clearAnalysisWorkFlagsAndSyncUi();
+        return;
+    }
+
     setUiBusy(false);
 
     const QString fp = m_currentAnalyzingFile.isEmpty() ? currentFilePath() : m_currentAnalyzingFile;
-    const std::string raw = watcher->result();
+    const std::string &raw = outcome.raw;
     const QString qRaw = QString::fromStdString(raw);
 
     if (raw.rfind("Error:", 0) == 0) {
@@ -6038,7 +6262,6 @@ void MainWindow::onAnalysisFinished() {
         m_currentAnalyzingFile.clear();
         refreshCurrentAnalysisTargetUi();
         clearAnalysisWorkFlagsAndSyncUi();
-        refreshFileAndFolderAnalysisIndicators();
         return;
     }
 
@@ -6404,7 +6627,7 @@ static QString sfBuildWorkspaceSemanticIdLines(const QString &root,
     return lines.join(QLatin1Char('\n'));
 }
 
-/// When the LLM path fails, match the query against filenames / summaries / tags, then (Demo Guard) all candidates.
+/// When the LLM path fails, match the query against filenames / summaries / tags only (no dump-all fallback).
 static void sfSemanticSearchKeywordFallback(const QString &userQuery,
                                             const QMap<int, QString> &idToPath,
                                             const QHash<QString, QString> &summaryByPath,
@@ -6462,15 +6685,6 @@ static void sfSemanticSearchKeywordFallback(const QString &userQuery,
         for (auto it = idToPath.constBegin(); it != idToPath.constEnd(); ++it)
             considerPath(it.value());
     }
-
-    if (outPicked->isEmpty() && !idToPath.isEmpty()) {
-        for (auto it = idToPath.constBegin(); it != idToPath.constEnd(); ++it) {
-            const QString c = QDir::cleanPath(it.value());
-            if (c.isEmpty() || dedupe.contains(c)) continue;
-            dedupe.insert(c);
-            outPicked->append(c);
-        }
-    }
 }
 
 static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootPathRaw,
@@ -6479,9 +6693,11 @@ static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootP
                                                             TagManager *tagMgr,
                                                             QMutex *tagMutex,
                                                             LlamaEngine *llama,
-                                                            const QString &userQuery)
+                                                            const QString &userQuery,
+                                                            quint64 workspaceEpochAtSubmit)
 {
     SemanticSearchWorkerResult out;
+    out.workspaceEpochAtSubmit = workspaceEpochAtSubmit;
     if (!tagMgr || !tagMutex || !llama) return out;
     if (rootPathRaw.trimmed().isEmpty()) return out;
     const QString root = QDir::cleanPath(rootPathRaw);
@@ -6608,6 +6824,11 @@ void MainWindow::applyTagClusterDrawerUi_commit(QHash<QString, QString> newMap)
 void MainWindow::onTagFolderClustersFinished()
 {
     if (!m_consolidateWatcher) {
+        m_isConsolidatingTags = false;
+        updateAllTexts();
+        return;
+    }
+    if (m_consolidateWatcher->isCanceled()) {
         m_isConsolidatingTags = false;
         updateAllTexts();
         return;
