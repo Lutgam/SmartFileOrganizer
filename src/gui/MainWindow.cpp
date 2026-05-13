@@ -84,14 +84,17 @@ static QString extractFirstBalancedJsonArray(const QString &rawIn);
 static QVector<int> parseSemanticRetrieverIdList(const QString &raw);
 
 static QString sfBuildSemanticRetrieverPromptWorker(const QString &userQuery, const QString &idContextLines);
-static bool sfSemanticWorkspaceHasAnalyzableFile(const QString &rootPathRaw, int maxProbeFiles);
+static bool sfSemanticWorkspaceHasAnalyzableFile(const QString &rootPathRaw,
+                                               int maxProbeFiles,
+                                               const QSet<QString> &intentSuffixes);
 static QString sfBuildWorkspaceSemanticIdLines(const QString &root,
                                                const QHash<QString, QString> &summaryByPath,
                                                TagManager *tagMgr,
                                                QMutex *tagMutex,
                                                int maxFiles,
                                                QMap<int, QString> *outIdToPath,
-                                               QSet<QString> *outValidPaths);
+                                               QSet<QString> *outValidPaths,
+                                               const QSet<QString> &boostedSuffixes = {});
 static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootPathRaw,
                                                             int maxFiles,
                                                             const QHash<QString, QString> &summaryByPath,
@@ -693,22 +696,29 @@ static QString sha256HexOfFile(const QString &path)
 
 static QStringList sfFixedAiClusterDrawerKeys()
 {
-    return {QStringLiteral("💼 工作"), QStringLiteral("📚 學習"), QStringLiteral("💰 財務"),
-            QStringLiteral("🎬 媒體"), QStringLiteral("⚙️ 系統"), QStringLiteral("📦 雜項")};
+    return {QStringLiteral("💼 工作專案"), QStringLiteral("📚 學習研究"), QStringLiteral("💰 財務帳務"),
+            QStringLiteral("🎬 多媒體"), QStringLiteral("⚙️ 系統開發"), QStringLiteral("📝 筆記文件"),
+            QStringLiteral("🗄️ 數據資料"), QStringLiteral("🗓️ 企劃時程"), QStringLiteral("📥 暫存下載"),
+            QStringLiteral("📦 雜項")};
 }
 
-/// Map legacy (pre-11.7) drawer keys saved on disk to the current six canonical drawers.
+/// Map legacy drawer keys saved on disk to the current ten canonical drawers.
 static QString sfLegacyAiDrawerKeyToCanon(const QString &rawIn)
 {
     const QString t = rawIn.trimmed();
     static const QMap<QString, QString> kLegacyToNew = {
-        {QStringLiteral("[營運管理]"), QStringLiteral("💼 工作")},
-        {QStringLiteral("[技術與開發]"), QStringLiteral("💼 工作")},
-        {QStringLiteral("[財務與法務]"), QStringLiteral("💰 財務")},
-        {QStringLiteral("[行銷與企劃]"), QStringLiteral("💼 工作")},
-        {QStringLiteral("[人事與行政]"), QStringLiteral("💼 工作")},
-        {QStringLiteral("[多媒體資源]"), QStringLiteral("🎬 媒體")},
-        {QStringLiteral("[會議與報告]"), QStringLiteral("💼 工作")},
+        {QStringLiteral("💼 工作"), QStringLiteral("💼 工作專案")},
+        {QStringLiteral("📚 學習"), QStringLiteral("📚 學習研究")},
+        {QStringLiteral("💰 財務"), QStringLiteral("💰 財務帳務")},
+        {QStringLiteral("🎬 媒體"), QStringLiteral("🎬 多媒體")},
+        {QStringLiteral("⚙️ 系統"), QStringLiteral("⚙️ 系統開發")},
+        {QStringLiteral("[營運管理]"), QStringLiteral("💼 工作專案")},
+        {QStringLiteral("[技術與開發]"), QStringLiteral("⚙️ 系統開發")},
+        {QStringLiteral("[財務與法務]"), QStringLiteral("💰 財務帳務")},
+        {QStringLiteral("[行銷與企劃]"), QStringLiteral("🗓️ 企劃時程")},
+        {QStringLiteral("[人事與行政]"), QStringLiteral("💼 工作專案")},
+        {QStringLiteral("[多媒體資源]"), QStringLiteral("🎬 多媒體")},
+        {QStringLiteral("[會議與報告]"), QStringLiteral("💼 工作專案")},
         {QStringLiteral("[其他雜項]"), QStringLiteral("📦 雜項")},
     };
     auto it = kLegacyToNew.constFind(t);
@@ -734,12 +744,17 @@ static QString sfNormalizeDrawerJsonKeyToCanon(const QString &raw)
         if (QString::compare(t, ref, Qt::CaseInsensitive) == 0) return ref;
     }
     static const QMap<QString, QString> kBracketToShort = {
-        {QStringLiteral("[工作與專案]"), QStringLiteral("💼 工作")},
-        {QStringLiteral("[學習與研究]"), QStringLiteral("📚 學習")},
-        {QStringLiteral("[財務與紀錄]"), QStringLiteral("💰 財務")},
-        {QStringLiteral("[多媒體與素材]"), QStringLiteral("🎬 媒體")},
-        {QStringLiteral("[系統與備份]"), QStringLiteral("⚙️ 系統")},
+        {QStringLiteral("[工作與專案]"), QStringLiteral("💼 工作專案")},
+        {QStringLiteral("[學習與研究]"), QStringLiteral("📚 學習研究")},
+        {QStringLiteral("[財務與紀錄]"), QStringLiteral("💰 財務帳務")},
+        {QStringLiteral("[多媒體與素材]"), QStringLiteral("🎬 多媒體")},
+        {QStringLiteral("[系統與備份]"), QStringLiteral("⚙️ 系統開發")},
         {QStringLiteral("[未分類雜項]"), QStringLiteral("📦 雜項")},
+        {QStringLiteral("💼 工作"), QStringLiteral("💼 工作專案")},
+        {QStringLiteral("📚 學習"), QStringLiteral("📚 學習研究")},
+        {QStringLiteral("💰 財務"), QStringLiteral("💰 財務帳務")},
+        {QStringLiteral("🎬 媒體"), QStringLiteral("🎬 多媒體")},
+        {QStringLiteral("⚙️ 系統"), QStringLiteral("⚙️ 系統開發")},
     };
     auto itb = kBracketToShort.constFind(t);
     if (itb != kBracketToShort.cend()) return itb.value();
@@ -795,41 +810,56 @@ static QString sfHeuristicDrawerKeyForAiTag(const QString &rawAiTag)
         return false;
     };
 
-    // Priority: 學習 before 財務 (e.g. "統計" must not be pulled toward finance heuristics).
-    static const QStringList kStudy = {QStringLiteral("筆記"), QStringLiteral("研究"), QStringLiteral("論文"),
-                                       QStringLiteral("作業"), QStringLiteral("統計"), QStringLiteral("微積分"),
-                                       QStringLiteral("講義"), QStringLiteral("教材"), QStringLiteral("學校"),
-                                       QStringLiteral("教學"), QStringLiteral("課程"), QStringLiteral("學習"),
-                                       QStringLiteral("知識"), QStringLiteral("考"), QStringLiteral("課"),
-                                       QStringLiteral("題")};
-    static const QStringList kFin = {QStringLiteral("發票"), QStringLiteral("財務"), QStringLiteral("收據"),
-                                     QStringLiteral("薪資"), QStringLiteral("報價"), QStringLiteral("匯款"),
-                                     QStringLiteral("銀行"), QStringLiteral("交易"), QStringLiteral("成本"),
-                                     QStringLiteral("預算"), QStringLiteral("投資"), QStringLiteral("帳"),
+    // LUT priority: specific drawers before broad overlaps (e.g. 統計 → 數據資料 before 學習研究).
+    static const QStringList kStaging = {QStringLiteral("暫存"), QStringLiteral("下載"), QStringLiteral("temp"),
+                                         QStringLiteral("備份"), QStringLiteral("未命名"), QStringLiteral("新建")};
+    static const QStringList kStagingAscii = {QStringLiteral("download")};
+    static const QStringList kStudy = {QStringLiteral("學習"), QStringLiteral("教學"), QStringLiteral("課程"),
+                                       QStringLiteral("筆記"), QStringLiteral("論文"), QStringLiteral("研究"),
+                                       QStringLiteral("考"), QStringLiteral("學校"), QStringLiteral("作業"),
+                                       QStringLiteral("講義"), QStringLiteral("教材"), QStringLiteral("知識"),
+                                       QStringLiteral("課"), QStringLiteral("題")};
+    static const QStringList kFin = {QStringLiteral("財務"), QStringLiteral("帳"), QStringLiteral("發票"),
+                                     QStringLiteral("收據"), QStringLiteral("薪"), QStringLiteral("匯款"),
+                                     QStringLiteral("交易"), QStringLiteral("報價"), QStringLiteral("銀行"),
+                                     QStringLiteral("成本"), QStringLiteral("預算"), QStringLiteral("投資"),
                                      QStringLiteral("金")};
-    static const QStringList kWork = {QStringLiteral("專案"), QStringLiteral("企劃"), QStringLiteral("報告"),
-                                      QStringLiteral("會議"), QStringLiteral("合約"), QStringLiteral("履歷"),
-                                      QStringLiteral("公文"), QStringLiteral("簡報"), QStringLiteral("工作"),
-                                      QStringLiteral("業務"), QStringLiteral("客戶"), QStringLiteral("提案"),
-                                      QStringLiteral("紀錄"), QStringLiteral("規劃"), QStringLiteral("專題"),
-                                      QStringLiteral("計畫")};
-    static const QStringList kMedia = {QStringLiteral("照片"), QStringLiteral("影片"), QStringLiteral("素材"),
-                                       QStringLiteral("設計"), QStringLiteral("音樂"), QStringLiteral("音檔"),
-                                       QStringLiteral("錄音"), QStringLiteral("圖"), QStringLiteral("影音"),
-                                       QStringLiteral("畫"), QStringLiteral("媒體"), QStringLiteral("截圖")};
+    static const QStringList kSchedule = {QStringLiteral("企劃"), QStringLiteral("計畫"), QStringLiteral("時程"),
+                                          QStringLiteral("排程"), QStringLiteral("規劃"), QStringLiteral("進度"),
+                                          QStringLiteral("日曆")};
+    static const QStringList kWork = {QStringLiteral("工作"), QStringLiteral("專案"), QStringLiteral("業務"),
+                                      QStringLiteral("客戶"), QStringLiteral("提案"), QStringLiteral("會議"),
+                                      QStringLiteral("合約"), QStringLiteral("報告"), QStringLiteral("履歷"),
+                                      QStringLiteral("公文"), QStringLiteral("簡報"), QStringLiteral("紀錄"),
+                                      QStringLiteral("專題")};
+    static const QStringList kData = {QStringLiteral("數據"), QStringLiteral("資料庫"), QStringLiteral("報表"),
+                                      QStringLiteral("統計"), QStringLiteral("清單"), QStringLiteral("表")};
+    static const QStringList kDataAscii = {QStringLiteral("sql"), QStringLiteral("csv")};
+    static const QStringList kNotes = {QStringLiteral("文件"), QStringLiteral("草稿"), QStringLiteral("文章"),
+                                       QStringLiteral("日記"), QStringLiteral("手冊"), QStringLiteral("說明"),
+                                       QStringLiteral("信")};
+    static const QStringList kNotesAscii = {QStringLiteral("doc")};
+    static const QStringList kMedia = {QStringLiteral("圖"), QStringLiteral("照片"), QStringLiteral("影片"),
+                                       QStringLiteral("影音"), QStringLiteral("音樂"), QStringLiteral("錄音"),
+                                       QStringLiteral("素材"), QStringLiteral("設計"), QStringLiteral("畫"),
+                                       QStringLiteral("截圖"), QStringLiteral("音檔")};
     static const QStringList kMediaAscii = {QStringLiteral("img"), QStringLiteral("video"), QStringLiteral("audio")};
-    static const QStringList kSys = {QStringLiteral("資料庫"), QStringLiteral("系統"), QStringLiteral("設定"),
-                                     QStringLiteral("備份"), QStringLiteral("日誌"), QStringLiteral("程式"),
-                                     QStringLiteral("環境"), QStringLiteral("軟體"), QStringLiteral("碼"),
-                                     QStringLiteral("配置"), QStringLiteral("腳本")};
-    static const QStringList kSysAscii = {QStringLiteral("sql"), QStringLiteral("db"), QStringLiteral("config"),
-                                          QStringLiteral("script")};
+    static const QStringList kSys = {QStringLiteral("系統"), QStringLiteral("設定"), QStringLiteral("程式"),
+                                     QStringLiteral("代碼"), QStringLiteral("腳本"), QStringLiteral("環境"),
+                                     QStringLiteral("日誌"), QStringLiteral("軟體"), QStringLiteral("碼"),
+                                     QStringLiteral("配置")};
+    static const QStringList kSysAscii = {QStringLiteral("code"), QStringLiteral("config"), QStringLiteral("script"),
+                                          QStringLiteral("db")};
 
-    if (hitList(kStudy)) return QStringLiteral("📚 學習");
-    if (hitList(kFin)) return QStringLiteral("💰 財務");
-    if (hitList(kWork)) return QStringLiteral("💼 工作");
-    if (hitList(kMedia) || hitList(kMediaAscii, true)) return QStringLiteral("🎬 媒體");
-    if (hitList(kSys) || hitList(kSysAscii, true)) return QStringLiteral("⚙️ 系統");
+    if (hitList(kStaging) || hitList(kStagingAscii, true)) return QStringLiteral("📥 暫存下載");
+    if (hitList(kStudy)) return QStringLiteral("📚 學習研究");
+    if (hitList(kFin)) return QStringLiteral("💰 財務帳務");
+    if (hitList(kSchedule)) return QStringLiteral("🗓️ 企劃時程");
+    if (hitList(kWork)) return QStringLiteral("💼 工作專案");
+    if (hitList(kData) || hitList(kDataAscii, true)) return QStringLiteral("🗄️ 數據資料");
+    if (hitList(kNotes) || hitList(kNotesAscii, true)) return QStringLiteral("📝 筆記文件");
+    if (hitList(kMedia) || hitList(kMediaAscii, true)) return QStringLiteral("🎬 多媒體");
+    if (hitList(kSys) || hitList(kSysAscii, true)) return QStringLiteral("⚙️ 系統開發");
     return QStringLiteral("📦 雜項");
 }
 
@@ -3336,7 +3366,7 @@ static QString sfPhysicalArchiveFolderNameForPrimaryTag(const QString &rawTag,
     return sanitizeTagFolderName(trimmed);
 }
 
-/// Canonical six-drawer key for one raw file tag (empty if not an AI leaf/synthetic drawer tag line).
+/// Canonical ten-drawer key for one raw file tag (empty if not an AI leaf/synthetic drawer tag line).
 static QString sfResolveDrawerKeyForAiTag(const QString &rawTag,
                                           const QHash<QString, QString> &aiTagToDrawer)
 {
@@ -3354,7 +3384,7 @@ static QString sfResolveDrawerKeyForAiTag(const QString &rawTag,
     return sfNormalizePersistedDrawerValue(drawer);
 }
 
-/// After optional misc exclusion: pick one drawer — fixed six-drawer order when multiple remain.
+/// After optional misc exclusion: pick one drawer — fixed ten-drawer order when multiple remain.
 static QString sfPickPrimaryDrawerFromDrawerSet(const QSet<QString> &drawers)
 {
     if (drawers.isEmpty())
@@ -4158,7 +4188,7 @@ void MainWindow::renderFileListBatch(int count) {
         }
         const QFileInfo fi(filePath);
         if (!fi.exists()) continue;
-        if (!isAnalyzableFile(fi)) continue;
+        if (fileListMode != FileListMode::SemanticResults && !isAnalyzableFile(fi)) continue;
 
         if (fileListMode == FileListMode::SemanticResults) {
             QString relFull;
@@ -6710,7 +6740,204 @@ static QString sfBuildSemanticRetrieverPromptWorker(const QString &userQuery, co
         .arg(userQuery, idContextLines);
 }
 
-static bool sfSemanticWorkspaceHasAnalyzableFile(const QString &rootPathRaw, int maxProbeFiles)
+enum class SfSemanticQueryIntentKind {
+    None,
+    MediaDirect,
+    DatabaseBoost,
+    CodeBoost,
+    OfficeBoost,
+};
+
+struct SfSemanticQueryIntent {
+    SfSemanticQueryIntentKind kind = SfSemanticQueryIntentKind::None;
+    QSet<QString> targetSuffixes;
+    QStringList triggerKeywords;
+    bool bypassLlm = false;
+};
+
+static bool sfSuffixInSet(const QFileInfo &fi, const QSet<QString> &suffixes)
+{
+    if (suffixes.isEmpty()) return false;
+    const QString sfx = fi.suffix().toLower();
+    return !sfx.isEmpty() && suffixes.contains(sfx);
+}
+
+static SfSemanticQueryIntent sfInferSemanticQueryIntent(const QString &userQuery)
+{
+    SfSemanticQueryIntent out;
+    const QString q = userQuery.trimmed();
+    if (q.isEmpty()) return out;
+
+    auto containsKw = [&q](const QString &kw) {
+        return !kw.isEmpty() && q.contains(kw, Qt::CaseInsensitive);
+    };
+    auto containsAsciiKw = [&q](const QString &kw) {
+        return !kw.isEmpty() && q.toLower().contains(kw.toLower());
+    };
+
+    static const QStringList kMediaKw = {QStringLiteral("圖"), QStringLiteral("照片"), QStringLiteral("圖片"),
+                                         QStringLiteral("影像"), QStringLiteral("影片"), QStringLiteral("截圖")};
+    for (const QString &kw : kMediaKw) {
+        if (containsKw(kw)) {
+            out.kind = SfSemanticQueryIntentKind::MediaDirect;
+            out.bypassLlm = true;
+            out.triggerKeywords = kMediaKw;
+            out.targetSuffixes = {QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
+                                  QStringLiteral("gif"), QStringLiteral("mp4"), QStringLiteral("mov")};
+            return out;
+        }
+    }
+
+    static const QStringList kDbKw = {QStringLiteral("資料庫"), QStringLiteral("database"), QStringLiteral("sql")};
+    for (const QString &kw : kDbKw) {
+        if (containsKw(kw) || containsAsciiKw(kw)) {
+            out.kind = SfSemanticQueryIntentKind::DatabaseBoost;
+            out.triggerKeywords = kDbKw;
+            out.targetSuffixes = {QStringLiteral("sql"), QStringLiteral("db"), QStringLiteral("sqlite")};
+            return out;
+        }
+    }
+
+    static const QStringList kCodeKw = {QStringLiteral("程式"), QStringLiteral("代碼"), QStringLiteral("code"),
+                                        QStringLiteral("腳本")};
+    for (const QString &kw : kCodeKw) {
+        if (containsKw(kw) || containsAsciiKw(kw)) {
+            out.kind = SfSemanticQueryIntentKind::CodeBoost;
+            out.triggerKeywords = kCodeKw;
+            out.targetSuffixes = {QStringLiteral("py"),  QStringLiteral("cpp"), QStringLiteral("js"),
+                                  QStringLiteral("html"), QStringLiteral("css"), QStringLiteral("json")};
+            return out;
+        }
+    }
+
+    static const QStringList kOfficeKw = {QStringLiteral("簡報"), QStringLiteral("ppt"), QStringLiteral("報表"),
+                                          QStringLiteral("試算表")};
+    for (const QString &kw : kOfficeKw) {
+        if (containsKw(kw) || containsAsciiKw(kw)) {
+            out.kind = SfSemanticQueryIntentKind::OfficeBoost;
+            out.triggerKeywords = kOfficeKw;
+            out.targetSuffixes = {QStringLiteral("ppt"),  QStringLiteral("pptx"), QStringLiteral("xls"),
+                                  QStringLiteral("xlsx"), QStringLiteral("csv")};
+            return out;
+        }
+    }
+
+    return out;
+}
+
+static QStringList sfSemanticQueryResidualKeywords(const QString &userQuery, const QStringList &intentTriggers)
+{
+    QString text = userQuery.trimmed();
+    for (const QString &kw : intentTriggers) {
+        if (kw.isEmpty()) continue;
+        text.replace(kw, QStringLiteral(" "), Qt::CaseInsensitive);
+    }
+    text.replace(QRegularExpression(QStringLiteral("[\\s,，、;；/\\\\|]+")), QStringLiteral(" "));
+    const QStringList raw = text.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    QStringList out;
+    for (const QString &tok : raw) {
+        const QString t = tok.trimmed();
+        if (t.size() < 2) continue;
+        out.append(t);
+    }
+    return out;
+}
+
+static bool sfPathMatchesResidualKeywords(const QString &absPath, const QStringList &keywords)
+{
+    if (keywords.isEmpty()) return true;
+    const QFileInfo fi(absPath);
+    const QString blob = fi.fileName() + QLatin1Char(' ') + fi.absoluteFilePath();
+    for (const QString &kw : keywords) {
+        if (kw.isEmpty()) continue;
+        if (blob.contains(kw, Qt::CaseInsensitive)) return true;
+    }
+    return false;
+}
+
+static void sfCollectIntentDirectSearchResults(const QString &root,
+                                               const QString &userQuery,
+                                               const SfSemanticQueryIntent &intent,
+                                               QStringList *outPicked,
+                                               QSet<QString> *outValidPaths)
+{
+    if (!outPicked || intent.targetSuffixes.isEmpty()) return;
+    const QStringList residual = sfSemanticQueryResidualKeywords(userQuery, intent.triggerKeywords);
+
+    struct Hit {
+        QString path;
+        qint64 mtimeMs = 0;
+    };
+    QVector<Hit> hits;
+    hits.reserve(256);
+
+    QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString absPath = QDir::cleanPath(it.next());
+        const QFileInfo fi(absPath);
+        if (!sfSemanticWorkerIsAnalyzableFile(fi)) continue;
+        if (!sfSuffixInSet(fi, intent.targetSuffixes)) continue;
+        if (!sfPathMatchesResidualKeywords(absPath, residual)) continue;
+        hits.push_back({absPath, fi.lastModified().toMSecsSinceEpoch()});
+    }
+
+    std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
+        if (a.mtimeMs != b.mtimeMs) return a.mtimeMs > b.mtimeMs;
+        return a.path.localeAwareCompare(b.path) < 0;
+    });
+
+    QSet<QString> dedupe;
+    for (const Hit &h : hits) {
+        if (dedupe.contains(h.path)) continue;
+        dedupe.insert(h.path);
+        outPicked->append(h.path);
+        if (outValidPaths) outValidPaths->insert(h.path);
+    }
+}
+
+static void sfAugmentSemanticResultsWithIntent(const QString &root,
+                                               const QString &userQuery,
+                                               const SfSemanticQueryIntent &intent,
+                                               QStringList *outPicked,
+                                               QSet<QString> *outValidPaths)
+{
+    if (!outPicked || intent.targetSuffixes.isEmpty()) return;
+
+    QSet<QString> dedupe;
+    for (const QString &p : std::as_const(*outPicked)) {
+        const QString c = QDir::cleanPath(p);
+        if (!c.isEmpty()) dedupe.insert(c);
+    }
+
+    const QStringList residual = sfSemanticQueryResidualKeywords(userQuery, intent.triggerKeywords);
+    QVector<QPair<QString, qint64>> hits;
+    QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString absPath = QDir::cleanPath(it.next());
+        if (dedupe.contains(absPath)) continue;
+        const QFileInfo fi(absPath);
+        if (!sfSemanticWorkerIsAnalyzableFile(fi)) continue;
+        if (!sfSuffixInSet(fi, intent.targetSuffixes)) continue;
+        if (!sfPathMatchesResidualKeywords(absPath, residual)) continue;
+        hits.append(qMakePair(absPath, fi.lastModified().toMSecsSinceEpoch()));
+    }
+
+    std::sort(hits.begin(), hits.end(), [](const QPair<QString, qint64> &a, const QPair<QString, qint64> &b) {
+        if (a.second != b.second) return a.second > b.second;
+        return a.first.localeAwareCompare(b.first) < 0;
+    });
+
+    for (const auto &pr : hits) {
+        if (dedupe.contains(pr.first)) continue;
+        dedupe.insert(pr.first);
+        outPicked->prepend(pr.first);
+        if (outValidPaths) outValidPaths->insert(pr.first);
+    }
+}
+
+static bool sfSemanticWorkspaceHasAnalyzableFile(const QString &rootPathRaw,
+                                               int maxProbeFiles,
+                                               const QSet<QString> &intentSuffixes)
 {
     if (rootPathRaw.trimmed().isEmpty()) return false;
     const QString root = QDir::cleanPath(rootPathRaw);
@@ -6720,8 +6947,9 @@ static bool sfSemanticWorkspaceHasAnalyzableFile(const QString &rootPathRaw, int
         if (scanned >= maxProbeFiles) break;
         ++scanned;
         const QString absPath = QDir::cleanPath(it.next());
-        if (sfSemanticWorkerIsAnalyzableFile(QFileInfo(absPath))
-            && sfPathHasAnalyzableTextOrDocSuffix(absPath))
+        const QFileInfo fi(absPath);
+        if (!sfSemanticWorkerIsAnalyzableFile(fi)) continue;
+        if (sfPathHasAnalyzableTextOrDocSuffix(absPath) || sfSuffixInSet(fi, intentSuffixes))
             return true;
     }
     return false;
@@ -6733,7 +6961,8 @@ static QString sfBuildWorkspaceSemanticIdLines(const QString &root,
                                                QMutex *tagMutex,
                                                int maxFiles,
                                                QMap<int, QString> *outIdToPath,
-                                               QSet<QString> *outValidPaths)
+                                               QSet<QString> *outValidPaths,
+                                               const QSet<QString> &boostedSuffixes)
 {
     if (!outIdToPath || !outValidPaths || !tagMgr || !tagMutex) return {};
     outIdToPath->clear();
@@ -6744,6 +6973,7 @@ static QString sfBuildWorkspaceSemanticIdLines(const QString &root,
         QString absPath;
         QFileInfo fi;
         bool hasSummary = false;
+        bool intentBoost = false;
         qint64 mtimeMs = 0;
     };
 
@@ -6757,13 +6987,15 @@ static QString sfBuildWorkspaceSemanticIdLines(const QString &root,
         const QString absPath = QDir::cleanPath(it.next());
         const QFileInfo fi(absPath);
         if (!sfSemanticWorkerIsAnalyzableFile(fi)) continue;
-        if (!sfPathHasAnalyzableTextOrDocSuffix(absPath)) continue;
+        const bool intentBoost = sfSuffixInSet(fi, boostedSuffixes);
+        if (!sfPathHasAnalyzableTextOrDocSuffix(absPath) && !intentBoost) continue;
         const QString sumText = summaryByPath.value(absPath).trimmed();
         const bool hasSummary = summaryByPath.contains(absPath) && !sumText.isEmpty();
-        candidates.push_back({absPath, fi, hasSummary, fi.lastModified().toMSecsSinceEpoch()});
+        candidates.push_back({absPath, fi, hasSummary, intentBoost, fi.lastModified().toMSecsSinceEpoch()});
     }
 
     std::sort(candidates.begin(), candidates.end(), [](const SemanticFileCandidate &a, const SemanticFileCandidate &b) {
+        if (a.intentBoost != b.intentBoost) return a.intentBoost > b.intentBoost;
         if (a.hasSummary != b.hasSummary) return a.hasSummary > b.hasSummary;
         if (a.mtimeMs != b.mtimeMs) return a.mtimeMs > b.mtimeMs;
         return a.absPath.localeAwareCompare(b.absPath) < 0;
@@ -6818,7 +7050,8 @@ static void sfSemanticSearchKeywordFallback(const QString &userQuery,
                                             const QHash<QString, QString> &summaryByPath,
                                             TagManager *tagMgr,
                                             QMutex *tagMutex,
-                                            QStringList *outPicked)
+                                            QStringList *outPicked,
+                                            const QSet<QString> &boostedSuffixes = {})
 {
     if (!outPicked || !tagMgr || !tagMutex) return;
 
@@ -6858,8 +7091,8 @@ static void sfSemanticSearchKeywordFallback(const QString &userQuery,
 
         const bool hit = hitByName || hitByMeta;
         if (!hit) return;
-        // Filename-only matches must be analyzable text types (exclude images / binaries from semantic list).
-        if (hitByName && !hitByMeta && !sfSuffixEligibleForManualOrSemanticTextAnalysis(finfo))
+        if (hitByName && !hitByMeta && !sfSuffixInSet(finfo, boostedSuffixes)
+            && !sfSuffixEligibleForManualOrSemanticTextAnalysis(finfo))
             return;
 
         dedupe.insert(absPath);
@@ -6870,6 +7103,63 @@ static void sfSemanticSearchKeywordFallback(const QString &userQuery,
         for (auto it = idToPath.constBegin(); it != idToPath.constEnd(); ++it)
             considerPath(it.value());
     }
+}
+
+static QString sfPrimaryDrawerKeyForAbsolutePath(const QString &absPath,
+                                                 TagManager *tagMgr,
+                                                 QMutex *tagMutex,
+                                                 const QHash<QString, QString> &aiTagToDrawer)
+{
+    std::vector<QString> fileTags;
+    {
+        QMutexLocker locker(tagMutex);
+        fileTags = tagMgr->getTags(absPath);
+    }
+
+    QSet<QString> drawerSet;
+    for (const QString &raw : fileTags) {
+        const QString dk = sfResolveDrawerKeyForAiTag(raw, aiTagToDrawer);
+        if (!dk.isEmpty())
+            drawerSet.insert(dk);
+    }
+
+    if (!drawerSet.isEmpty()) {
+        const QString kMisc = QStringLiteral("📦 雜項");
+        if (drawerSet.size() > 1)
+            drawerSet.remove(kMisc);
+        const QString primary = sfPickPrimaryDrawerFromDrawerSet(drawerSet);
+        if (!primary.isEmpty())
+            return primary;
+    }
+
+    const QString pseudoTag = QStringLiteral("[AI] ") + QFileInfo(absPath).fileName();
+    return sfHeuristicDrawerKeyForAiTag(pseudoTag);
+}
+
+static void sfSortSemanticPickedPathsByDrawerCohesion(QStringList *picked,
+                                                      TagManager *tagMgr,
+                                                      QMutex *tagMutex)
+{
+    if (!picked || picked->isEmpty() || !tagMgr || !tagMutex)
+        return;
+
+    QHash<QString, int> drawerOrder;
+    int order = 0;
+    for (const QString &dk : sfFixedAiClusterDrawerKeys())
+        drawerOrder.insert(dk, order++);
+
+    const QHash<QString, QString> emptyDrawerMap;
+    const QString kMisc = QStringLiteral("📦 雜項");
+
+    std::stable_sort(picked->begin(), picked->end(), [&](const QString &a, const QString &b) {
+        const QString da = sfPrimaryDrawerKeyForAbsolutePath(a, tagMgr, tagMutex, emptyDrawerMap);
+        const QString db = sfPrimaryDrawerKeyForAbsolutePath(b, tagMgr, tagMutex, emptyDrawerMap);
+        const int oa = drawerOrder.value(da, drawerOrder.value(kMisc, order));
+        const int ob = drawerOrder.value(db, drawerOrder.value(kMisc, order));
+        if (oa != ob)
+            return oa < ob;
+        return QDir::cleanPath(a).localeAwareCompare(QDir::cleanPath(b)) < 0;
+    });
 }
 
 static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootPathRaw,
@@ -6886,12 +7176,21 @@ static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootP
     if (!tagMgr || !tagMutex || !llama) return out;
     if (rootPathRaw.trimmed().isEmpty()) return out;
     const QString root = QDir::cleanPath(rootPathRaw);
+    const SfSemanticQueryIntent intent = sfInferSemanticQueryIntent(userQuery);
 
-    if (!sfSemanticWorkspaceHasAnalyzableFile(root, 4000))
+    if (intent.bypassLlm) {
+        sfCollectIntentDirectSearchResults(root, userQuery, intent, &out.pickedAbsolutePaths,
+                                           &out.validWorkspacePathsSnapshot);
+        out.rawLlmText = QStringLiteral("(intent-routed media search)");
+        return out;
+    }
+
+    if (!sfSemanticWorkspaceHasAnalyzableFile(root, 4000, intent.targetSuffixes))
         return out;
 
     const QString idLines = sfBuildWorkspaceSemanticIdLines(root, summaryByPath, tagMgr, tagMutex, maxFiles,
-                                                              &out.idToPathSnapshot, &out.validWorkspacePathsSnapshot);
+                                                              &out.idToPathSnapshot, &out.validWorkspacePathsSnapshot,
+                                                              intent.targetSuffixes);
     if (idLines.isEmpty()) return out;
 
     const QString fullPrompt = sfBuildSemanticRetrieverPromptWorker(userQuery, idLines);
@@ -6930,7 +7229,16 @@ static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootP
         }
     } else {
         sfSemanticSearchKeywordFallback(userQuery, out.idToPathSnapshot, summaryByPath, tagMgr, tagMutex,
-                                        &out.pickedAbsolutePaths);
+                                        &out.pickedAbsolutePaths, intent.targetSuffixes);
+    }
+
+    if (!intent.targetSuffixes.isEmpty()) {
+        sfAugmentSemanticResultsWithIntent(root, userQuery, intent, &out.pickedAbsolutePaths,
+                                           &out.validWorkspacePathsSnapshot);
+    }
+
+    if (useKeywordFallback && !out.pickedAbsolutePaths.isEmpty()) {
+        sfSortSemanticPickedPathsByDrawerCohesion(&out.pickedAbsolutePaths, tagMgr, tagMutex);
     }
     return out;
 }
