@@ -1172,6 +1172,22 @@ void MainWindow::refreshTaskCenterRedundancyTreeUi()
 
     m_taskCenterRedundancyTree->clear();
 
+    const QFontMetrics pathFm(m_taskCenterRedundancyTree->font());
+    int maxPathWidthPx = 0;
+    auto trackPathWidth = [&](const QString &path) {
+        maxPathWidthPx = qMax(maxPathWidthPx, pathFm.horizontalAdvance(path) + 36);
+    };
+    auto addRedundantPathRow = [&](QTreeWidgetItem *grp, const QString &path) {
+        trackPathWidth(path);
+        auto *row = new QTreeWidgetItem(grp, {QString()});
+        auto *cb = new QCheckBox(path, m_taskCenterRedundancyTree);
+        cb->setProperty("absPath", path);
+        cb->setChecked(false);
+        cb->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Preferred);
+        m_taskCenterRedundancyTree->setItemWidget(row, 0, cb);
+        row->setSizeHint(0, QSize(pathFm.horizontalAdvance(path) + 36, row->sizeHint(0).height()));
+    };
+
     auto filterMultiPath = [](const QMap<QString, QSet<QString>> &in) {
         QMap<QString, QSet<QString>> out;
         for (auto it = in.constBegin(); it != in.constEnd(); ++it) {
@@ -1222,11 +1238,7 @@ void MainWindow::refreshTaskCenterRedundancyTreeUi()
                 return a.localeAwareCompare(b) < 0;
             });
             for (const QString &path : ordered) {
-                auto *row = new QTreeWidgetItem(grp, {QString()});
-                auto *cb = new QCheckBox(path, m_taskCenterRedundancyTree);
-                cb->setProperty("absPath", path);
-                cb->setChecked(false);
-                m_taskCenterRedundancyTree->setItemWidget(row, 0, cb);
+                addRedundantPathRow(grp, path);
             }
         }
     }
@@ -1254,13 +1266,14 @@ void MainWindow::refreshTaskCenterRedundancyTreeUi()
                 return a.localeAwareCompare(b) < 0;
             });
             for (const QString &path : ordered) {
-                auto *row = new QTreeWidgetItem(grp, {QString()});
-                auto *cb = new QCheckBox(path, m_taskCenterRedundancyTree);
-                cb->setProperty("absPath", path);
-                cb->setChecked(false);
-                m_taskCenterRedundancyTree->setItemWidget(row, 0, cb);
+                addRedundantPathRow(grp, path);
             }
         }
+    }
+
+    if (maxPathWidthPx > 0) {
+        m_taskCenterRedundancyTree->header()->resizeSection(0, maxPathWidthPx);
+        m_taskCenterRedundancyTree->resizeColumnToContents(0);
     }
 
     if (vsb) {
@@ -1833,7 +1846,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_taskCenterRedundancyTree = new QTreeWidget(tcRightPane);
     m_taskCenterRedundancyTree->setColumnCount(1);
     m_taskCenterRedundancyTree->setHeaderHidden(true);
+    m_taskCenterRedundancyTree->setTextElideMode(Qt::ElideNone);
     m_taskCenterRedundancyTree->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_taskCenterRedundancyTree->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_taskCenterRedundancyTree->header()->setStretchLastSection(false);
     m_taskCenterRedundancyTree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     tcRightLayout->addWidget(m_taskCenterRedundancyTree, 1);
@@ -4136,6 +4151,11 @@ void MainWindow::renderFileListBatch(int count) {
     };
     for (int i = start; i < end; ++i) {
         const QString filePath = m_pendingFilesToDisplay[static_cast<size_t>(i)];
+        const QString filePathNorm = QDir::cleanPath(filePath);
+        if (fileListMode == FileListMode::SemanticResults) {
+            if (!m_semanticVisiblePaths.contains(filePathNorm))
+                continue;
+        }
         const QFileInfo fi(filePath);
         if (!fi.exists()) continue;
         if (!isAnalyzableFile(fi)) continue;
@@ -4193,7 +4213,8 @@ void MainWindow::renderFileListBatch(int count) {
     if (btnLoadAll) btnLoadAll->setVisible(hasMore);
 
     filterFiles();
-    sortFileList();
+    if (fileListMode != FileListMode::SemanticResults)
+        sortFileList();
     refreshFileAndFolderAnalysisIndicators();
     ensureAnalysisIndicatorTimer();
     tryRestoreFileListSelectionAfterBatchPaint(total);
@@ -4579,6 +4600,8 @@ void MainWindow::syncTagListFromTagFilter() {
 
 void MainWindow::filterFiles() {
     if (!fileList) return;
+    if (fileListMode == FileListMode::SemanticResults)
+        return;
     const bool heroGlobalSemantic =
         m_cmbSearchMode && m_cmbSearchMode->currentData().toInt() == HeroSearchScope_GlobalSemantic;
     const QString query =
@@ -4692,6 +4715,7 @@ void MainWindow::disableSemanticOverlays()
 {
     m_semanticFilterActive = false;
     m_semanticVisiblePaths.clear();
+    m_semanticPickedPaths.clear();
     m_semanticLockedQuery.clear();
     m_semanticValidWorkspacePaths.clear();
     m_semanticSearchIdToPath.clear();
@@ -4770,7 +4794,7 @@ void MainWindow::populateSemanticResultFiles()
     fileList->clear();
     m_pendingFilesToDisplay.clear();
     m_currentLoadedCount = 0;
-    if (m_semanticVisiblePaths.isEmpty()) {
+    if (m_semanticPickedPaths.isEmpty()) {
         if (btnLoadMore) btnLoadMore->hide();
         if (btnLoadAll) btnLoadAll->hide();
         m_fileListReselectPendingPath.clear();
@@ -4778,19 +4802,25 @@ void MainWindow::populateSemanticResultFiles()
         refreshCurrentAnalysisTargetUi();
         return;
     }
-    QVector<QString> v;
-    v.reserve(m_semanticVisiblePaths.size());
-    for (const QString &p : std::as_const(m_semanticVisiblePaths))
-        v.push_back(p);
-    std::sort(v.begin(), v.end(), [](const QString &a, const QString &b) {
-        return a.localeAwareCompare(b) < 0;
-    });
-    for (const QString &fp : std::as_const(v)) {
+
+    QSet<QString> pickedNorm;
+    pickedNorm.reserve(m_semanticPickedPaths.size());
+    for (const QString &p0 : std::as_const(m_semanticPickedPaths)) {
+        const QString p = QDir::cleanPath(p0);
+        if (!p.isEmpty())
+            pickedNorm.insert(p);
+    }
+
+    for (const QString &p0 : std::as_const(m_semanticPickedPaths)) {
+        const QString fp = QDir::cleanPath(p0);
+        if (fp.isEmpty() || !pickedNorm.contains(fp))
+            continue;
         const QFileInfo fi(fp);
-        if (!fi.exists()) continue;
-        if (!isAnalyzableFile(fi)) continue;
+        if (!fi.exists() || !fi.isFile())
+            continue;
         m_pendingFilesToDisplay.push_back(fp);
     }
+
     if (btnLoadMore) btnLoadMore->hide();
     if (btnLoadAll) btnLoadAll->hide();
     const int n = static_cast<int>(m_pendingFilesToDisplay.size());
@@ -4872,15 +4902,6 @@ void MainWindow::runHeroSemanticSearchQuery()
         return;
     }
 
-    if (!sfSemanticWorkspaceHasAnalyzableFile(rootSnap, 4000)) {
-        if (lblStatus)
-            lblStatus->setText(QStringLiteral("⚠️ 目前清單無檔案可供語意搜尋"));
-        return;
-    }
-
-    m_semanticSearchIdToPath.clear();
-    m_semanticValidWorkspacePaths.clear();
-
     if (!m_semanticSearchWatcher) {
         QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("內部錯誤：語意搜尋尚未初始化。"));
         return;
@@ -4941,15 +4962,24 @@ void MainWindow::onSemanticSearchFinished()
         qWarning() << "[semantic-search] LLM reported error (fallback may have been used):" << res.rawLlmText;
 
     QSet<QString> picked;
+    QStringList pickedOrdered;
+    pickedOrdered.reserve(res.pickedAbsolutePaths.size());
     for (const QString &p : std::as_const(res.pickedAbsolutePaths)) {
-        if (!p.isEmpty())
-            picked.insert(QDir::cleanPath(p));
+        if (p.isEmpty()) continue;
+        const QString c = QDir::cleanPath(p);
+        if (c.isEmpty() || picked.contains(c)) continue;
+        picked.insert(c);
+        pickedOrdered.append(c);
     }
 
     if (picked.isEmpty()) {
         qWarning() << "[semantic-search] no paths after worker (unexpected empty workspace?)";
-        if (lblStatus)
-            lblStatus->setText(QStringLiteral("⚠️ 語意搜尋沒有可顯示的檔案（工作區可能為空）。"));
+        if (lblStatus) {
+            if (res.validWorkspacePathsSnapshot.isEmpty())
+                lblStatus->setText(QStringLiteral("⚠️ 目前清單無檔案可供語意搜尋"));
+            else
+                lblStatus->setText(QStringLiteral("⚠️ 語意搜尋沒有可顯示的檔案（工作區可能為空）。"));
+        }
         return;
     }
 
@@ -4962,6 +4992,7 @@ void MainWindow::onSemanticSearchFinished()
         cmbTagFilter->blockSignals(false);
     }
 
+    m_semanticPickedPaths = std::move(pickedOrdered);
     m_semanticVisiblePaths = picked;
     m_semanticSearchIdToPath = res.idToPathSnapshot;
     m_semanticValidWorkspacePaths = res.validWorkspacePathsSnapshot;
@@ -6855,6 +6886,9 @@ static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootP
     if (!tagMgr || !tagMutex || !llama) return out;
     if (rootPathRaw.trimmed().isEmpty()) return out;
     const QString root = QDir::cleanPath(rootPathRaw);
+
+    if (!sfSemanticWorkspaceHasAnalyzableFile(root, 4000))
+        return out;
 
     const QString idLines = sfBuildWorkspaceSemanticIdLines(root, summaryByPath, tagMgr, tagMutex, maxFiles,
                                                               &out.idToPathSnapshot, &out.validWorkspacePathsSnapshot);

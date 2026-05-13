@@ -308,6 +308,7 @@ private:
 
     bool m_semanticFilterActive = false;
     QSet<QString> m_semanticVisiblePaths;
+    QStringList m_semanticPickedPaths;
     QString m_semanticLockedQuery;
     QSet<QString> m_semanticValidWorkspacePaths;
     QMap<int, QString> m_semanticSearchIdToPath;
