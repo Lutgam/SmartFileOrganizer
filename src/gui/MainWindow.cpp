@@ -284,6 +284,16 @@ static bool sfPathHasAnalyzableTextOrDocSuffix(const QString &absPath)
     return plainTextFileSuffixes().contains(sfx) || zipOrPdfTextExtractSuffixes().contains(sfx);
 }
 
+/// Strict workspace isolation: absolute path must live under the current workspace root.
+static bool sfAbsolutePathUnderWorkspaceRoot(const QString &absPathRaw, const QString &workspaceRootRaw)
+{
+    const QString ws = QDir::cleanPath(workspaceRootRaw);
+    const QString p = QDir::cleanPath(absPathRaw);
+    if (ws.isEmpty() || p.isEmpty()) return false;
+    if (p == ws) return true;
+    return p.startsWith(ws + QLatin1Char('/'));
+}
+
 const QSet<QString> &officeZipPreviewSuffixes()
 {
     static const QSet<QString> k = {QStringLiteral("docx"), QStringLiteral("docm"), QStringLiteral("dotx"),
@@ -789,25 +799,36 @@ static QString sfHeuristicDrawerKeyForAiTag(const QString &rawAiTag)
     static const QStringList kStudy = {QStringLiteral("筆記"), QStringLiteral("研究"), QStringLiteral("論文"),
                                        QStringLiteral("作業"), QStringLiteral("統計"), QStringLiteral("微積分"),
                                        QStringLiteral("講義"), QStringLiteral("教材"), QStringLiteral("學校"),
-                                       QStringLiteral("考"), QStringLiteral("課"), QStringLiteral("題")};
+                                       QStringLiteral("教學"), QStringLiteral("課程"), QStringLiteral("學習"),
+                                       QStringLiteral("知識"), QStringLiteral("考"), QStringLiteral("課"),
+                                       QStringLiteral("題")};
     static const QStringList kFin = {QStringLiteral("發票"), QStringLiteral("財務"), QStringLiteral("收據"),
                                      QStringLiteral("薪資"), QStringLiteral("報價"), QStringLiteral("匯款"),
-                                     QStringLiteral("帳"), QStringLiteral("金")};
+                                     QStringLiteral("銀行"), QStringLiteral("交易"), QStringLiteral("成本"),
+                                     QStringLiteral("預算"), QStringLiteral("投資"), QStringLiteral("帳"),
+                                     QStringLiteral("金")};
     static const QStringList kWork = {QStringLiteral("專案"), QStringLiteral("企劃"), QStringLiteral("報告"),
                                       QStringLiteral("會議"), QStringLiteral("合約"), QStringLiteral("履歷"),
-                                      QStringLiteral("公文"), QStringLiteral("簡報")};
+                                      QStringLiteral("公文"), QStringLiteral("簡報"), QStringLiteral("工作"),
+                                      QStringLiteral("業務"), QStringLiteral("客戶"), QStringLiteral("提案"),
+                                      QStringLiteral("紀錄"), QStringLiteral("規劃"), QStringLiteral("專題"),
+                                      QStringLiteral("計畫")};
     static const QStringList kMedia = {QStringLiteral("照片"), QStringLiteral("影片"), QStringLiteral("素材"),
                                        QStringLiteral("設計"), QStringLiteral("音樂"), QStringLiteral("音檔"),
-                                       QStringLiteral("錄音"), QStringLiteral("圖")};
+                                       QStringLiteral("錄音"), QStringLiteral("圖"), QStringLiteral("影音"),
+                                       QStringLiteral("畫"), QStringLiteral("媒體"), QStringLiteral("截圖")};
+    static const QStringList kMediaAscii = {QStringLiteral("img"), QStringLiteral("video"), QStringLiteral("audio")};
     static const QStringList kSys = {QStringLiteral("資料庫"), QStringLiteral("系統"), QStringLiteral("設定"),
                                      QStringLiteral("備份"), QStringLiteral("日誌"), QStringLiteral("程式"),
-                                     QStringLiteral("環境"), QStringLiteral("軟體"), QStringLiteral("碼")};
-    static const QStringList kSysAscii = {QStringLiteral("sql"), QStringLiteral("db")};
+                                     QStringLiteral("環境"), QStringLiteral("軟體"), QStringLiteral("碼"),
+                                     QStringLiteral("配置"), QStringLiteral("腳本")};
+    static const QStringList kSysAscii = {QStringLiteral("sql"), QStringLiteral("db"), QStringLiteral("config"),
+                                          QStringLiteral("script")};
 
     if (hitList(kStudy)) return QStringLiteral("📚 學習");
     if (hitList(kFin)) return QStringLiteral("💰 財務");
     if (hitList(kWork)) return QStringLiteral("💼 工作");
-    if (hitList(kMedia)) return QStringLiteral("🎬 媒體");
+    if (hitList(kMedia) || hitList(kMediaAscii, true)) return QStringLiteral("🎬 媒體");
     if (hitList(kSys) || hitList(kSysAscii, true)) return QStringLiteral("⚙️ 系統");
     return QStringLiteral("📦 雜項");
 }
@@ -3299,6 +3320,68 @@ static QString sfPhysicalArchiveFolderNameForPrimaryTag(const QString &rawTag,
     }
     return sanitizeTagFolderName(trimmed);
 }
+
+/// Canonical six-drawer key for one raw file tag (empty if not an AI leaf/synthetic drawer tag line).
+static QString sfResolveDrawerKeyForAiTag(const QString &rawTag,
+                                          const QHash<QString, QString> &aiTagToDrawer)
+{
+    const QString trimmed = rawTag.trimmed();
+    if (!TagManager::hasAiPrefix(trimmed))
+        return QString();
+    if (sfIsSyntheticAiDrawerFolderTag(trimmed)) {
+        const QString core = TagManager::stripAiPrefix(trimmed).trimmed();
+        return sfNormalizePersistedDrawerValue(core);
+    }
+    auto it = aiTagToDrawer.constFind(trimmed);
+    QString drawer = (it != aiTagToDrawer.cend()) ? it.value() : QString();
+    if (drawer.isEmpty())
+        drawer = sfHeuristicDrawerKeyForAiTag(trimmed);
+    return sfNormalizePersistedDrawerValue(drawer);
+}
+
+/// After optional misc exclusion: pick one drawer — fixed six-drawer order when multiple remain.
+static QString sfPickPrimaryDrawerFromDrawerSet(const QSet<QString> &drawers)
+{
+    if (drawers.isEmpty())
+        return QString();
+    if (drawers.size() == 1)
+        return *drawers.constBegin();
+    const QString kMisc = QStringLiteral("📦 雜項");
+    for (const QString &k : sfFixedAiClusterDrawerKeys()) {
+        if (k == kMisc)
+            continue;
+        if (drawers.contains(k))
+            return k;
+    }
+    return *drawers.constBegin();
+}
+
+/// Primary folder for physical archive from all tags on a file (Sprint 11.19: misc excluded when mixed).
+static QString sfPhysicalArchiveFolderNameFromAllFileTags(const std::vector<QString> &fileTags,
+                                                          const QHash<QString, QString> &aiTagToDrawer)
+{
+    QSet<QString> drawerSet;
+    for (const QString &raw : fileTags) {
+        const QString dk = sfResolveDrawerKeyForAiTag(raw, aiTagToDrawer);
+        if (!dk.isEmpty())
+            drawerSet.insert(dk);
+    }
+
+    if (!drawerSet.isEmpty()) {
+        const QString kMisc = QStringLiteral("📦 雜項");
+        if (drawerSet.size() > 1)
+            drawerSet.remove(kMisc);
+        if (!drawerSet.isEmpty()) {
+            const QString primary = sfPickPrimaryDrawerFromDrawerSet(drawerSet);
+            if (!primary.isEmpty())
+                return sanitizeTagFolderName(primary);
+        }
+    }
+
+    if (!fileTags.empty())
+        return sfPhysicalArchiveFolderNameForPrimaryTag(fileTags.front(), aiTagToDrawer);
+    return QStringLiteral("_未命名標籤");
+}
 } // namespace
 
 void MainWindow::physicalArchiveFiles() {
@@ -3342,15 +3425,20 @@ void MainWindow::physicalArchiveFiles() {
         btnUndoPhysicalArchive->setEnabled(false);
     }
 
-    std::vector<std::pair<QString, QString>> pairs;
+    std::vector<QString> taggedPaths;
     {
         QMutexLocker locker(&tagMutex);
-        pairs = tagManager.taggedFilesWithPrimaryTag();
+        taggedPaths = tagManager.taggedFilePaths();
     }
 
-    for (const auto &entry : pairs) {
-        const QString srcPath = QDir::cleanPath(entry.first);
-        const QString &rawTag = entry.second;
+    for (const QString &pathEntry : taggedPaths) {
+        const QString srcPath = QDir::cleanPath(pathEntry);
+        if (!sfAbsolutePathUnderWorkspaceRoot(srcPath, rootClean)) continue;
+        std::vector<QString> tagsForFile;
+        {
+            QMutexLocker locker(&tagMutex);
+            tagsForFile = tagManager.getTags(srcPath);
+        }
 
         const QFileInfo fiSrc(srcPath);
         if (!fiSrc.exists() || !fiSrc.isFile()) {
@@ -3368,7 +3456,7 @@ void MainWindow::physicalArchiveFiles() {
             continue;
         }
 
-        const QString folderName = sfPhysicalArchiveFolderNameForPrimaryTag(rawTag, m_aiTagToDrawerKey);
+        const QString folderName = sfPhysicalArchiveFolderNameFromAllFileTags(tagsForFile, m_aiTagToDrawerKey);
         const QString destDir = QDir(rootClean).absoluteFilePath(folderName);
         const QString destPath = QDir(destDir).absoluteFilePath(fiSrc.fileName());
 
@@ -3522,6 +3610,12 @@ void MainWindow::bumpWorkspaceEpochAndPurgeStaleAsyncWork()
     // watcher->result() — cancellation can leave the result store invalid and crash in result() (SIGSEGV).
 
     m_workspaceEpoch.fetch_add(1, std::memory_order_acq_rel);
+
+    m_persistRedundancyHash.clear();
+    m_persistRedundancyName.clear();
+    m_tcAccumFilesAnalyzed = 0;
+    m_tcAccumTagAdds = 0;
+    refreshTaskCenterRedundancyTreeUi();
 
     m_analysisUiWorkActive = false;
     m_currentAnalyzingFile.clear();
@@ -3962,6 +4056,7 @@ void MainWindow::populateVirtualTagFiles(const QString &tag) {
         m_pendingFilesToDisplay.reserve(raw.size());
         for (const QString &p : raw) {
             const QFileInfo finfo(p);
+            if (!sfAbsolutePathUnderWorkspaceRoot(p, rootPath)) continue;
             if (!isAnalyzableFile(finfo)) continue;
             m_pendingFilesToDisplay.push_back(p);
         }
@@ -4107,7 +4202,22 @@ void MainWindow::renderFileListBatch(int count) {
 }
 
 void MainWindow::updateTagListCountsOnly() {
-    auto updateList = [this](QListWidget *list) {
+    const QString workspaceRoot = QDir::cleanPath(rootPath);
+    auto countTaggedFilesInWorkspace = [&](const QString &tagCanon) -> int {
+        std::vector<QString> files;
+        {
+            QMutexLocker locker(&tagMutex);
+            files = tagManager.getFilesByTag(tagCanon);
+        }
+        int n = 0;
+        for (const QString &fp : files) {
+            if (sfAbsolutePathUnderWorkspaceRoot(fp, workspaceRoot))
+                ++n;
+        }
+        return n;
+    };
+
+    auto updateList = [this, &countTaggedFilesInWorkspace](QListWidget *list) {
         if (!list) return;
         for (int i = 0; i < list->count(); ++i) {
             QListWidgetItem *it = list->item(i);
@@ -4115,11 +4225,7 @@ void MainWindow::updateTagListCountsOnly() {
             const QString role = it->data(Qt::UserRole).toString();
             if (role == QStringLiteral("ALL")) continue;
             const QString canon = normalizeDisplayTag(role);
-            int n = 0;
-            {
-                QMutexLocker locker(&tagMutex);
-                n = static_cast<int>(tagManager.getFilesByTag(canon).size());
-            }
+            const int n = countTaggedFilesInWorkspace(canon);
             const QString baseZh = systemTagBaseZh(canon);
             const QString emoji = systemTagEmojiPrefix(canon);
             const QString displayName = baseZh.isEmpty()
@@ -4133,7 +4239,7 @@ void MainWindow::updateTagListCountsOnly() {
         }
     };
 
-    auto updateAiTree = [this](QTreeWidget *tree) {
+    auto updateAiTree = [this, &countTaggedFilesInWorkspace](QTreeWidget *tree) {
         if (!tree) return;
         std::function<void(QTreeWidgetItem *)> walk;
         walk = [&](QTreeWidgetItem *it) {
@@ -4158,11 +4264,7 @@ void MainWindow::updateTagListCountsOnly() {
                 return;
             }
             const QString canon = normalizeDisplayTag(role);
-            int n = 0;
-            {
-                QMutexLocker locker(&tagMutex);
-                n = static_cast<int>(tagManager.getFilesByTag(canon).size());
-            }
+            const int n = countTaggedFilesInWorkspace(canon);
             const QString baseZh = systemTagBaseZh(canon);
             const QString emoji = systemTagEmojiPrefix(canon);
             const QString displayName = baseZh.isEmpty()
@@ -4220,6 +4322,8 @@ void MainWindow::updateTagList() {
         rawTags = tagManager.getAllTags();
     }
 
+    const QString workspaceRoot = QDir::cleanPath(rootPath);
+
     std::map<QString, QSet<QString>> normToFiles;
     for (const QString &t : rawTags) {
         const QString canon = normalizeDisplayTag(t);
@@ -4228,7 +4332,10 @@ void MainWindow::updateTagList() {
             QMutexLocker locker(&tagMutex);
             files = tagManager.getFilesByTag(t);
         }
-        for (const QString &fp : files) normToFiles[canon].insert(fp);
+        for (const QString &fp : files) {
+            if (!sfAbsolutePathUnderWorkspaceRoot(fp, workspaceRoot)) continue;
+            normToFiles[canon].insert(fp);
+        }
     }
 
     QMap<QString, QSet<QString>> systemWhitelistToFiles;
@@ -4242,7 +4349,10 @@ void MainWindow::updateTagList() {
             QMutexLocker locker(&tagMutex);
             files = tagManager.getFilesByTag(t);
         }
-        for (const QString &fp : files) systemWhitelistToFiles[sysCanon].insert(fp);
+        for (const QString &fp : files) {
+            if (!sfAbsolutePathUnderWorkspaceRoot(fp, workspaceRoot)) continue;
+            systemWhitelistToFiles[sysCanon].insert(fp);
+        }
     }
 
     for (const QString &sysCanon : orderedSystemTagWhitelistCanons()) {
@@ -4268,8 +4378,17 @@ void MainWindow::updateTagList() {
 
         auto countFor = [&](const QString &c) -> int {
             if (normToFiles.count(c)) return static_cast<int>(normToFiles.at(c).size());
-            QMutexLocker locker(&tagMutex);
-            return static_cast<int>(tagManager.getFilesByTag(c).size());
+            std::vector<QString> files;
+            {
+                QMutexLocker locker(&tagMutex);
+                files = tagManager.getFilesByTag(c);
+            }
+            int n = 0;
+            for (const QString &fp : files) {
+                if (sfAbsolutePathUnderWorkspaceRoot(fp, workspaceRoot))
+                    ++n;
+            }
+            return n;
         };
 
         QSet<QString> aiLeaves;
@@ -4836,6 +4955,12 @@ void MainWindow::onSemanticSearchFinished()
 
     const QScopeGuard semanticUiReset([this]() { m_semanticSearchUiApplying = false; });
     m_semanticSearchUiApplying = true;
+
+    if (cmbTagFilter) {
+        cmbTagFilter->blockSignals(true);
+        cmbTagFilter->setCurrentIndex(0);
+        cmbTagFilter->blockSignals(false);
+    }
 
     m_semanticVisiblePaths = picked;
     m_semanticSearchIdToPath = res.idToPathSnapshot;
@@ -6036,9 +6161,21 @@ void MainWindow::flushPendingBatchResults() {
         const QJsonValue tagsV = obj.value(QStringLiteral("tags"));
         if (tagsV.isArray()) {
             const QJsonArray arr = tagsV.toArray();
+            QStringList rawList;
             for (const auto &v : arr) {
                 const QString t = v.toString().trimmed();
                 if (t.isEmpty()) continue;
+                rawList.append(t);
+            }
+            QStringList uniqueList;
+            QSet<QString> seenLower;
+            for (const QString &t : rawList) {
+                const QString k = t.toLower();
+                if (seenLower.contains(k)) continue;
+                seenLower.insert(k);
+                uniqueList.append(t);
+            }
+            for (const QString &t : uniqueList) {
                 tagManager.addTag(fp, manualTags ? t : (QStringLiteral("[AI] ") + t), false);
             }
         }
@@ -6234,6 +6371,20 @@ void MainWindow::onAnalysisFinished() {
             filtered.push_back(t);
         }
         tags = filtered;
+    }
+
+    {
+        std::vector<QString> deduped;
+        QSet<QString> seenKeys;
+        for (const QString &t0 : tags) {
+            const QString t = t0.trimmed();
+            if (t.isEmpty()) continue;
+            const QString k = t.toLower();
+            if (seenKeys.contains(k)) continue;
+            seenKeys.insert(k);
+            deduped.push_back(t);
+        }
+        tags = std::move(deduped);
     }
 
     if (fp.isEmpty()) {
@@ -6537,7 +6688,9 @@ static bool sfSemanticWorkspaceHasAnalyzableFile(const QString &rootPathRaw, int
     while (it.hasNext()) {
         if (scanned >= maxProbeFiles) break;
         ++scanned;
-        if (sfSemanticWorkerIsAnalyzableFile(QFileInfo(it.next())))
+        const QString absPath = QDir::cleanPath(it.next());
+        if (sfSemanticWorkerIsAnalyzableFile(QFileInfo(absPath))
+            && sfPathHasAnalyzableTextOrDocSuffix(absPath))
             return true;
     }
     return false;
@@ -6573,6 +6726,7 @@ static QString sfBuildWorkspaceSemanticIdLines(const QString &root,
         const QString absPath = QDir::cleanPath(it.next());
         const QFileInfo fi(absPath);
         if (!sfSemanticWorkerIsAnalyzableFile(fi)) continue;
+        if (!sfPathHasAnalyzableTextOrDocSuffix(absPath)) continue;
         const QString sumText = summaryByPath.value(absPath).trimmed();
         const bool hasSummary = summaryByPath.contains(absPath) && !sumText.isEmpty();
         candidates.push_back({absPath, fi, hasSummary, fi.lastModified().toMSecsSinceEpoch()});

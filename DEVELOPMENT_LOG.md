@@ -353,14 +353,36 @@
   - **快取淨化與即時渲染**: 啟動時徹底清除 `metadata.json` 內的失效快取 (Empty/Error)。於 Item 建立階段預載 `kAnalysisStateRole`，強制委託 (Delegate) 繪製即時且準確的藍色狀態圈。
 * **戰功**: 軟體的交互邏輯達到完美的狀態同步，徹底消除畫面閃爍與體驗中斷的挫折感。
 
-### 11.18 佇列毒化防護與工作區世代控制 (Workspace Epoch Control)
-* **技術挑戰**: 使用者在切換主工作區 (Workspace) 時，舊工作區殘留的巨量背景 AI 分析佇列會引發「佇列毒化 (Queue Poisoning)」。Llama 推論引擎在跨代執行緒回傳結果時，遭遇指標失效與狀態競爭 (Race Condition)，導致 UI 執行緒嚴重死鎖與應用程式卡死。
-* **解決方案**: 實作「樂觀鎖 / 世代 ID (Epoch/Session ID)」防護機制與背景任務靜默拋棄。
+### 11.18 異步任務生命週期與跨代指標防護 (Async Lifecycle & Epoch Guard)
+* **技術挑戰**: 在工作區切換時，舊有背景 QtConcurrent 任務的 `QFutureWatcher` 在被呼叫 `cancel()` 後，其 `result()` 指標失效，引發 C++ 底層無法 Catch 的 `SIGSEGV` (EXC_BAD_ACCESS) 致命閃退。
+* **解決方案**: 廢除暴力的 Thread Cancel，實作「樂觀世代控制 (Optimistic Epoch Verification)」。
 * **核心邏輯**: 
-  - **世代隔離**: 於核心實作 `std::atomic<uint64_t> m_workspaceEpoch`。每次成功切換工作區時，遞增 Epoch 值。
-  - **核彈級清理**: 切換瞬間強制清空 `m_analysisQueue` 與 `m_pendingResults`，並撤銷所有 `QFileSystemWatcher` 舊路徑監控，瞬間釋放 Event Loop 壓力。
-  - **靜默拋棄 (Stale Task Bailout)**: 允許已進入 GPU 的舊推論任務跑完，但在 Callback (`onAnalysisFinished`) 階段進行嚴格的 Epoch 校驗。若攜帶的 Epoch 與當前全域 Epoch 不符，直接 `return` 丟棄結果，阻斷任何越界寫入 `metadata.json` 或重繪 UI 的行為。
-* **戰功**: 徹底解決了軟體在頻繁切換工作區時的穩定性瓶頸，實現了毫秒級的無縫工作區切換，並保證了跨代非同步任務的絕對記憶體安全。
+  - 導入 `std::atomic<uint64_t> m_workspaceEpoch` 標記當前工作區世代。
+  - 將分析結果封裝為 `SfAnalysisOutcome`，於排程前捕獲 `workspaceEpochAtSubmit`。
+  - 在主執行緒的 Slot (`onAnalysisFinished`) 讀取結果前，核對 Epoch。若世代不符，採取「靜默清理 (Silent Bailout)」策略，僅釋放 UI 鎖定，絕不寫入 Metadata 或操作 DOM，徹底規避了非同步指標覆蓋與閃退風險。
+
+### 11.19 實體歸檔權重決策與雜項排他 (Archive Tag Prioritization)
+* **技術挑戰**: 非結構化文件常被 LLM 賦予多維度標籤，若其中包含無效分類，會導致「實體歸檔 (Physical Archive)」發生降級（所有檔案被誤判搬移至 `📦 雜項`）。
+* **解決方案**: 實作「主鍵優先權演算法 (Primary Drawer Resolution)」。
+* **核心邏輯**: 
+  - 在映射目標實體路徑時，收集檔案的多元 AI 分類矩陣。
+  - 導入排他過濾器：當分類維度 `> 1` 時，強制作廢 (Discard) 預設的 Fallback 分類 (`📦 雜項`)，確保高業務價值的領域分類 (如 `💼 工作`, `💰 財務`) 獲得 100% 的實體歸檔優先權。
+
+### 11.19 實體歸檔權重決策與雜項排他 (Archive Tag Prioritization)
+* **技術挑戰**: 檔案具備多維度標籤時，實體歸檔易受無效標籤干擾，導致降級歸檔至「雜項」。
+* **解決方案**: 實作主鍵優先權演算法 (Primary Drawer Resolution)。
+* **核心邏輯**: 透過排他過濾器，當檔案存在其他業務標籤時，強制作廢 fallback 分類 (`📦 雜項`)，確保高價值分類獲得實體歸檔的絕對優先權。
+
+### 11.20 企業級資料隔離與防禦性搜尋架構 (Enterprise Privacy & Search Purity)
+* **技術挑戰**: 切換工作區時，TagManager 殘留全局絕對路徑，導致隱私越權外洩；語意檢索候選池混入二進位圖片檔 (如 IMG203)，導致搜尋幻覺；不完整的模型檔載入導致系統掛起。
+* **解決方案**: 實作「路徑前綴過濾 (Prefix Filtering)」、「檢索白名單屏障」與「防禦性 IO 檢查」。
+* **核心邏輯**: 
+  - **工作區絕對隔離**: 於視圖渲染與標籤查詢層實作 `currentFilePath()` 嚴格前綴匹配，徹底阻斷跨工作區的幽靈檔案顯示，達成商用級資料隱私 (Data Privacy)。
+  - **純淨檢索池**: 將語意檢索與 Fallback 的候選清單，嚴格鎖死在 `plainTextFileSuffixes` 與 `zipOrPdfExtract` 聯集內，徹底封殺圖片與執行檔混入 RAG 上下文的可能性。
+  - **視圖防衝突**: 全域搜尋觸發時，強制重置 `QSortFilterProxyModel` 的標籤條件為「全局」，確保結果的 100% 曝光。
+  - **防禦性模型載入**: 攔截損壞或下載中的 `.gguf` 模型 (透過 `QFileInfo::size < 100MB` 探測)，阻斷底層 GGML 崩潰。
+* **戰功**: 系統正式具備「企業級資安隔離」與「高信噪比檢索」能力，完成商用 SaaS 的最後一塊拼圖。
+
 
 
 ## 🌍 深度技術探討：跨國軟體架構 (i18n) 與 MVC 顯示解耦

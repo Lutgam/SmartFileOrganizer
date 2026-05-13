@@ -173,6 +173,18 @@ bool LlamaEngine::loadModel(const std::string &modelPath)
 
 bool LlamaEngine::loadModelImpl(const std::string &modelPath)
 {
+  const QFileInfo modelFile(QString::fromStdString(modelPath));
+  if (!modelFile.exists() || !modelFile.isFile()) {
+    qWarning() << "[AI] Model path missing or not a file:" << QString::fromStdString(modelPath);
+    return false;
+  }
+  constexpr qint64 kMinModelBytes = 100LL * 1024 * 1024;
+  if (modelFile.size() < kMinModelBytes) {
+    qWarning() << "[AI] Model file too small (incomplete download?):" << modelFile.absoluteFilePath()
+               << "bytes:" << modelFile.size();
+    return false;
+  }
+
   {
     QMutexLocker<QRecursiveMutex> locker(&m_mutex);
     m_modelPath = modelPath;

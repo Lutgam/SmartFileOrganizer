@@ -40,6 +40,8 @@ public:
 
     /// Each tagged file once; primary tag = lexicographically first in std::set (stable, no extra structure).
     std::vector<std::pair<QString, QString>> taggedFilesWithPrimaryTag() const;
+    /// Unique file paths that have at least one tag (for physical archive / bulk scans).
+    std::vector<QString> taggedFilePaths() const;
     /// Move all tag associations from oldPath to newPath (after QFile::rename).
     void relocateFilePath(const QString& oldPath, const QString& newPath, bool saveMetadata = true);
 

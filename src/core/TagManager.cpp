@@ -442,6 +442,17 @@ std::vector<std::pair<QString, QString>> TagManager::taggedFilesWithPrimaryTag()
     return out;
 }
 
+std::vector<QString> TagManager::taggedFilePaths() const {
+    QMutexLocker locker(&m_mutex);
+    std::vector<QString> out;
+    out.reserve(m_fileToTags.size());
+    for (const auto &entry : m_fileToTags) {
+        if (!entry.second.empty())
+            out.push_back(entry.first);
+    }
+    return out;
+}
+
 void TagManager::relocateFilePath(const QString& oldPath, const QString& newPath, bool saveMetadata) {
     QMutexLocker locker(&m_mutex);
     if (oldPath == newPath) {
