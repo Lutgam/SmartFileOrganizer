@@ -1,76 +1,40 @@
-# Smart File Organizer (智慧型檔案總管)
+# 📂 SmartFile Organizer (智慧檔案管理系統)
 
-**Smart File Organizer** 是一款革命性的桌面檔案管理應用程式。透過將強大的 AI 技術整合到檔案管理器中，它讓您能夠自動分析、標記並探索您的文件，且無需將資料傳送到雲端，完全保障隱私。
+![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
+![C++](https://img.shields.io/badge/C++-17%2B-00599C?logo=c%2B%2B)
+![Qt](https://img.shields.io/badge/Qt-6.x-41CD52?logo=qt)
+![AI](https://img.shields.io/badge/Edge%20AI-Llama.cpp-FF9900)
 
-![C++](https://img.shields.io/badge/Language-C++20-blue.svg)
-![Qt](https://img.shields.io/badge/Framework-Qt_6-green.svg)
-![AI](https://img.shields.io/badge/AI-llama.cpp-orange.svg)
+SmartFile Organizer 是一款基於 **C++/Qt** 與 **Edge AI (本地邊緣推論)** 技術打造的新世代智慧檔案管理工具。透過內建的本地端 LLM (大型語言模型)，系統能自動深度解析檔案語意、生成精準摘要與標籤，並進行全自動的分類歸檔，徹底解決傳統檔案管理中「找不到、懶得理、重複存」的三大痛點。
 
-## 🌟 功能特色 (Features)
+## ✨ 核心特色 (Key Features)
 
-*   **🤖 本地端 AI 智慧核心**：內建 `llama.cpp` 引擎，可直接在您的 CPU/GPU 上執行 Llama 3、Mistral 等大型語言模型 (LLM)，無需連網。
-*   **🏷️ 智慧標籤建議**：自動分析文字檔、程式碼、PDF 和 Office 文件，並建議相關的標籤（支援繁體中文）。
-*   **🔒 隱私優先設計**：您的所有資料運算都在本機完成，資料絕不出門，實現 100% 離線使用。
-*   **🕸️ 關聯圖視覺化**：透過互動式的力導向圖 (Files Graph)，視覺化呈現檔案與標籤之間的關聯網絡。
-*   **📄 多格式支援**：
-    *   **純文字/程式碼**：C++, Python, Markdown, Log 檔等。
-    *   **辦公文件**：Microsoft Word (.docx), Excel (.xlsx), PDF (基礎文字提取)。
-*   **🔍 即時搜尋過濾**：依據檔名或標籤，毫秒級快速篩選檔案。
-*   **📂 遞迴掃描管理**：輕鬆掃描與管理複雜的巢狀資料夾結構。
+* **🧠 邊緣 AI 語意引擎 (Edge AI Engine)**
+  * 內建基於 `Llama.cpp` 的本地推論引擎，完全離線運行，確保使用者隱私資料不外洩。
+  * 支援 18 大維度動態分類 (LUT Routing)，自動解析檔案內容並賦予多維度語意標籤與摘要。
+* **🚀 非同步串流與極致效能 (Async Streaming & Performance)**
+  * 實作多執行緒與 `QtConcurrent` 任務佇列，確保 AI 運算時 UI 絕對流暢 (Anti-Jitter)。
+  * 獨創 **Metadata Hash 快取機制**：首次分析後即建立指紋特徵，未來載入時間趨近於 0 秒。
+* **🗑️ 工業級冗餘比對 (Industrial-grade Redundancy Check)**
+  * 基於 SHA-256 二進位特徵值比對，精準抓出「散落各處、檔名不同但靈魂相同」的無效佔用檔案。
+  * 具備多維度分組邏輯，能安全分辨「同檔名但不同格式 (如 PDF vs PPTX)」的邊緣情境。
+* **🎨 現代化沉浸式體驗 (Immersive UX)**
+  * 支援側邊導覽 (Sidebar Navigation)、標籤樹狀圖、即時狀態跑馬燈與預覽控制區。
+  * 具備高度防呆機制 (I/O 阻斷、字串淨化、路徑鎖定)。
 
-## 🛠️ 環境需求 (Prerequisites)
+## 🛠️ 技術堆疊 (Tech Stack)
 
-若要編譯與執行本專案，您需要：
+* **GUI 框架**: Qt 6 (Widgets / QSS)
+* **核心語言**: Modern C++ (C++17)
+* **AI 引擎**: Llama.cpp (GGUF Format)
+* **資料持久化**: JSON (Metadata & Config) / QSettings
 
-*   **作業系統**：Windows 10 / 11 (目前針對 MinGW 環境優化)
-*   **編譯器**：MinGW-w64 (GCC 11+) 或 MSVC 2019+
-*   **開發框架**：Qt 6.x (包含模組：`Widgets`, `Concurrent`, `Network`)
-*   **建置系統**：CMake 3.16+
-*   **硬體建議**：建議 8GB 以上記憶體。若有獨立顯卡 (Discrete GPU) 可加速 AI 推論。
+## 🚀 快速啟動 (Quick Start)
 
-## 🚀 建置教學 (Building)
+1. 克隆本專案：`git clone https://github.com/Lutgam/SmartFileOrganizer.git`
+2. 準備 AI 模型：將相容的 `.gguf` 模型放置於 `./models/` 目錄下。
+3. 編譯環境：使用 CMake 或 Qt Creator 開啟專案進行編譯 (建議使用 Release 模式以獲得最佳推論效能)。
+4. 啟動並載入您需要整理的工作區資料夾，點擊「▶️ 開始 AI 智能分析」。
 
-1.  **複製專案代碼 (Clone)**：
-    ```bash
-    git clone https://github.com/your-username/smart-file-organizer.git
-    cd smart-file-organizer
-    ```
-
-2.  **建立建置目錄**：
-    ```bash
-    mkdir build
-    cd build
-    ```
-
-3.  **使用 CMake 設定專案**：
-    ```bash
-    cmake .. -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
-    ```
-
-4.  **開始編譯**：
-    ```bash
-    cmake --build . --parallel 8
-    ```
-
-5.  **執行程式**：
-    在 `build` 目錄下執行 `SmartFileOrganizer.exe`。
-
-## 📖 使用說明 (Usage Guide)
-
-1.  **準備 AI 模型**：請先從 [Hugging Face](https://huggingface.co/) 下載 GGUF 格式的模型檔案（推薦 `llama-3` 或 `LlaVA` 系列，例如 `Meta-Llama-3-8B-Instruct.Q4_K_M.gguf`）。
-2.  **啟動程式**：打開 `SmartFileOrganizer`。
-3.  **載入模型**：點擊工具列上的 **「載入模型 (Load Model)」** 按鈕，選擇您的 `.gguf` 檔案。
-4.  **開啟資料夾**：點擊 **「開啟資料夾 (Open Folder)」** 選擇您要整理的目標目錄。
-5.  **開始分析**：點擊列表中的任一檔案，按下右側的 **「分析檔案 (Analyze File)」**。AI 將會讀取內容並建議標籤。
-6.  **探索關聯**：切換到 **「關聯視圖 (Graph)」** 分頁，體驗檔案之間的連結！
-
-## 📦 使用的開源專案 (Dependencies)
-
-*   [llama.cpp](https://github.com/ggerganov/llama.cpp) - 輕量級 C/C++ Llama 模型推論庫。
-*   [nlohmann/json](https://github.com/nlohmann/json) - 現代 C++ JSON 解析庫。
-*   [miniz](https://github.com/richgel999/miniz) - ZIP 壓縮/解壓縮庫 (用於解析 Office 文件)。
-*   [Qt](https://www.qt.io/) - 跨平台應用程式開發框架。
-
-## 📄 授權 (License)
-
-本專案為開源軟體。
+本專案為開源軟體
