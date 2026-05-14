@@ -624,6 +624,38 @@ static QString tagLibraryLabelStripAiBadge(const QString &displayName)
     return d.trimmed();
 }
 
+static QString tagChipDisplayStripLeadingEmoji(QString text)
+{
+    text = text.trimmed();
+    if (text.isEmpty())
+        return text;
+
+    bool hadAi = false;
+    if (text.startsWith(QStringLiteral("[AI]"), Qt::CaseInsensitive)) {
+        hadAi = true;
+        text = text.mid(4).trimmed();
+    }
+
+    int i = 0;
+    while (i < text.size()) {
+        const QChar c = text.at(i);
+        if (c.isSpace()) {
+            ++i;
+            continue;
+        }
+        if (c.isLetterOrNumber())
+            break;
+        ++i;
+    }
+    while (i < text.size() && text.at(i).isSpace())
+        ++i;
+
+    QString rest = text.mid(i).trimmed();
+    if (hadAi)
+        return QStringLiteral("[AI] %1").arg(rest);
+    return rest;
+}
+
 // Same presentation rules as tag filter / AI list, for merge-target picker (display only).
 static QString mergeTargetPickerLabel(const QString &rawTag)
 {
@@ -1614,7 +1646,6 @@ void MainWindow::applyDualTrackBatchProgressVisibility()
 }
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
-    setupToolbar();
     m_mainTabWidget = new QTabWidget(this);
     setCentralWidget(m_mainTabWidget);
 
@@ -1781,6 +1812,17 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     m_mainTabWidget->addTab(m_taskCenterTab, tr("任務控制中心"));
 
+    m_settingsTab = new QWidget(this);
+    auto *settingsLayout = new QVBoxLayout(m_settingsTab);
+    settingsLayout->setContentsMargins(16, 16, 16, 16);
+    m_settingsPanel = new SettingsPanel(rootPath, m_settingsTab);
+    settingsLayout->addWidget(m_settingsPanel);
+    connect(m_settingsPanel, &SettingsPanel::settingsApplied, this, &MainWindow::onSettingsPanelApplied);
+    connect(m_settingsPanel, &SettingsPanel::clearAiCacheRequested, this, &MainWindow::onWorkspaceClearAiCache);
+    connect(m_settingsPanel, &SettingsPanel::clearHashCacheRequested, this, &MainWindow::onWorkspaceClearHashCache);
+    connect(m_settingsPanel, &SettingsPanel::factoryResetRequested, this, &MainWindow::onWorkspaceFactoryReset);
+    m_mainTabWidget->insertTab(0, m_settingsTab, tr("⚙️ 設定"));
+
     connect(m_mainTabWidget, &QTabWidget::currentChanged, this, [this](int) {
         if (!m_mainTabWidget || !m_graphWidget || !m_graphTab) return;
         if (m_mainTabWidget->currentWidget() == m_graphTab) {
@@ -1907,36 +1949,35 @@ void MainWindow::onDirectoryChanged(const QString &path) {
 }
 
 void MainWindow::openSettings() {
-    SettingsDialog dlg(rootPath, this);
-    connect(&dlg, &SettingsDialog::settingsApplied, this, [this]() {
-        loadBackgroundAutoAnalyzeSetting();
-        updateAllTexts();
-    });
-    connect(&dlg, &SettingsDialog::clearAiCacheRequested, this, &MainWindow::onWorkspaceClearAiCache);
-    connect(&dlg, &SettingsDialog::clearHashCacheRequested, this, &MainWindow::onWorkspaceClearHashCache);
-    connect(&dlg, &SettingsDialog::factoryResetRequested, this, &MainWindow::onWorkspaceFactoryReset);
-    const int code = dlg.exec();
-    if (code != QDialog::Accepted) return;
+    if (m_settingsPanel)
+        m_settingsPanel->setRootPath(rootPath);
+    if (m_mainTabWidget && m_settingsTab)
+        m_mainTabWidget->setCurrentWidget(m_settingsTab);
+}
 
+void MainWindow::onSettingsPanelApplied() {
     updateAllTexts();
     loadBackgroundAutoAnalyzeSetting();
 
-    const QString newModelPath = dlg.modelPath();
-    if (!newModelPath.isEmpty()) {
-        // Prevent reloading while inference is active.
-        if (watcher && watcher->isRunning()) {
-            cancelFlag.store(true);
-            watcher->future().waitForFinished();
-        }
-        if (modelLoadWatcher && modelLoadWatcher->isRunning()) {
-            modelLoadWatcher->future().waitForFinished();
-        }
+    if (!m_settingsPanel)
+        return;
 
-        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在載入新模型… %1")).arg(newModelPath));
-        modelLoadWatcher->setFuture(QtConcurrent::run([this, newModelPath]() {
-            return m_llamaEngine->loadModel(newModelPath.toStdString());
-        }));
+    const QString newModelPath = m_settingsPanel->modelPath();
+    if (newModelPath.isEmpty())
+        return;
+
+    if (watcher && watcher->isRunning()) {
+        cancelFlag.store(true);
+        watcher->future().waitForFinished();
     }
+    if (modelLoadWatcher && modelLoadWatcher->isRunning()) {
+        modelLoadWatcher->future().waitForFinished();
+    }
+
+    lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在載入新模型… %1")).arg(newModelPath));
+    modelLoadWatcher->setFuture(QtConcurrent::run([this, newModelPath]() {
+        return m_llamaEngine->loadModel(newModelPath.toStdString());
+    }));
 }
 
 void MainWindow::onWorkspaceClearAiCache()
@@ -2038,9 +2079,10 @@ void MainWindow::updateAllTexts() {
 
     if (m_mainTabWidget && m_workspaceTab) m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_workspaceTab), lm.getText(QStringLiteral("tab_workspace")));
     if (m_mainTabWidget && m_graphTab) m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_graphTab), lm.getText(QStringLiteral("tab_graph")));
-
-    if (m_actOpenFolder) m_actOpenFolder->setText(lm.getText(QStringLiteral("toolbar_open")));
-    if (m_actSettings) m_actSettings->setText(lm.getText(QStringLiteral("toolbar_settings")));
+    if (m_mainTabWidget && m_settingsTab) {
+        m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_settingsTab),
+                                    lm.getText(QStringLiteral("toolbar_settings")));
+    }
 
     m_llamaEngine->setOutputLanguage(lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("en_US")
                                                                                    : QStringLiteral("zh_TW"));
@@ -2147,14 +2189,7 @@ void MainWindow::updateAllTexts() {
                                                                                         : QStringLiteral("🔍 搜尋"));
     }
 
-    // Home title (only when currently in Home mode)
-    if (workspaceTitleLabel) {
-        const QString homeTitleZh = QStringLiteral("📁 本機磁碟 (Home)");
-        const QString homeTitleEn = QStringLiteral("📁 Local Disk (Home)");
-        if (workspaceTitleLabel->text() == homeTitleZh || workspaceTitleLabel->text() == homeTitleEn) {
-            workspaceTitleLabel->setText(QStringLiteral("📁 %1").arg(lm.getText(QStringLiteral("本機磁碟 (Home)"))));
-        }
-    }
+    refreshWorkspacePickerTitle();
 
     // Re-render tag list display names (system tags need presentation translation)
     if (m_tagTabWidget && m_systemTagListWidget && m_aiTagTreeWidget) {
@@ -2486,18 +2521,6 @@ void MainWindow::onStartAnalysisClicked()
     }));
 }
 
-void MainWindow::setupToolbar() {
-    toolbar = addToolBar(tr("Main Toolbar"));
-    toolbar->setMovable(false);
-    m_actOpenFolder = toolbar->addAction(QStringLiteral("開啟資料夾"));
-    connect(m_actOpenFolder, &QAction::triggered, this, &MainWindow::openFolder);
-
-    toolbar->addSeparator();
-    m_actSettings = toolbar->addAction(QStringLiteral("⚙️ 設定 (Settings)"));
-    connect(m_actSettings, &QAction::triggered, this, &MainWindow::openSettings);
-    toolbar->addSeparator();
-}
-
 void MainWindow::setupFourColumnLayout() {
     mainSplitter = new QSplitter(Qt::Horizontal, this);
 
@@ -2593,10 +2616,30 @@ void MainWindow::setupFourColumnLayout() {
     navRow->addStretch(1);
     foldersLayout->addLayout(navRow);
 
-    workspaceTitleLabel = new QLabel(QStringLiteral("📁 本機磁碟 (Home)"), this);
-    workspaceTitleLabel->setStyleSheet(QStringLiteral(
-        "font-weight: bold; font-size: 14px; padding-bottom: 5px; color: palette(windowText);"));
-    foldersLayout->addWidget(workspaceTitleLabel);
+    m_btnWorkspacePicker = new QPushButton(this);
+    m_btnWorkspacePicker->setFlat(true);
+    m_btnWorkspacePicker->setCursor(Qt::PointingHandCursor);
+    m_btnWorkspacePicker->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_btnWorkspacePicker->setStyleSheet(QStringLiteral(
+        "QPushButton {"
+        "  font-weight: bold;"
+        "  font-size: 14pt;"
+        "  text-align: left;"
+        "  padding: 4px 0 5px 0;"
+        "  border: none;"
+        "  background: transparent;"
+        "  color: palette(windowText);"
+        "}"
+        "QPushButton:hover {"
+        "  background-color: palette(midlight);"
+        "  border-radius: 4px;"
+        "}"
+        "QPushButton:pressed {"
+        "  background-color: palette(dark);"
+        "  border-radius: 4px;"
+        "}"));
+    connect(m_btnWorkspacePicker, &QPushButton::clicked, this, &MainWindow::openFolder);
+    foldersLayout->addWidget(m_btnWorkspacePicker);
 
     folderTree = new QTreeView(this);
     folderTree->setMinimumWidth(250);
@@ -2944,6 +2987,16 @@ void MainWindow::setupFourColumnLayout() {
     btnAddExistingTag = new QPushButton(QStringLiteral("🏷️ 加入現有標籤"), this);
     tagGroupLayout->addWidget(btnAddExistingTag);
     rebuildAddExistingTagMenu();
+
+    auto *forceCategoryRow = new QHBoxLayout();
+    m_cmbForceCategory = new QComboBox(this);
+    m_cmbForceCategory->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    forceCategoryRow->addWidget(m_cmbForceCategory, 1);
+    m_btnAssignForceCategory = new QPushButton(QStringLiteral("✅ 指定分類"), this);
+    connect(m_btnAssignForceCategory, &QPushButton::clicked, this, &MainWindow::onAssignForceCategoryClicked);
+    forceCategoryRow->addWidget(m_btnAssignForceCategory);
+    tagGroupLayout->addLayout(forceCategoryRow);
+    rebuildForceCategoryCombo();
 
     btnAutoMergeTags = new QPushButton(QStringLiteral("🤖 AI 智能標籤分類 (Generate Tag Folders)"), this);
     btnAutoMergeTags->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -3793,6 +3846,27 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     ensureRecursiveWatchCoversWorkspace();
     updateBackgroundStatusLabel();
     updateStartAnalysisButtonUi();
+    refreshWorkspacePickerTitle();
+    if (m_settingsPanel)
+        m_settingsPanel->setRootPath(rootPath);
+    rebuildAddExistingTagMenu();
+}
+
+void MainWindow::refreshWorkspacePickerTitle()
+{
+    if (!m_btnWorkspacePicker)
+        return;
+
+    const QString home = QDir::cleanPath(QDir::homePath());
+    const QString root = QDir::cleanPath(rootPath);
+    QString label;
+    if (root.isEmpty() || root == home) {
+        label = LanguageManager::instance().getText(QStringLiteral("本機磁碟 (Home)"));
+    } else {
+        const QString folderName = QFileInfo(root).fileName();
+        label = folderName.isEmpty() ? root : folderName;
+    }
+    m_btnWorkspacePicker->setText(QStringLiteral("📁 %1 ▼").arg(label));
 }
 
 void MainWindow::setFolderTreeCurrentPath(const QString &absDir) {
@@ -3888,7 +3962,7 @@ void MainWindow::goHome() {
     m_recursiveWatchPaths.clear();
 
     folderModel->setRootPath(rootPath);
-    if (workspaceTitleLabel) workspaceTitleLabel->setText(QStringLiteral("📁 %1").arg(LanguageManager::instance().getText(QStringLiteral("本機磁碟 (Home)"))));
+    refreshWorkspacePickerTitle();
     if (proxyModel) {
         const QString homeParent = QFileInfo(home).path();
         proxyModel->setWorkspace(home);
@@ -3977,8 +4051,6 @@ void MainWindow::openFolder() {
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (dir.isEmpty()) return;
     mapsHomeFixAndSetRoot(dir);
-    const QString folderName = QFileInfo(dir).fileName().isEmpty() ? dir : QFileInfo(dir).fileName();
-    if (workspaceTitleLabel) workspaceTitleLabel->setText(QStringLiteral("📁 %1").arg(folderName));
     if (proxyModel) {
         proxyModel->setWorkspace(dir);
         const QString parentDir = QFileInfo(dir).path();
@@ -4869,6 +4941,52 @@ void MainWindow::reloadCategoriesConfigFromWorkspace()
         m_categoryLut = SfDrawerCategoryLut::loadFromFile(path);
     }
     sfSetActiveDrawerCategoryLut(m_categoryLut);
+    rebuildForceCategoryCombo();
+}
+
+void MainWindow::rebuildForceCategoryCombo()
+{
+    if (!m_cmbForceCategory)
+        return;
+
+    const QString prev = m_cmbForceCategory->currentData().toString();
+    m_cmbForceCategory->blockSignals(true);
+    m_cmbForceCategory->clear();
+    for (const QString &drawer : m_categoryLut.drawerKeys()) {
+        if (drawer == QStringLiteral("📦 雜項"))
+            continue;
+        m_cmbForceCategory->addItem(drawer, drawer);
+    }
+    const int idx = m_cmbForceCategory->findData(prev);
+    m_cmbForceCategory->setCurrentIndex(idx >= 0 ? idx : 0);
+    m_cmbForceCategory->blockSignals(false);
+}
+
+void MainWindow::onAssignForceCategoryClicked()
+{
+    const QString fp = currentFilePath();
+    if (fp.isEmpty())
+        return;
+    if (!m_cmbForceCategory || m_cmbForceCategory->count() <= 0)
+        return;
+
+    const QString drawer = m_cmbForceCategory->currentData().toString().trimmed();
+    if (drawer.isEmpty())
+        return;
+
+    const QString canon = sfNormalizeDrawerJsonKeyToCanon(drawer);
+    if (canon.isEmpty())
+        return;
+
+    const QString tag = QStringLiteral("[AI] %1").arg(canon);
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.addTag(fp, tag, true);
+        tagManager.saveTags();
+    }
+    updateTagDisplayForFile(fp);
+    updateTagList();
+    reloadCurrentFileListPanel();
 }
 
 void MainWindow::loadAiUiDrawerAssignments()
@@ -5498,8 +5616,10 @@ void MainWindow::updateTagDisplayForFile(const QString &absPath) {
         html += QStringLiteral("<span style='color:#888'>(%1)</span>").arg(displayTag(QStringLiteral("無")).toHtmlEscaped());
     } else {
         for (const QString &t : aiShown) {
-            html += QStringLiteral("<span style='background:#2b6cb0; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>🤖 %1</span>")
-                        .arg(displayTag(t).toHtmlEscaped());
+            const QString chip = tagChipDisplayStripLeadingEmoji(
+                QStringLiteral("[AI] %1").arg(displayTag(t)));
+            html += QStringLiteral("<span style='background:#2b6cb0; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>%1</span>")
+                        .arg(chip.toHtmlEscaped());
         }
     }
     html += QStringLiteral("</div>");
@@ -7723,13 +7843,29 @@ void MainWindow::removeGlobalTag() {
 void MainWindow::rebuildAddExistingTagMenu() {
     auto *menu = new QMenu(this);
 
-    std::vector<QString> allTags;
-    {
-        QMutexLocker locker(&tagMutex);
-        allTags = tagManager.getAllTags();
-    }
+    const QString workspaceRoot = QDir::cleanPath(rootPath);
     QStringList history;
-    for (const auto &t : allTags) history << normalizeDisplayTag(t);
+    if (!workspaceRoot.isEmpty()) {
+        std::vector<QString> allTags;
+        {
+            QMutexLocker locker(&tagMutex);
+            allTags = tagManager.getAllTags();
+            for (const QString &rawTag : allTags) {
+                const std::vector<QString> files = tagManager.getFilesByTag(rawTag);
+                bool usedInWorkspace = false;
+                for (const QString &p : files) {
+                    if (sfAbsolutePathUnderWorkspaceRoot(p, workspaceRoot)) {
+                        usedInWorkspace = true;
+                        break;
+                    }
+                }
+                if (!usedInWorkspace)
+                    continue;
+                history << normalizeDisplayTag(rawTag);
+            }
+        }
+    }
+    history.removeDuplicates();
 
     auto addCategory = [&](const QString &name, const QStringList &preset) {
         QMenu *sub = menu->addMenu(LanguageManager::instance().getText(name));

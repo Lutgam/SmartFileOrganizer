@@ -23,14 +23,11 @@ static constexpr const char *kSettingsSystemFileBypass = "workspace/system_file_
 static constexpr const char *kSettingsColdArchiveYears = "workspace/cold_archive_years";
 } // namespace
 
-SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
-    : QDialog(parent), m_rootPath(currentRootPath) {
-    setWindowTitle(tr("⚙️ Settings"));
-    resize(640, 420);
-
+SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
+    : QWidget(parent), m_rootPath(currentRootPath) {
     auto *root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
 
-    // Language row
     {
         auto *row = new QHBoxLayout();
         row->addWidget(new QLabel(tr("Language / 語言"), this));
@@ -41,7 +38,6 @@ SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
         root->addLayout(row);
     }
 
-    // Model path row
     {
         auto *row = new QHBoxLayout();
         row->addWidget(new QLabel(tr("AI model (.gguf)"), this));
@@ -88,11 +84,6 @@ SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
         gv->addWidget(m_btnFactoryReset);
         root->addWidget(grp);
 
-        const bool allowData = !m_rootPath.trimmed().isEmpty();
-        m_btnClearAi->setEnabled(allowData);
-        m_btnClearHash->setEnabled(allowData);
-        m_btnFactoryReset->setEnabled(allowData);
-
         connect(m_btnClearAi, &QPushButton::clicked, this, [this]() {
             const int r = QMessageBox::warning(this,
                                                  tr("確認清除"),
@@ -122,49 +113,57 @@ SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
         });
     }
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
-    root->addWidget(buttons);
+    m_btnSave = new QPushButton(tr("儲存設定"), this);
+    root->addWidget(m_btnSave, 0, Qt::AlignRight);
+    root->addStretch(1);
 
     loadFromSettings();
+    refreshDataActionButtons();
 
-    connect(m_browseBtn, &QPushButton::clicked, this, &SettingsDialog::browseModel);
-    connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
-        saveToSettings();
-        emit settingsApplied();
-        accept();
-    });
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(m_browseBtn, &QPushButton::clicked, this, &SettingsPanel::browseModel);
+    connect(m_btnSave, &QPushButton::clicked, this, &SettingsPanel::applyAndSave);
 }
 
-bool SettingsDialog::settingsChanged() const {
+void SettingsPanel::setRootPath(const QString &path)
+{
+    m_rootPath = path;
+    refreshDataActionButtons();
+}
+
+void SettingsPanel::applyAndSave()
+{
+    saveToSettings();
+    emit settingsApplied();
+}
+
+bool SettingsPanel::settingsChanged() const {
     return m_changed;
 }
 
-int SettingsDialog::selectedLanguageIndex() const {
+int SettingsPanel::selectedLanguageIndex() const {
     return m_languageCombo ? m_languageCombo->currentIndex() : 0;
 }
 
-QString SettingsDialog::modelPath() const {
+QString SettingsPanel::modelPath() const {
     return m_modelPathEdit ? m_modelPathEdit->text().trimmed() : QString();
 }
 
-bool SettingsDialog::backgroundAutoAnalysis() const {
+bool SettingsPanel::backgroundAutoAnalysis() const {
     return m_bgAutoAnalyze && m_bgAutoAnalyze->isChecked();
 }
 
-bool SettingsDialog::systemFileBypassFilter() const {
+bool SettingsPanel::systemFileBypassFilter() const {
     return m_systemFileBypass && m_systemFileBypass->isChecked();
 }
 
-int SettingsDialog::coldArchiveYears() const
+int SettingsPanel::coldArchiveYears() const
 {
     if (!m_coldArchiveCombo) return 0;
     return m_coldArchiveCombo->currentData().toInt();
 }
 
-void SettingsDialog::loadFromSettings() {
+void SettingsPanel::loadFromSettings() {
     QSettings s;
-    // Language from LanguageManager (already persisted)
     const auto lang = LanguageManager::instance().language();
     if (m_languageCombo) {
         m_languageCombo->setCurrentIndex(lang == LanguageManager::Language::EN_US ? 1 : 0);
@@ -186,7 +185,7 @@ void SettingsDialog::loadFromSettings() {
     }
 }
 
-void SettingsDialog::saveToSettings() {
+void SettingsPanel::saveToSettings() {
     QSettings s;
     const QString prevModel = s.value(QString::fromLatin1(kSettingsModelPathKey)).toString();
     const QString newModel = modelPath();
@@ -224,7 +223,7 @@ void SettingsDialog::saveToSettings() {
     }
 }
 
-void SettingsDialog::browseModel() {
+void SettingsPanel::browseModel() {
     const QString startDir = !modelPath().isEmpty() ? QFileInfo(modelPath()).absolutePath()
                           : (!m_rootPath.isEmpty() ? m_rootPath : QDir::homePath());
     const QString file = QFileDialog::getOpenFileName(
@@ -236,3 +235,59 @@ void SettingsDialog::browseModel() {
     if (m_modelPathEdit) m_modelPathEdit->setText(QDir::cleanPath(file));
 }
 
+void SettingsPanel::refreshDataActionButtons()
+{
+    const bool allowData = !m_rootPath.trimmed().isEmpty();
+    if (m_btnClearAi) m_btnClearAi->setEnabled(allowData);
+    if (m_btnClearHash) m_btnClearHash->setEnabled(allowData);
+    if (m_btnFactoryReset) m_btnFactoryReset->setEnabled(allowData);
+}
+
+SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
+    : QDialog(parent) {
+    setWindowTitle(tr("⚙️ Settings"));
+    resize(640, 420);
+
+    auto *root = new QVBoxLayout(this);
+    m_panel = new SettingsPanel(currentRootPath, this);
+    root->addWidget(m_panel);
+
+    connect(m_panel, &SettingsPanel::settingsApplied, this, &SettingsDialog::settingsApplied);
+    connect(m_panel, &SettingsPanel::clearAiCacheRequested, this, &SettingsDialog::clearAiCacheRequested);
+    connect(m_panel, &SettingsPanel::clearHashCacheRequested, this, &SettingsDialog::clearHashCacheRequested);
+    connect(m_panel, &SettingsPanel::factoryResetRequested, this, &SettingsDialog::factoryResetRequested);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
+    root->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
+        if (!m_panel) return;
+        m_panel->applyAndSave();
+        accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+}
+
+bool SettingsDialog::settingsChanged() const {
+    return m_panel && m_panel->settingsChanged();
+}
+
+int SettingsDialog::selectedLanguageIndex() const {
+    return m_panel ? m_panel->selectedLanguageIndex() : 0;
+}
+
+QString SettingsDialog::modelPath() const {
+    return m_panel ? m_panel->modelPath() : QString();
+}
+
+bool SettingsDialog::backgroundAutoAnalysis() const {
+    return m_panel && m_panel->backgroundAutoAnalysis();
+}
+
+bool SettingsDialog::systemFileBypassFilter() const {
+    return m_panel && m_panel->systemFileBypassFilter();
+}
+
+int SettingsDialog::coldArchiveYears() const
+{
+    return m_panel ? m_panel->coldArchiveYears() : 0;
+}

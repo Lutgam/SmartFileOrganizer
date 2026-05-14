@@ -2,25 +2,27 @@
 #define SETTINGSDIALOG_H
 
 #include <QDialog>
+#include <QWidget>
 
 class QComboBox;
 class QCheckBox;
 class QLineEdit;
 class QPushButton;
 
-class SettingsDialog : public QDialog {
+class SettingsPanel : public QWidget {
     Q_OBJECT
 
 public:
-    explicit SettingsDialog(const QString &currentRootPath, QWidget *parent = nullptr);
+    explicit SettingsPanel(const QString &currentRootPath, QWidget *parent = nullptr);
+
+    void setRootPath(const QString &path);
+    void applyAndSave();
 
     bool settingsChanged() const;
-    int selectedLanguageIndex() const; // 0: ZH_TW, 1: EN_US
+    int selectedLanguageIndex() const;
     QString modelPath() const;
     bool backgroundAutoAnalysis() const;
-    /// When true, skip LLM for shortcuts / executables / archives (workspace/system_file_bypass_filter).
     bool systemFileBypassFilter() const;
-    /// 0 = disabled, otherwise years (1, 3, or 5) for cold-archive skip.
     int coldArchiveYears() const;
 
 signals:
@@ -33,6 +35,7 @@ private:
     void loadFromSettings();
     void saveToSettings();
     void browseModel();
+    void refreshDataActionButtons();
 
     QString m_rootPath;
     bool m_changed = false;
@@ -47,6 +50,30 @@ private:
     QPushButton *m_btnClearAi = nullptr;
     QPushButton *m_btnClearHash = nullptr;
     QPushButton *m_btnFactoryReset = nullptr;
+    QPushButton *m_btnSave = nullptr;
+};
+
+class SettingsDialog : public QDialog {
+    Q_OBJECT
+
+public:
+    explicit SettingsDialog(const QString &currentRootPath, QWidget *parent = nullptr);
+
+    bool settingsChanged() const;
+    int selectedLanguageIndex() const;
+    QString modelPath() const;
+    bool backgroundAutoAnalysis() const;
+    bool systemFileBypassFilter() const;
+    int coldArchiveYears() const;
+
+signals:
+    void settingsApplied();
+    void clearAiCacheRequested();
+    void clearHashCacheRequested();
+    void factoryResetRequested();
+
+private:
+    SettingsPanel *m_panel = nullptr;
 };
 
 #endif

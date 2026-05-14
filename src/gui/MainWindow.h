@@ -106,7 +106,7 @@ protected:
 };
 
 class GraphWidget;
-class SettingsDialog;
+class SettingsPanel;
 class BusyChip;
 class AiTagDropTreeWidget;
 
@@ -163,6 +163,8 @@ private slots:
 
     void onHeroOmniboxTextChanged(const QString &text);
     void onSemanticSearchFinished();
+    void onAssignForceCategoryClicked();
+    void onSettingsPanelApplied();
 
 private:
     friend class AiTagDropTreeWidget;
@@ -172,13 +174,12 @@ private:
     QSplitter *mainSplitter = nullptr;
     QTabWidget *m_mainTabWidget = nullptr;
     QWidget *m_workspaceTab = nullptr;
+    QWidget *m_settingsTab = nullptr;
+    SettingsPanel *m_settingsPanel = nullptr;
     QWidget *m_graphTab = nullptr;
     QLabel *m_graphTacticalTitle = nullptr;
     QWidget *m_taskCenterTab = nullptr;
     GraphWidget *m_graphWidget = nullptr;
-
-    QAction *m_actOpenFolder = nullptr;
-    QAction *m_actSettings = nullptr;
 
     QWidget *m_workspaceTopBar = nullptr;
     QLineEdit *m_heroOmnibox = nullptr;
@@ -204,6 +205,7 @@ private:
     QString aiUiDrawerStorePath() const;
     QString categoriesConfigPath() const;
     void reloadCategoriesConfigFromWorkspace();
+    void rebuildForceCategoryCombo();
     void setHeroSemanticBusy(bool busy);
 
     QWidget *tagsPanel = nullptr;
@@ -219,7 +221,7 @@ private:
     QWidget *foldersPanel = nullptr;
     QLabel *lblFolderTreeTitle = nullptr;
     QTreeView *folderTree = nullptr;
-    QLabel *workspaceTitleLabel = nullptr;
+    QPushButton *m_btnWorkspacePicker = nullptr;
     QFileSystemModel *folderModel = nullptr;
     WorkspaceFilterProxyModel *proxyModel = nullptr;
     QPushButton *btnBack = nullptr;
@@ -283,6 +285,8 @@ private:
     QPushButton *btnAddTag = nullptr;
     QPushButton *btnRemoveTag = nullptr;
     QPushButton *btnAddExistingTag = nullptr;
+    QComboBox *m_cmbForceCategory = nullptr;
+    QPushButton *m_btnAssignForceCategory = nullptr;
     QPushButton *btnAutoMergeTags = nullptr;
     QPushButton *btnPhysicalArchive = nullptr;
     QPushButton *btnUndoPhysicalArchive = nullptr;
@@ -290,7 +294,6 @@ private:
     // Tabbed UI: no duplicate/graph buttons in Tab 1 preview panel
     // Tag management + file operations are now in m_previewTabWidget
 
-    QToolBar *toolbar = nullptr;
     QCheckBox *chkRecursive = nullptr;
 
     QString rootPath;
@@ -442,12 +445,12 @@ private:
 
     QString currentFilePath() const;
 
-    void setupToolbar();
     void setupFourColumnLayout();
     void setupContextMenus();
 
     void bumpWorkspaceEpochAndPurgeStaleAsyncWork();
     void mapsHomeFixAndSetRoot(const QString &dir);
+    void refreshWorkspacePickerTitle();
     void setFolderTreeCurrentPath(const QString &absDir);
     void pushHistory(const QString &path);
     void navigateToFolder(const QString &path, bool pushToHistory);
