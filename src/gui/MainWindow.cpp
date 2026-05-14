@@ -2741,27 +2741,64 @@ void MainWindow::setupFourColumnLayout() {
     semanticBannerRow->addWidget(m_btnSaveSemanticResultsAsCategory, 0, Qt::AlignTop);
     filesLayout->addLayout(semanticBannerRow);
 
-    auto *controlsCol = new QVBoxLayout();
+    auto *fileControlsRow = new QHBoxLayout();
+    fileControlsRow->setSpacing(8);
 
-    auto *rowSort = new QHBoxLayout();
     cmbSort = new QComboBox(this);
     cmbSort->addItem(QStringLiteral("依名稱"));
     cmbSort->addItem(QStringLiteral("依日期"));
     cmbSort->addItem(QStringLiteral("依大小"));
+    cmbSort->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(cmbSort, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onSortChanged);
-    rowSort->addWidget(cmbSort);
-    rowSort->addStretch(1);
-    controlsCol->addLayout(rowSort);
+    fileControlsRow->addWidget(cmbSort, 1);
 
-    auto *rowFilter = new QHBoxLayout();
     cmbTagFilter = new QComboBox(this);
     cmbTagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("All Files")), QStringLiteral("ALL"));
     cmbTagFilter->setToolTip(QStringLiteral("🏷️ 標籤篩選"));
-    rowFilter->addWidget(cmbTagFilter, 1);
-    rowFilter->addStretch(1);
-    controlsCol->addLayout(rowFilter);
+    cmbTagFilter->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    fileControlsRow->addWidget(cmbTagFilter, 2);
 
-    filesLayout->addLayout(controlsCol);
+    btnBatchAnalyze = new QPushButton(QStringLiteral("資料夾分析"), this);
+    btnBatchAnalyze->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    connect(btnBatchAnalyze, &QPushButton::clicked, this, [this]() { startBatchAnalysis(); });
+    fileControlsRow->addWidget(btnBatchAnalyze, 0);
+
+    btnStopBatchAnalyze = new QPushButton(QStringLiteral("停止"), this);
+    btnStopBatchAnalyze->setEnabled(false);
+    btnStopBatchAnalyze->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    connect(btnStopBatchAnalyze, &QPushButton::clicked, this, [this]() {
+        const bool wasBg = m_batchTriggeredByBackgroundAuto;
+        cancelFlag.store(true);
+        stopAnalysisSpinner();
+        m_analysisQueue.clear();
+        flushPendingBatchResults();
+        m_totalBatchSize = 0;
+        m_isBatchMode = false;
+        m_batchTriggeredByBackgroundAuto = false;
+        m_currentAnalyzingFile.clear();
+        m_backgroundAnalyzeFolderLabel.clear();
+        m_pendingPrioritySingleFile.clear();
+        m_priorityFolderBannerPath.clear();
+        m_showRestartBackgroundPrompt = wasBg && m_bgAutoAnalyzeEnabled;
+        if (m_btnRestartBackgroundAnalyze)
+            m_btnRestartBackgroundAnalyze->setVisible(m_showRestartBackgroundPrompt);
+        updateBackgroundStatusLabel();
+        syncBatchProgressBars();
+        if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
+        if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
+        if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
+        syncBatchAnalyzeButtonLabel();
+        refreshCurrentAnalysisTargetUi();
+        updateTagList();
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("已停止資料夾分析")));
+        scanFiles();
+        showFolderAnalysisReport();
+        refreshFileAndFolderAnalysisIndicators();
+        ensureAnalysisIndicatorTimer();
+    });
+    fileControlsRow->addWidget(btnStopBatchAnalyze, 0);
+
+    filesLayout->addLayout(fileControlsRow);
 
     fileList = new QListWidget(this);
     fileList->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
@@ -2881,51 +2918,6 @@ void MainWindow::setupFourColumnLayout() {
     m_aiSummaryEdit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_aiSummaryEdit->setPlaceholderText(QStringLiteral("尚未分析"));
     previewLayout->addWidget(m_aiSummaryEdit);
-
-    // ===== Batch analyze controls =====
-    auto *batchRow = new QHBoxLayout();
-    btnBatchAnalyze = new QPushButton(QStringLiteral("資料夾分析"), this);
-    connect(btnBatchAnalyze, &QPushButton::clicked, this, [this]() { startBatchAnalysis(); });
-    batchRow->addWidget(btnBatchAnalyze);
-
-    btnStopBatchAnalyze = new QPushButton(QStringLiteral("停止"), this);
-    btnStopBatchAnalyze->setEnabled(false);
-    connect(btnStopBatchAnalyze, &QPushButton::clicked, this, [this]() {
-        const bool wasBg = m_batchTriggeredByBackgroundAuto;
-        // Abort current inference and stop the queue.
-        cancelFlag.store(true);
-        stopAnalysisSpinner();
-        m_analysisQueue.clear();
-        // Default behavior: apply completed results before stopping.
-        flushPendingBatchResults();
-        m_totalBatchSize = 0;
-        m_isBatchMode = false;
-        m_batchTriggeredByBackgroundAuto = false;
-        m_currentAnalyzingFile.clear();
-        m_backgroundAnalyzeFolderLabel.clear();
-        m_pendingPrioritySingleFile.clear();
-        m_priorityFolderBannerPath.clear();
-        m_showRestartBackgroundPrompt = wasBg && m_bgAutoAnalyzeEnabled;
-        if (m_btnRestartBackgroundAnalyze)
-            m_btnRestartBackgroundAnalyze->setVisible(m_showRestartBackgroundPrompt);
-        updateBackgroundStatusLabel();
-        syncBatchProgressBars();
-        if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
-        if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
-        if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
-        syncBatchAnalyzeButtonLabel();
-        refreshCurrentAnalysisTargetUi();
-        // Refresh once so UI reflects applied results.
-        updateTagList();
-        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("已停止資料夾分析")));
-        scanFiles();
-        showFolderAnalysisReport();
-        refreshFileAndFolderAnalysisIndicators();
-        ensureAnalysisIndicatorTimer();
-    });
-    batchRow->addWidget(btnStopBatchAnalyze);
-    batchRow->addStretch(1);
-    previewLayout->addLayout(batchRow);
 
     batchProgressBar = new QProgressBar(this);
     batchProgressBar->setVisible(false);
@@ -3501,6 +3493,151 @@ static QString sfResolveDrawerKeyForAiTag(const QString &rawTag,
     return sfNormalizePersistedDrawerValue(drawer);
 }
 
+static bool sfIsGenericHeuristicArchiveTag(const QString &rawTag)
+{
+    const QString t = rawTag.trimmed();
+    if (t.isEmpty() || TagManager::hasAiPrefix(t))
+        return false;
+    static const QSet<QString> kGeneric = {
+        kTagDoc,
+        kTagImage,
+        kTagVideo,
+        kTagAudio,
+        kTagDb,
+        QStringLiteral("⌨️程式碼"),
+        QStringLiteral("📦壓縮檔"),
+        QStringLiteral("🧩設定"),
+        QStringLiteral("🧩 程式碼"),
+        QStringLiteral("💻應用程式"),
+        QStringLiteral("💻安裝檔"),
+        QStringLiteral("📦備份檔"),
+    };
+    return kGeneric.contains(t);
+}
+
+static QString sfSemanticDrawerKeyForArchiveTag(const QString &rawTag)
+{
+    const QString trimmed = rawTag.trimmed();
+    if (trimmed.isEmpty())
+        return QString();
+    const QString core = TagManager::hasAiPrefix(trimmed) ? TagManager::stripAiPrefix(trimmed).trimmed() : trimmed;
+    if (core.isEmpty())
+        return QString();
+    return sfActiveDrawerCategoryLut().matchText(core);
+}
+
+static QString sfPhysicalArchiveFolderNameFromFallbackTags(const std::vector<QString> &fileTags,
+                                                           const QHash<QString, QString> &aiTagToDrawer)
+{
+    for (const QString &raw : fileTags) {
+        const QString trimmed = raw.trimmed();
+        if (trimmed.isEmpty() || !TagManager::hasAiPrefix(trimmed) || sfIsSyntheticAiDrawerFolderTag(trimmed))
+            continue;
+        return sfPhysicalArchiveFolderNameForPrimaryTag(trimmed, aiTagToDrawer);
+    }
+
+    for (const QString &raw : fileTags) {
+        const QString trimmed = raw.trimmed();
+        if (trimmed.isEmpty() || sfIsGenericHeuristicArchiveTag(trimmed))
+            continue;
+        const QString drawer = sfSemanticDrawerKeyForArchiveTag(trimmed);
+        if (!drawer.isEmpty() && drawer != QStringLiteral("📦 雜項"))
+            return sanitizeTagFolderName(drawer);
+        if (!TagManager::hasAiPrefix(trimmed))
+            return sanitizeTagFolderName(trimmed);
+    }
+
+    for (const QString &raw : fileTags) {
+        const QString trimmed = raw.trimmed();
+        if (!trimmed.isEmpty())
+            return sfPhysicalArchiveFolderNameForPrimaryTag(trimmed, aiTagToDrawer);
+    }
+    return QStringLiteral("_未命名標籤");
+}
+
+static QSet<QString> sfSanitizedAiDrawerFolderNames()
+{
+    QSet<QString> names;
+    for (const QString &k : sfFixedAiClusterDrawerKeys())
+        names.insert(sanitizeTagFolderName(k));
+    return names;
+}
+
+static bool sfIsProtectedWorkspaceDirForArchiveCleanup(const QString &dirPath,
+                                                       const QString &workspaceRoot,
+                                                       const QSet<QString> &drawerNames)
+{
+    const QString rel = QDir(workspaceRoot).relativeFilePath(dirPath);
+    if (rel.isEmpty() || rel == QLatin1String(".") || rel.startsWith(QLatin1String("..")))
+        return true;
+    if (rel == QStringLiteral(".smartfile") || rel.startsWith(QStringLiteral(".smartfile/")))
+        return true;
+    if (!rel.contains(QLatin1Char('/')) && drawerNames.contains(rel))
+        return true;
+    return false;
+}
+
+static void sfPruneEmptyDirectoryTree(const QString &dirRaw,
+                                      const QString &workspaceRoot,
+                                      const QSet<QString> &drawerNames)
+{
+    const QString dir = QDir::cleanPath(dirRaw);
+    const QString root = QDir::cleanPath(workspaceRoot);
+    if (dir.isEmpty() || root.isEmpty() || dir == root)
+        return;
+    if (!sfAbsolutePathUnderWorkspaceRoot(dir, root))
+        return;
+    if (sfIsProtectedWorkspaceDirForArchiveCleanup(dir, root, drawerNames))
+        return;
+
+    QDir d(dir);
+    if (!d.exists())
+        return;
+
+    const QFileInfoList subs = d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QFileInfo &fi : subs) {
+        if (fi.isDir())
+            sfPruneEmptyDirectoryTree(fi.absoluteFilePath(), workspaceRoot, drawerNames);
+    }
+
+    if (!d.exists() || !d.isEmpty() || sfIsProtectedWorkspaceDirForArchiveCleanup(dir, root, drawerNames))
+        return;
+
+    d.rmdir(dir);
+}
+
+static void sfPruneEmptyDirectoryChain(const QString &dirRaw,
+                                       const QString &workspaceRoot,
+                                       const QSet<QString> &drawerNames)
+{
+    QString cur = QDir::cleanPath(dirRaw);
+    const QString root = QDir::cleanPath(workspaceRoot);
+    while (!cur.isEmpty() && cur != root && sfAbsolutePathUnderWorkspaceRoot(cur, root)) {
+        sfPruneEmptyDirectoryTree(cur, workspaceRoot, drawerNames);
+        QDir d(cur);
+        if (!d.exists() || !d.isEmpty() || sfIsProtectedWorkspaceDirForArchiveCleanup(cur, root, drawerNames))
+            break;
+        const QString parent = QFileInfo(cur).absolutePath();
+        if (!d.rmdir(cur))
+            break;
+        cur = parent;
+    }
+}
+
+static void sfCleanupEmptySourceDirsAfterPhysicalArchive(const QSet<QString> &sourceDirs,
+                                                         const QString &workspaceRoot)
+{
+    if (sourceDirs.isEmpty())
+        return;
+    const QSet<QString> drawerNames = sfSanitizedAiDrawerFolderNames();
+    QStringList ordered = sourceDirs.values();
+    std::sort(ordered.begin(), ordered.end(), [](const QString &a, const QString &b) {
+        return a.size() > b.size();
+    });
+    for (const QString &dir : std::as_const(ordered))
+        sfPruneEmptyDirectoryChain(dir, workspaceRoot, drawerNames);
+}
+
 /// After optional misc exclusion: pick one drawer — fixed ten-drawer order when multiple remain.
 static QString sfPickPrimaryDrawerFromDrawerSet(const QSet<QString> &drawers)
 {
@@ -3527,6 +3664,11 @@ static QString sfPhysicalArchiveFolderNameFromAllFileTags(const std::vector<QStr
         const QString dk = sfResolveDrawerKeyForAiTag(raw, aiTagToDrawer);
         if (!dk.isEmpty())
             drawerSet.insert(dk);
+        if (TagManager::hasAiPrefix(raw) || sfIsGenericHeuristicArchiveTag(raw))
+            continue;
+        const QString semanticDrawer = sfSemanticDrawerKeyForArchiveTag(raw);
+        if (!semanticDrawer.isEmpty() && semanticDrawer != QStringLiteral("📦 雜項"))
+            drawerSet.insert(semanticDrawer);
     }
 
     if (!drawerSet.isEmpty()) {
@@ -3540,9 +3682,7 @@ static QString sfPhysicalArchiveFolderNameFromAllFileTags(const std::vector<QStr
         }
     }
 
-    if (!fileTags.empty())
-        return sfPhysicalArchiveFolderNameForPrimaryTag(fileTags.front(), aiTagToDrawer);
-    return QStringLiteral("_未命名標籤");
+    return sfPhysicalArchiveFolderNameFromFallbackTags(fileTags, aiTagToDrawer);
 }
 
 /// After undo moves a file out of a one-level archive drawer, remove the drawer dir if empty.
@@ -3607,6 +3747,7 @@ void MainWindow::physicalArchiveFiles() {
         btnUndoPhysicalArchive->setEnabled(false);
     }
 
+    QSet<QString> sourceDirsForCleanup;
     std::vector<QString> taggedPaths;
     {
         QMutexLocker locker(&tagMutex);
@@ -3663,12 +3804,15 @@ void MainWindow::physicalArchiveFiles() {
         }
 
         m_lastMoveHistory.push_back(qMakePair(destPath, srcPath));
+        sourceDirsForCleanup.insert(fiSrc.absolutePath());
 
         {
             QMutexLocker locker(&tagMutex);
             tagManager.relocateFilePath(srcPath, destPath, false);
         }
     }
+
+    sfCleanupEmptySourceDirsAfterPhysicalArchive(sourceDirsForCleanup, rootClean);
 
     {
         QMutexLocker locker(&tagMutex);
@@ -3719,7 +3863,11 @@ void MainWindow::undoLastPhysicalArchive() {
             continue;
         }
 
-        const QString oldDir = QFileInfo(oldPath).absolutePath();
+        const QString oldDir = QDir::cleanPath(QFileInfo(oldPath).absolutePath());
+        if (!sfAbsolutePathUnderWorkspaceRoot(oldDir, rootPath)) {
+            qDebug() << "undoLastPhysicalArchive: skip (old path outside workspace):" << oldDir;
+            continue;
+        }
         if (!QDir().mkpath(oldDir)) {
             qDebug() << "undoLastPhysicalArchive: mkpath failed:" << oldDir;
             continue;

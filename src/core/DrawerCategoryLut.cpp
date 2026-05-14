@@ -244,15 +244,27 @@ QString SfDrawerCategoryLut::matchText(const QString &text) const
         return kMiscDrawer;
 
     const QString hay = trimmed.toLower();
+    QString bestDrawer;
+    int bestKeywordLen = 0;
     for (const QString &drawer : m_drawerOrder) {
         if (drawer == kMiscDrawer)
             continue;
         const QStringList kws = m_keywordsByDrawer.value(drawer);
         for (const QString &kw : kws) {
-            if (textContainsKeyword(hay, kw))
-                return drawer;
+            const QString needle = kw.trimmed();
+            if (needle.isEmpty())
+                continue;
+            if (!textContainsKeyword(hay, needle))
+                continue;
+            const int len = needle.size();
+            if (len > bestKeywordLen) {
+                bestKeywordLen = len;
+                bestDrawer = drawer;
+            }
         }
     }
+    if (!bestDrawer.isEmpty())
+        return bestDrawer;
     return kMiscDrawer;
 }
 
