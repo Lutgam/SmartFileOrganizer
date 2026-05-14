@@ -7,10 +7,16 @@
 class DocumentParser
 {
 public:
+    static constexpr int kAiPdfMaxPages = 5;
+    static constexpr int kAiTextMaxChars = 1800;
+
     static std::string extractText(const std::string& filePath);
     /// Prefer this for paths with non-Latin characters (uses Qt I/O end-to-end).
     static QString extractTextQString(const QString& filePath);
     static QString extractPdfText(const QString& filePath);
+    /// Text for LLM analysis: PDF/office routing, page/length limits, metadata fallback.
+    static QString extractTextForAi(const QString& filePath, bool *pdfMetadataOnly = nullptr);
+    static QString truncateForAi(const QString& text, int maxChars = kAiTextMaxChars);
 
 private:
     static std::string parsDocx(const std::string& filePath);

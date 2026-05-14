@@ -31,7 +31,8 @@ public:
                             const std::string& rejectedTagsCsv = "",
                             const std::string& existingTags = "",
                             bool contentReadable = true,
-                            const std::string& fileExt = "");
+                            const std::string& fileExt = "",
+                            bool pdfMetadataOnly = false);
     void setCancelFlag(std::atomic<bool>* flag) { m_cancelFlag = flag; } // Link to UI cancel flag
     void setOutputLanguage(const QString &lang);
 
@@ -50,7 +51,8 @@ private:
                                 const std::string &rejectedTagsCsv,
                                 const std::string &existingTags,
                                 bool contentReadable,
-                                const std::string &fileExt);
+                                const std::string &fileExt,
+                                bool pdfMetadataOnly);
 
     QTimer* idleTimer = nullptr;
     std::string m_modelPath;

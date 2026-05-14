@@ -323,9 +323,11 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
                                      const std::string &rejectedTagsCsv,
                                      const std::string &existingTags,
                                      bool contentReadable,
-                                     const std::string &fileExt)
+                                     const std::string &fileExt,
+                                     bool pdfMetadataOnly)
 {
-  return suggestTagsImpl(filename, content, rejectedTagsCsv, existingTags, contentReadable, fileExt);
+  return suggestTagsImpl(filename, content, rejectedTagsCsv, existingTags, contentReadable, fileExt,
+                         pdfMetadataOnly);
 }
 
 std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
@@ -333,7 +335,8 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
                                          const std::string &rejectedTagsCsv,
                                          const std::string &existingTags,
                                          bool contentReadable,
-                                         const std::string &fileExt)
+                                         const std::string &fileExt,
+                                         bool pdfMetadataOnly)
 {
   InferenceGuard guard(this);
   if (!ensureModelLoaded()) return "Error: Model not loaded";
@@ -345,6 +348,51 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
     lang = m_currentLanguage.trimmed();
   }
   const bool en = (lang.compare(QStringLiteral("en_US"), Qt::CaseInsensitive) == 0);
+
+  if (pdfMetadataOnly) {
+    const std::string fixedSummaryEn =
+        "Read PDF filename and attributes for intelligent classification.";
+    const std::string fixedSummaryZh = "已讀取 PDF 檔名與屬性進行智能分類。";
+
+    std::string prompt;
+    if (en) {
+      prompt =
+          "You are an expert file analyzer.\n"
+          "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n"
+          "Output format: {\"summary\":\"...\",\"tags\":[\"...\",\"...\"]}\n"
+          "\n"
+          "This is a PDF with no extractable text. Use filename and attributes only.\n"
+          "Filename: " +
+          filename + "\n" + "File extension: " + fileExt + "\n" + "Context: " + content +
+          "\n\n"
+          "REQUIREMENTS:\n"
+          "1) The \"summary\" field MUST equal EXACTLY:\n"
+          "\"" +
+          fixedSummaryEn + "\"\n"
+          "2) The \"tags\" field MUST contain 2 to 3 tags inferred ONLY from filename and extension.\n"
+          "3) Tags must be concrete nouns or proper nouns. No long sentences.\n"
+          "4) NEVER use generic words such as file, document, data, or content.\n"
+          "\nONLY output the JSON object.\n";
+    } else {
+      prompt =
+          "你是專業的檔案分析助手。\n"
+          "你必須只輸出一個有效的 JSON 物件。不要 markdown、不要反引號、不要任何解釋文字。\n"
+          "輸出格式：{\"summary\":\"...\",\"tags\":[\"...\",\"...\"]}\n"
+          "\n"
+          "此 PDF 無法抽取內文，僅能依檔名與屬性分類。\n"
+          "檔名: " +
+          filename + "\n" + "副檔名: " + fileExt + "\n" + "屬性: " + content +
+          "\n\n"
+          "要求：\n"
+          "1) \"summary\" 欄位必須完全等於：「" +
+          fixedSummaryZh + "」。\n"
+          "2) \"tags\" 欄位必須給出 2 到 3 個描述檔案類型或主題的標籤（只能依據檔名與副檔名推測）。\n"
+          "3) 標籤必須是名詞或專有名詞，不能是長句。\n"
+          "4) 嚴禁使用「檔案、文件、資料、內容」等無意義通用詞。\n"
+          "\n只能輸出 JSON 物件本體。\n";
+    }
+    return generateResponseImpl(prompt, kMaxNewTokensSuggestTagsJson);
+  }
 
   // If content is not readable (binary), do NOT hallucinate based on raw bytes.
   if (!contentReadable) {

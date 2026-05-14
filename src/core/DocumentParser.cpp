@@ -419,6 +419,100 @@ std::string DocumentParser::parsePdf(const std::string& filePath)
     return metadata.toStdString();
 }
 
+#if defined(HAVE_QT_PDF)
+static void waitPdfDocumentReady(QPdfDocument &doc, int timeoutMs = 5000)
+{
+    QElapsedTimer waitClock;
+    waitClock.start();
+    while (doc.status() == QPdfDocument::Status::Loading && waitClock.elapsed() < timeoutMs) {
+        if (QCoreApplication::instance()
+            && QThread::currentThread() == QCoreApplication::instance()->thread()) {
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 50);
+        } else {
+            QThread::msleep(10);
+        }
+    }
+}
+#endif
+
+static QString extractPdfBinaryHeuristic(const QString &filePath)
+{
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly))
+        return QString();
+
+    const QByteArray data = f.read(4 * 1024 * 1024);
+    if (data.isEmpty())
+        return QString();
+
+    QString out;
+    QString run;
+    const auto flushRun = [&]() {
+        if (run.size() >= 4) {
+            out += run;
+            out += QLatin1Char(' ');
+        }
+        run.clear();
+    };
+
+    for (unsigned char c : data) {
+        if (c >= 32 && c <= 126) {
+            run += QChar(static_cast<char>(c));
+        } else if (c == '\n' || c == '\r' || c == '\t') {
+            if (!run.isEmpty())
+                run += QLatin1Char(' ');
+        } else {
+            flushRun();
+        }
+        if (out.size() > DocumentParser::kAiTextMaxChars * 2)
+            break;
+    }
+    flushRun();
+    return out.simplified().trimmed();
+}
+
+static QString buildPdfMetadataContext(const QString &filePath)
+{
+    const QFileInfo fi(filePath);
+    return QStringLiteral("已讀取 PDF 檔名與屬性進行智能分類。檔名: %1，大小: %2 bytes")
+        .arg(fi.fileName())
+        .arg(fi.size());
+}
+
+QString DocumentParser::truncateForAi(const QString &text, int maxChars)
+{
+    if (text.size() <= maxChars)
+        return text;
+    return text.left(maxChars) + QStringLiteral("\n") + QStringLiteral("...[內容過長已截斷]");
+}
+
+QString DocumentParser::extractTextForAi(const QString &filePath, bool *pdfMetadataOnly)
+{
+    if (pdfMetadataOnly)
+        *pdfMetadataOnly = false;
+
+    const QFileInfo fi(filePath);
+    if (!fi.exists() || !fi.isFile())
+        return QString();
+
+    const QString abs = fi.absoluteFilePath();
+    const QString suffix = fi.suffix().toLower();
+    QString text;
+    if (suffix == QStringLiteral("pdf")) {
+        text = extractPdfText(abs);
+        if (text.trimmed().isEmpty())
+            text = extractPdfBinaryHeuristic(abs);
+        if (text.trimmed().isEmpty()) {
+            text = buildPdfMetadataContext(abs);
+            if (pdfMetadataOnly)
+                *pdfMetadataOnly = true;
+        }
+    } else {
+        text = extractTextQString(abs);
+    }
+    return truncateForAi(text, kAiTextMaxChars);
+}
+
 QString DocumentParser::extractPdfText(const QString& filePath)
 {
     const QString clean = QFileInfo(filePath).absoluteFilePath();
@@ -432,12 +526,7 @@ QString DocumentParser::extractPdfText(const QString& filePath)
     }
 
     // load() can return before the document is Ready; wait briefly so text APIs work.
-    QElapsedTimer waitClock;
-    waitClock.start();
-    while (doc.status() == QPdfDocument::Status::Loading && waitClock.elapsed() < 5000) {
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-        QThread::msleep(2);
-    }
+    waitPdfDocumentReady(doc);
     if (doc.status() != QPdfDocument::Status::Ready || doc.pageCount() <= 0) {
         qDebug() << "PDF Error: document not ready or empty page count" << clean
                  << "status" << static_cast<int>(doc.status()) << "pages" << doc.pageCount();
@@ -445,8 +534,9 @@ QString DocumentParser::extractPdfText(const QString& filePath)
     }
 
     const int pages = doc.pageCount();
+    const int maxPages = qMin(pages, kAiPdfMaxPages);
     QString out;
-    for (int i = 0; i < pages; ++i) {
+    for (int i = 0; i < maxPages; ++i) {
         QSizeF sz = doc.pagePointSize(i);
         if (sz.width() <= 1 || sz.height() <= 1) {
             qDebug() << "PDF Text Empty: invalid page size" << clean << "page" << i << sz;
@@ -479,7 +569,8 @@ QString DocumentParser::extractPdfText(const QString& filePath)
             out += pageText;
             out += QStringLiteral("\n");
         }
-        if (out.size() > 100000) break;
+        if (out.size() > kAiTextMaxChars * 2)
+            break;
     }
     qDebug() << "PDF extract total chars" << out.size() << "file" << clean;
     return out.trimmed();
@@ -490,8 +581,9 @@ QString DocumentParser::extractPdfText(const QString& filePath)
         return QString();
     }
     const int pages = pdf->numPages();
+    const int maxPages = qMin(pages, kAiPdfMaxPages);
     QString out;
-    for (int i = 0; i < pages; ++i) {
+    for (int i = 0; i < maxPages; ++i) {
         std::unique_ptr<Poppler::Page> page(pdf->page(i));
         if (!page) continue;
         QString pageText = page->text(QRectF());
@@ -506,7 +598,8 @@ QString DocumentParser::extractPdfText(const QString& filePath)
             out += pageText;
             out += QStringLiteral("\n");
         }
-        if (out.size() > 100000) break;
+        if (out.size() > kAiTextMaxChars * 2)
+            break;
     }
     qDebug() << "PDF (Poppler) extract total chars" << out.size() << "file" << clean;
     return out.trimmed();

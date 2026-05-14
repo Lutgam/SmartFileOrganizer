@@ -166,6 +166,10 @@ private slots:
     void onSemanticSearchFinished();
     void onAssignForceCategoryClicked();
     void onSettingsPanelApplied();
+    void onFileAnalysisFinished(const QString &filePath);
+
+signals:
+    void fileAnalysisFinished(const QString &filePath);
 
 private:
     friend class AiTagDropTreeWidget;
@@ -378,6 +382,12 @@ private:
     void analyzeFileForPath(const QString &absPath, bool forceColdArchiveBypass = false);
     void flushPendingBatchResults();
     void showFolderAnalysisReport();
+    void persistAnalysisResultForFile(const QString &filePath,
+                                      const QJsonObject &obj,
+                                      const QString &contentHashHex = QString());
+    void refreshFileListRowForPath(const QString &filePath);
+    void tryFinalizeBatchAnalysis();
+    QString formatBatchAnalyzingStatusLine() const;
     void applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached, const QString &contentHashHex);
     void beginBatchAnalysisUi();
     void loadBackgroundAutoAnalyzeSetting();
