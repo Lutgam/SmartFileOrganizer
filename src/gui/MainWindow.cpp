@@ -842,6 +842,11 @@ static QString parentDirDisplay(const QString &absPath) {
 }
 
 static QString resolveModelPath() {
+    QSettings s;
+    const QString configured = s.value(QStringLiteral("ai/model_path")).toString().trimmed();
+    if (!configured.isEmpty() && QFile::exists(configured))
+        return QDir::cleanPath(configured);
+
     const QString appDir = QCoreApplication::applicationDirPath();
     const QString candidates[] = {
         QDir(appDir).filePath(QStringLiteral("assets/models/chat_model.gguf")),
@@ -851,7 +856,9 @@ static QString resolveModelPath() {
         const QString clean = QDir::cleanPath(p);
         if (QFile::exists(clean)) return clean;
     }
-    return QDir::cleanPath(QDir(appDir).filePath(QStringLiteral("assets/models/chat_model.gguf")));
+    return configured.isEmpty()
+               ? QDir::cleanPath(QDir(appDir).filePath(QStringLiteral("assets/models/chat_model.gguf")))
+               : QDir::cleanPath(configured);
 }
 
 /// Full-file SHA-256 (lowercase hex). Empty if unreadable.
@@ -1432,11 +1439,14 @@ void MainWindow::noteSameNameDifferentHashConflicts(const QString &filePath, con
     const QString rootClean = QDir::cleanPath(rootPath);
     if (!sfAbsolutePathUnderWorkspaceRoot(filePath, rootClean))
         return;
-    const QString base = QFileInfo(filePath).fileName();
+    const QString base = QFileInfo(filePath).completeBaseName();
+    if (base.isEmpty())
+        return;
+
     QStringList candidates;
     {
         QMutexLocker locker(&tagMutex);
-        candidates = tagManager.filePathsWithFileName(base);
+        candidates = tagManager.filePathsWithCompleteBaseName(base);
     }
     for (const QString &other : candidates) {
         if (other == filePath) continue;
@@ -4189,6 +4199,7 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
         tagManager.exportHashAnalysisCache(&m_analysisByContentHash);
     }
     purgeStaleAiCacheAfterMetadataLoad();
+    restorePersistedAnalysisUiState();
     applyFilesystemWatchPolicy();
     ensureRecursiveWatchCoversWorkspace();
     updateBackgroundStatusLabel();
@@ -4331,6 +4342,7 @@ void MainWindow::goHome() {
         tagManager.exportHashAnalysisCache(&m_analysisByContentHash);
     }
     purgeStaleAiCacheAfterMetadataLoad();
+    restorePersistedAnalysisUiState();
     applyFilesystemWatchPolicy();
 
     scanFiles();
@@ -4516,6 +4528,97 @@ void MainWindow::purgeStaleAiCacheAfterMetadataLoad()
         QMutexLocker locker(&tagMutex);
         tagManager.exportHashAnalysisCache(&m_analysisByContentHash);
     }
+}
+
+void MainWindow::restorePersistedAnalysisUiState()
+{
+    std::vector<QString> paths;
+    {
+        QMutexLocker locker(&tagMutex);
+        paths = tagManager.taggedFilePaths();
+    }
+
+    for (const QString &pathRaw : paths) {
+        const QString path = QDir::cleanPath(pathRaw);
+        if (path.isEmpty())
+            continue;
+
+        QString hashHex;
+        {
+            QMutexLocker locker(&tagMutex);
+            hashHex = tagManager.fileContentHash(path);
+        }
+        if (hashHex.isEmpty())
+            continue;
+
+        QJsonObject cache;
+        if (m_analysisByContentHash.contains(hashHex)) {
+            cache = m_analysisByContentHash.value(hashHex);
+        } else {
+            QMutexLocker locker(&tagMutex);
+            if (!tagManager.tryGetHashAnalysis(hashHex, &cache))
+                continue;
+        }
+
+        const QString summary = cache.value(QStringLiteral("summary")).toString().trimmed();
+        if (!sfSummaryAcceptableForStorage(summary))
+            continue;
+        m_aiSummaryByPath.insert(path, summary);
+    }
+
+    updateTagList();
+    refreshFileAndFolderAnalysisIndicators();
+}
+
+QMap<QString, QSet<QString>> MainWindow::collectSameBaseNameDifferentHashGroups() const
+{
+    QMap<QString, QSet<QString>> byBase;
+    const QString rootClean = QDir::cleanPath(rootPath);
+
+    std::vector<QString> paths;
+    {
+        QMutexLocker locker(&tagMutex);
+        paths = tagManager.taggedFilePaths();
+    }
+
+    for (const QString &pathRaw : paths) {
+        const QString path = QDir::cleanPath(pathRaw);
+        if (path.isEmpty() || !sfAbsolutePathUnderWorkspaceRoot(path, rootClean))
+            continue;
+
+        QString hashHex;
+        {
+            QMutexLocker locker(&tagMutex);
+            hashHex = tagManager.fileContentHash(path);
+        }
+        if (hashHex.isEmpty())
+            continue;
+
+        const QString base = QFileInfo(path).completeBaseName();
+        if (base.isEmpty())
+            continue;
+        byBase[base].insert(path);
+    }
+
+    QMap<QString, QSet<QString>> conflicts;
+    for (auto it = byBase.constBegin(); it != byBase.constEnd(); ++it) {
+        if (it.value().size() < 2)
+            continue;
+
+        QSet<QString> hashes;
+        for (const QString &path : it.value()) {
+            QString hashHex;
+            {
+                QMutexLocker locker(&tagMutex);
+                hashHex = tagManager.fileContentHash(path);
+            }
+            if (!hashHex.isEmpty())
+                hashes.insert(hashHex);
+        }
+        if (hashes.size() > 1)
+            conflicts.insert(it.key(), it.value());
+    }
+    return conflicts;
 }
 
 void MainWindow::scanFiles() {
@@ -5583,6 +5686,15 @@ void MainWindow::runHeroSemanticSearchQuery()
         return;
     }
 
+    if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
+        if (modelLoadWatcher && modelLoadWatcher->isRunning())
+            modelLoadWatcher->future().waitForFinished();
+        if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
+            const QString modelPath = resolveModelPath();
+            if (m_llamaEngine && QFile::exists(modelPath))
+                m_llamaEngine->loadModel(modelPath.toStdString());
+        }
+    }
     if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
         QMessageBox::warning(this,
                              QStringLiteral("Smartflie"),
@@ -6887,8 +6999,11 @@ void MainWindow::showFolderAnalysisReport()
 
     const QMap<QString, QSet<QString>> hashGroups =
         sfFilterRedundancyMapToWorkspace(filterMultiPath(m_batchHashToPaths), QDir::cleanPath(rootPath));
+    QMap<QString, QSet<QString>> mergedNameGroups = collectSameBaseNameDifferentHashGroups();
+    for (auto it = m_batchNameConflictPaths.constBegin(); it != m_batchNameConflictPaths.constEnd(); ++it)
+        mergedNameGroups[it.key()].unite(it.value());
     const QMap<QString, QSet<QString>> nameGroups =
-        sfFilterRedundancyMapToWorkspace(filterMultiPath(m_batchNameConflictPaths), QDir::cleanPath(rootPath));
+        sfFilterRedundancyMapToWorkspace(filterMultiPath(mergedNameGroups), QDir::cleanPath(rootPath));
 
     int hashDupCount = 0;
     for (auto it = hashGroups.constBegin(); it != hashGroups.constEnd(); ++it) {

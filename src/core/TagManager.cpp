@@ -663,6 +663,20 @@ QStringList TagManager::filePathsWithFileName(const QString &baseFileName) const
     return out;
 }
 
+QStringList TagManager::filePathsWithCompleteBaseName(const QString &completeBaseName) const
+{
+    QMutexLocker locker(&m_mutex);
+    QStringList out;
+    if (completeBaseName.isEmpty()) return out;
+    for (const auto &entry : m_fileToTags) {
+        if (QFileInfo(entry.first).completeBaseName().compare(completeBaseName, Qt::CaseInsensitive) == 0) {
+            out << entry.first;
+        }
+    }
+    out.removeDuplicates();
+    return out;
+}
+
 QStringList TagManager::filePathsWithContentHash(const QString &sha256Hex) const
 {
     QMutexLocker locker(&m_mutex);

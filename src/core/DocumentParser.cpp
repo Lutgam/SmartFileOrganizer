@@ -479,6 +479,36 @@ static QString buildPdfMetadataContext(const QString &filePath)
         .arg(fi.size());
 }
 
+QString DocumentParser::sanitizeTextForAi(const QString &text)
+{
+    QString out;
+    out.reserve(text.size());
+    for (int i = 0; i < text.size(); ++i) {
+        const QChar c = text.at(i);
+        if (c == QLatin1Char('\0'))
+            continue;
+        if (c.isHighSurrogate()) {
+            if (i + 1 < text.size() && text.at(i + 1).isLowSurrogate()) {
+                out.append(c);
+                out.append(text.at(i + 1));
+                ++i;
+            }
+            continue;
+        }
+        if (c.isLowSurrogate())
+            continue;
+        if (c.isPrint() || c == QLatin1Char('\n') || c == QLatin1Char('\r') || c == QLatin1Char('\t')) {
+            out.append(c);
+            continue;
+        }
+        if (c.category() == QChar::Other_Control)
+            continue;
+    }
+    static const QRegularExpression wsRe(QStringLiteral("\\s+"));
+    out.replace(wsRe, QStringLiteral(" "));
+    return out.trimmed();
+}
+
 QString DocumentParser::truncateForAi(const QString &text, int maxChars)
 {
     if (text.size() <= maxChars)
@@ -510,6 +540,7 @@ QString DocumentParser::extractTextForAi(const QString &filePath, bool *pdfMetad
     } else {
         text = extractTextQString(abs);
     }
+    text = sanitizeTextForAi(text);
     return truncateForAi(text, kAiTextMaxChars);
 }
 

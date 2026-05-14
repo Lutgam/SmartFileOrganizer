@@ -465,6 +465,14 @@
   - **細粒度更新 (Granular Updates)**: 將分析任務拆解為原子級別，每完成單一檔案之 LLM 推論後立即觸發信號回傳，達成 O(1) 感知的即時 UI 刷新 (標籤樹、列表、預覽區同步)。
   - **狀態隔離與終態觸發**: 導入佇列狀態監測器，將運算成本較高的「全域冗餘比對」鎖定於佇列清零的瞬間觸發。這不僅緩解了使用者的等待焦慮，更優化了 UI 執行緒的事件循環 (Event Loop) 壓力，確保了極致的互動流暢度。
 
+### 13.1 Demo 護航急救包與生命週期狀態恢復 (Demo Rescue & Lifecycle State Restoration)
+* **技術挑戰**: 系統重啟後未主動觸發 UI 更新，導致快取記憶無法映射至視圖；PDF 萃取出的 Null bytes 與不可見字元引發 LLM 解析 JSON 崩潰；冗餘分析演算法缺少「主檔名」維度，漏抓同名不同格式的檔案；全域模型初始化順序錯誤導致首次搜尋失敗。
+* **解決方案**: 導入「生命週期狀態恢復 (Lifecycle State Restoration)」、「字串淨化管線 (String Sanitization Pipeline)」與「多維度冗餘比對 (Multi-Dimensional Redundancy Check)」。
+* **核心邏輯**: 
+  - **狀態即時映射**: 於 `loadWorkspace` 階段強制觸發 UI 重繪事件 (`refreshVirtualTagsUI`)，使左側 AI 標籤樹與 `metadata.json` 達成毫秒級同步，實現「無感重啟」。
+  - **防禦性程式設計 (Defensive Programming)**: 建立字串淨化過濾器，在遞交給 Llama 推論前，強制濾除所有 `\0` 與非法 Unicode 亂碼，徹底根除 Parser 崩潰風險。
+  - **冗餘維度擴充**: 升級冗餘比對演算法，優先依據 `BaseName` 進行分組，再比對 Hash 值，精準捕獲如 `report.pdf` 與 `report.pptx` 這類「檔名相同但格式與內容相異」的複雜邊緣情境。
+
 ### UI/UX 深度打磨與防跳動佈局 (Layout Stabilization & Pixel-Perfect UI)
 * **技術挑戰**: 動態出現的進度條與分析狀態會導致父容器重新計算佈局 (Reflow)，造成畫面元件頻繁上下跳動；預覽區塊的多項資訊 (標籤、摘要) 垂直堆疊導致下方控制按鈕被擠出可視範圍。
 * **解決方案**: 導入「高度鎖定 (Fixed Height Constraints)」、「分頁化預覽 (Tabbed Preview)」與「獨立狀態列」。

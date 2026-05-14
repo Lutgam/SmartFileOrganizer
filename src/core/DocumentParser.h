@@ -16,6 +16,7 @@ public:
     static QString extractPdfText(const QString& filePath);
     /// Text for LLM analysis: PDF/office routing, page/length limits, metadata fallback.
     static QString extractTextForAi(const QString& filePath, bool *pdfMetadataOnly = nullptr);
+    static QString sanitizeTextForAi(const QString& text);
     static QString truncateForAi(const QString& text, int maxChars = kAiTextMaxChars);
 
 private:

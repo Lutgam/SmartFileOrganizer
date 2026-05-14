@@ -397,6 +397,8 @@ private:
     void ensureRecursiveWatchCoversWorkspace();
     void primeAnalysisCacheFromDisk(const QString &sha256Hex);
     void purgeStaleAiCacheAfterMetadataLoad();
+    void restorePersistedAnalysisUiState();
+    QMap<QString, QSet<QString>> collectSameBaseNameDifferentHashGroups() const;
 
     void recordBatchPathForContentHash(const QString &hashHex, const QString &filePath);
     void noteSameNameDifferentHashConflicts(const QString &filePath, const QString &hashHex);

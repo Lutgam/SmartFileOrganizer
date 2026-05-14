@@ -61,6 +61,7 @@ public:
     void purgeInvalidHashAnalysisCache(bool save = true);
 
     QStringList filePathsWithFileName(const QString &baseFileName) const;
+    QStringList filePathsWithCompleteBaseName(const QString &completeBaseName) const;
     QStringList filePathsWithContentHash(const QString &sha256Hex) const;
 
     std::vector<QString> getAllTags() const;
