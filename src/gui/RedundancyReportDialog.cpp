@@ -20,6 +20,36 @@ QString shortHash(const QString &hex)
     return hex.left(8) + QStringLiteral("…") + hex.right(6);
 }
 
+QString displayPathStripDrawerEmoji(QString path)
+{
+    path = path.trimmed();
+    if (path.isEmpty())
+        return path;
+
+    const bool useBackslash = path.contains(QLatin1Char('\\')) && !path.contains(QLatin1Char('/'));
+    const QChar sep = useBackslash ? QLatin1Char('\\') : QLatin1Char('/');
+    QStringList parts = path.split(sep, Qt::KeepEmptyParts);
+    for (QString &part : parts) {
+        if (part.isEmpty())
+            continue;
+        int i = 0;
+        while (i < part.size()) {
+            const QChar c = part.at(i);
+            if (c.isSpace()) {
+                ++i;
+                continue;
+            }
+            if (c.isLetterOrNumber())
+                break;
+            ++i;
+        }
+        while (i < part.size() && part.at(i).isSpace())
+            ++i;
+        part = part.mid(i).trimmed();
+    }
+    return parts.join(sep);
+}
+
 void collectCheckedPathsFromGroup(QTreeWidgetItem *grp, QStringList *out)
 {
     if (!grp || !out) return;
@@ -112,7 +142,7 @@ void RedundancyReportDialog::appendHashSection(const QMap<QString, QSet<QString>
 
         for (const QString &path : ordered) {
             auto *row = new QTreeWidgetItem(grp, {QString()});
-            auto *cb = new QCheckBox(path, m_tree);
+            auto *cb = new QCheckBox(displayPathStripDrawerEmoji(path), m_tree);
             cb->setProperty("absPath", path);
             cb->setChecked(false);
             m_tree->setItemWidget(row, 0, cb);
@@ -153,7 +183,7 @@ void RedundancyReportDialog::appendNameConflictSection(const QMap<QString, QSet<
 
         for (const QString &path : ordered) {
             auto *row = new QTreeWidgetItem(grp, {QString()});
-            auto *cb = new QCheckBox(path, m_tree);
+            auto *cb = new QCheckBox(displayPathStripDrawerEmoji(path), m_tree);
             cb->setProperty("absPath", path);
             cb->setChecked(false);
             m_tree->setItemWidget(row, 0, cb);

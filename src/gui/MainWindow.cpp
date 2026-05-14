@@ -22,6 +22,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFileIconProvider>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -31,14 +32,18 @@
 #include <QMimeDatabase>
 #include <QPixmap>
 #include <QRegularExpression>
+#include <QResizeEvent>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSet>
+#include <QSettings>
 #include <QVector>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QTextCursor>
+#include <QTextOption>
 #include <QMutexLocker>
 #include <QMetaObject>
 #include <QTreeWidget>
@@ -299,6 +304,40 @@ static bool sfAbsolutePathUnderWorkspaceRoot(const QString &absPathRaw, const QS
     return p.startsWith(ws + QLatin1Char('/'));
 }
 
+static QString sfLoadLastWorkspacePath()
+{
+    QSettings s;
+    return QDir::cleanPath(s.value(QStringLiteral("LastWorkspace")).toString());
+}
+
+static void sfPersistLastWorkspacePath(const QString &pathRaw)
+{
+    const QString path = QDir::cleanPath(pathRaw);
+    if (path.isEmpty())
+        return;
+    QSettings s;
+    s.setValue(QStringLiteral("LastWorkspace"), path);
+}
+
+static QMap<QString, QSet<QString>> sfFilterRedundancyMapToWorkspace(const QMap<QString, QSet<QString>> &in,
+                                                                     const QString &workspaceRootRaw)
+{
+    QMap<QString, QSet<QString>> out;
+    const QString root = QDir::cleanPath(workspaceRootRaw);
+    if (root.isEmpty())
+        return out;
+    for (auto it = in.constBegin(); it != in.constEnd(); ++it) {
+        QSet<QString> filtered;
+        for (const QString &p : it.value()) {
+            if (sfAbsolutePathUnderWorkspaceRoot(p, root))
+                filtered.insert(p);
+        }
+        if (filtered.size() >= 2)
+            out.insert(it.key(), filtered);
+    }
+    return out;
+}
+
 const QSet<QString> &officeZipPreviewSuffixes()
 {
     static const QSet<QString> k = {QStringLiteral("docx"), QStringLiteral("docm"), QStringLiteral("dotx"),
@@ -374,7 +413,54 @@ static int sfFolderRowBadgeState(const QString &rowPath, const QTreeView *tv)
     return 0;
 }
 
+QString sfDisplayPathStripDrawerEmoji(QString path);
+
 } // namespace
+
+class ScaledPreviewImageLabel : public QLabel {
+public:
+    explicit ScaledPreviewImageLabel(QWidget *parent = nullptr) : QLabel(parent)
+    {
+        setAlignment(Qt::AlignCenter);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+        setMinimumHeight(160);
+        setMaximumHeight(320);
+    }
+
+    void setSourcePixmap(const QPixmap &pix)
+    {
+        m_source = pix;
+        updateScaledPixmap();
+    }
+
+    void clearSourcePixmap()
+    {
+        m_source = QPixmap();
+        clear();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QLabel::resizeEvent(event);
+        updateScaledPixmap();
+    }
+
+private:
+    void updateScaledPixmap()
+    {
+        if (m_source.isNull()) {
+            clear();
+            return;
+        }
+        const QSize box = contentsRect().size();
+        if (box.width() < 2 || box.height() < 2)
+            return;
+        setPixmap(m_source.scaled(box, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+
+    QPixmap m_source;
+};
 
 class FileItemDelegate : public QStyledItemDelegate {
 public:
@@ -393,7 +479,7 @@ public:
         QStyle *style = w ? w->style() : QApplication::style();
 
         const QString name = index.data(Qt::DisplayRole).toString();
-        const QString path = index.data(Qt::UserRole + 1).toString();
+        const QString path = sfDisplayPathStripDrawerEmoji(index.data(Qt::UserRole + 1).toString());
         const QVariant vSpin = index.data(kSpinRole);
         int prog = (vSpin.isValid() && !vSpin.isNull()) ? vSpin.toInt() : 0;
         if (prog == 0)
@@ -452,7 +538,7 @@ public:
         QStyleOptionViewItem opt = option;
         initStyleOption(&opt, index);
         const QString name = index.data(Qt::DisplayRole).toString();
-        const QString path = index.data(Qt::UserRole + 1).toString();
+        const QString path = sfDisplayPathStripDrawerEmoji(index.data(Qt::UserRole + 1).toString());
         const QVariant vSpin = index.data(kSpinRole);
         int prog = (vSpin.isValid() && !vSpin.isNull()) ? vSpin.toInt() : 0;
         if (prog == 0)
@@ -654,6 +740,23 @@ static QString tagChipDisplayStripLeadingEmoji(QString text)
     if (hadAi)
         return QStringLiteral("[AI] %1").arg(rest);
     return rest;
+}
+
+static QString sfDisplayPathStripDrawerEmoji(QString path)
+{
+    path = path.trimmed();
+    if (path.isEmpty())
+        return path;
+
+    const bool useBackslash = path.contains(QLatin1Char('\\')) && !path.contains(QLatin1Char('/'));
+    const QChar sep = useBackslash ? QLatin1Char('\\') : QLatin1Char('/');
+    QStringList parts = path.split(sep, Qt::KeepEmptyParts);
+    for (QString &part : parts) {
+        if (part.isEmpty())
+            continue;
+        part = tagChipDisplayStripLeadingEmoji(part);
+    }
+    return parts.join(sep);
 }
 
 // Same presentation rules as tag filter / AI list, for merge-target picker (display only).
@@ -1062,13 +1165,16 @@ void MainWindow::mergeTaskCenterRedundancyBatch(int batchFilesAnalyzed,
                                                 const QMap<QString, QSet<QString>> &hashGroups,
                                                 const QMap<QString, QSet<QString>> &nameGroups)
 {
+    const QString rootClean = QDir::cleanPath(rootPath);
+    const QMap<QString, QSet<QString>> scopedHash = sfFilterRedundancyMapToWorkspace(hashGroups, rootClean);
+    const QMap<QString, QSet<QString>> scopedName = sfFilterRedundancyMapToWorkspace(nameGroups, rootClean);
     m_tcAccumFilesAnalyzed += batchFilesAnalyzed;
     m_tcAccumTagAdds += batchNewTagAdds;
-    for (auto it = hashGroups.constBegin(); it != hashGroups.constEnd(); ++it) {
+    for (auto it = scopedHash.constBegin(); it != scopedHash.constEnd(); ++it) {
         if (it.value().isEmpty()) continue;
         m_persistRedundancyHash[it.key()].unite(it.value());
     }
-    for (auto it = nameGroups.constBegin(); it != nameGroups.constEnd(); ++it) {
+    for (auto it = scopedName.constBegin(); it != scopedName.constEnd(); ++it) {
         if (it.value().size() < 2) continue;
         m_persistRedundancyName[it.key()].unite(it.value());
     }
@@ -1115,14 +1221,15 @@ void MainWindow::refreshTaskCenterRedundancyTreeUi()
         maxPathWidthPx = qMax(maxPathWidthPx, pathFm.horizontalAdvance(path) + 36);
     };
     auto addRedundantPathRow = [&](QTreeWidgetItem *grp, const QString &path) {
-        trackPathWidth(path);
+        const QString displayPath = sfDisplayPathStripDrawerEmoji(path);
+        trackPathWidth(displayPath);
         auto *row = new QTreeWidgetItem(grp, {QString()});
-        auto *cb = new QCheckBox(path, m_taskCenterRedundancyTree);
+        auto *cb = new QCheckBox(displayPath, m_taskCenterRedundancyTree);
         cb->setProperty("absPath", path);
         cb->setChecked(false);
         cb->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Preferred);
         m_taskCenterRedundancyTree->setItemWidget(row, 0, cb);
-        row->setSizeHint(0, QSize(pathFm.horizontalAdvance(path) + 36, row->sizeHint(0).height()));
+        row->setSizeHint(0, QSize(pathFm.horizontalAdvance(displayPath) + 36, row->sizeHint(0).height()));
     };
 
     auto filterMultiPath = [](const QMap<QString, QSet<QString>> &in) {
@@ -1133,8 +1240,10 @@ void MainWindow::refreshTaskCenterRedundancyTreeUi()
         return out;
     };
 
-    const QMap<QString, QSet<QString>> hashToPaths = filterMultiPath(m_persistRedundancyHash);
-    const QMap<QString, QSet<QString>> baseNameToPaths = filterMultiPath(m_persistRedundancyName);
+    const QMap<QString, QSet<QString>> hashToPaths =
+        sfFilterRedundancyMapToWorkspace(m_persistRedundancyHash, QDir::cleanPath(rootPath));
+    const QMap<QString, QSet<QString>> baseNameToPaths =
+        sfFilterRedundancyMapToWorkspace(m_persistRedundancyName, QDir::cleanPath(rootPath));
 
     int hashDupCount = 0;
     for (auto it = hashToPaths.constBegin(); it != hashToPaths.constEnd(); ++it) {
@@ -1264,18 +1373,26 @@ void MainWindow::onTaskCenterCleanClicked()
 void MainWindow::recordBatchPathForContentHash(const QString &hashHex, const QString &filePath)
 {
     if (hashHex.isEmpty() || filePath.isEmpty()) return;
-    m_batchHashToPaths[hashHex].insert(filePath);
+    const QString rootClean = QDir::cleanPath(rootPath);
+    if (sfAbsolutePathUnderWorkspaceRoot(filePath, rootClean))
+        m_batchHashToPaths[hashHex].insert(filePath);
     QStringList known;
     {
         QMutexLocker locker(&tagMutex);
         known = tagManager.filePathsWithContentHash(hashHex);
     }
-    for (const QString &p : known) m_batchHashToPaths[hashHex].insert(p);
+    for (const QString &p : known) {
+        if (sfAbsolutePathUnderWorkspaceRoot(p, rootClean))
+            m_batchHashToPaths[hashHex].insert(p);
+    }
 }
 
 void MainWindow::noteSameNameDifferentHashConflicts(const QString &filePath, const QString &hashHex)
 {
     if (filePath.isEmpty() || hashHex.isEmpty()) return;
+    const QString rootClean = QDir::cleanPath(rootPath);
+    if (!sfAbsolutePathUnderWorkspaceRoot(filePath, rootClean))
+        return;
     const QString base = QFileInfo(filePath).fileName();
     QStringList candidates;
     {
@@ -1284,6 +1401,7 @@ void MainWindow::noteSameNameDifferentHashConflicts(const QString &filePath, con
     }
     for (const QString &other : candidates) {
         if (other == filePath) continue;
+        if (!sfAbsolutePathUnderWorkspaceRoot(other, rootClean)) continue;
         QString oh;
         {
             QMutexLocker locker(&tagMutex);
@@ -1902,7 +2020,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_llamaEngine = new LlamaEngine(this);
     m_llamaEngine->setCancelFlag(&cancelFlag);
 
-    mapsHomeFixAndSetRoot(QDir::homePath());
+    QString initialWorkspace = sfLoadLastWorkspacePath();
+    if (initialWorkspace.isEmpty() || !QFileInfo(initialWorkspace).isDir())
+        initialWorkspace = QDir::homePath();
+    mapsHomeFixAndSetRoot(initialWorkspace);
     navHistory.clear();
     navIndex = -1;
     pushHistory(currentPath);
@@ -2874,19 +2995,30 @@ void MainWindow::setupFourColumnLayout() {
 
     // --- Column 4: Preview ---
     previewPanel = new QWidget(this);
+    previewPanel->setMaximumWidth(520);
     auto *previewLayout = new QVBoxLayout(previewPanel);
+    previewLayout->setSizeConstraint(QLayout::SetMinimumSize);
     lblPreviewTitle = new QLabel(QStringLiteral("👁️ 預覽與控制"), this);
     previewLayout->addWidget(lblPreviewTitle);
 
-    lblPreviewImage = new QLabel(QStringLiteral("選擇檔案以預覽"), this);
-    lblPreviewImage->setAlignment(Qt::AlignCenter);
-    lblPreviewImage->setStyleSheet(QStringLiteral("border: 1px dashed gray; min-height: 200px;"));
-    previewLayout->addWidget(lblPreviewImage);
+    lblPreviewImage = new ScaledPreviewImageLabel(this);
+    lblPreviewImage->setText(QStringLiteral("選擇檔案以預覽"));
+    lblPreviewImage->setStyleSheet(QStringLiteral("border: 1px dashed gray;"));
+    previewLayout->addWidget(lblPreviewImage, 0, Qt::AlignTop);
 
+    m_previewTextScroll = new QScrollArea(this);
+    m_previewTextScroll->setWidgetResizable(true);
+    m_previewTextScroll->setFrameShape(QFrame::NoFrame);
+    m_previewTextScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_previewTextScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_previewTextScroll->setMaximumHeight(280);
+    m_previewTextScroll->setVisible(false);
     txtPreviewText = new QTextEdit(this);
     txtPreviewText->setReadOnly(true);
-    txtPreviewText->setVisible(false);
-    previewLayout->addWidget(txtPreviewText);
+    txtPreviewText->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    txtPreviewText->setLineWrapMode(QTextEdit::WidgetWidth);
+    m_previewTextScroll->setWidget(txtPreviewText);
+    previewLayout->addWidget(m_previewTextScroll, 1);
 
     lblTags = new QLabel(QStringLiteral("標籤: --"), this);
     lblTags->setWordWrap(true);
@@ -3055,6 +3187,7 @@ void MainWindow::setupFourColumnLayout() {
     previewLayout->addStretch(1);
     mainSplitter->addWidget(previewPanel);
 
+    mainSplitter->setChildrenCollapsible(false);
     mainSplitter->setStretchFactor(0, 1);
     mainSplitter->setStretchFactor(1, 2);
     mainSplitter->setStretchFactor(2, 4);
@@ -3998,6 +4131,7 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     if (m_settingsPanel)
         m_settingsPanel->setRootPath(rootPath);
     rebuildAddExistingTagMenu();
+    sfPersistLastWorkspacePath(rootPath);
 }
 
 void MainWindow::refreshWorkspacePickerTitle()
@@ -4137,6 +4271,7 @@ void MainWindow::goHome() {
     sortFileList();
     if (fileList && fileList->viewport())
         fileList->viewport()->update();
+    sfPersistLastWorkspacePath(home);
 }
 
 void MainWindow::onSortChanged(int) {
@@ -5610,9 +5745,13 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     QMimeDatabase db;
     const QMimeType mt = db.mimeTypeForFile(fi);
     const QString typeLine = QStringLiteral("[ %1 %2 ]").arg(emojiForMime(mt), mimeDisplay(mt));
+    auto *previewImg = dynamic_cast<ScaledPreviewImageLabel *>(lblPreviewImage);
 
     lblPreviewImage->setVisible(false);
-    txtPreviewText->setVisible(false);
+    if (m_previewTextScroll)
+        m_previewTextScroll->setVisible(false);
+    if (previewImg)
+        previewImg->clearSourcePixmap();
     if (m_aiSummaryEdit) {
         const QString s = m_aiSummaryByPath.value(absPath).trimmed();
         if (!sfSummaryAcceptableForStorage(s) || !sfPathHasAnalyzableTextOrDocSuffix(absPath)) {
@@ -5623,18 +5762,20 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     }
 
     if (!fi.exists()) {
-        txtPreviewText->setVisible(true);
+        if (m_previewTextScroll)
+            m_previewTextScroll->setVisible(true);
         txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(檔案不存在)"));
         return;
     }
 
     if (mt.name().startsWith(QStringLiteral("image/"))) {
         QPixmap pix(absPath);
-        if (!pix.isNull()) {
+        if (!pix.isNull() && previewImg) {
             lblPreviewImage->setVisible(true);
-            lblPreviewImage->setPixmap(pix.scaled(lblPreviewImage->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            previewImg->setSourcePixmap(pix);
         } else {
-            txtPreviewText->setVisible(true);
+            if (m_previewTextScroll)
+                m_previewTextScroll->setVisible(true);
             txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(無法載入圖片)"));
         }
         return;
@@ -5642,7 +5783,8 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
 
     const QString suffix = fi.suffix().toLower();
     if (suffix == QStringLiteral("pdf")) {
-        txtPreviewText->setVisible(true);
+        if (m_previewTextScroll)
+            m_previewTextScroll->setVisible(true);
         QString content = DocumentParser::extractPdfText(absPath);
         if (content.size() > 2500) content = content.left(2500) + QStringLiteral("...");
         if (content.trimmed().isEmpty()) {
@@ -5653,7 +5795,8 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
         return;
     }
     if (officeZipPreviewSuffixes().contains(suffix)) {
-        txtPreviewText->setVisible(true);
+        if (m_previewTextScroll)
+            m_previewTextScroll->setVisible(true);
         QString content = DocumentParser::extractTextQString(absPath);
         if (content.size() > 2500) content = content.left(2500) + QStringLiteral("...");
         if (content.trimmed().isEmpty()) {
@@ -5665,7 +5808,8 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     }
 
     if (mt.name().startsWith(QStringLiteral("text/")) || plainTextFileSuffixes().contains(suffix)) {
-        txtPreviewText->setVisible(true);
+        if (m_previewTextScroll)
+            m_previewTextScroll->setVisible(true);
         std::ifstream f(absPath.toStdString(), std::ios::binary);
         if (!f.is_open()) {
             txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(無法讀取)"));
@@ -5679,7 +5823,8 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
         return;
     }
 
-    txtPreviewText->setVisible(true);
+    if (m_previewTextScroll)
+        m_previewTextScroll->setVisible(true);
     txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(%1)")
                                      .arg(LanguageManager::instance().getText(QStringLiteral("二進位檔：不顯示內容"))));
 }
@@ -6545,8 +6690,10 @@ void MainWindow::showFolderAnalysisReport()
         return out;
     };
 
-    const QMap<QString, QSet<QString>> hashGroups = filterMultiPath(m_batchHashToPaths);
-    const QMap<QString, QSet<QString>> nameGroups = filterMultiPath(m_batchNameConflictPaths);
+    const QMap<QString, QSet<QString>> hashGroups =
+        sfFilterRedundancyMapToWorkspace(filterMultiPath(m_batchHashToPaths), QDir::cleanPath(rootPath));
+    const QMap<QString, QSet<QString>> nameGroups =
+        sfFilterRedundancyMapToWorkspace(filterMultiPath(m_batchNameConflictPaths), QDir::cleanPath(rootPath));
 
     int hashDupCount = 0;
     for (auto it = hashGroups.constBegin(); it != hashGroups.constEnd(); ++it) {

@@ -38,6 +38,7 @@
 #include <QQueue>
 #include <QProgressBar>
 #include <QPropertyAnimation>
+#include <QScrollArea>
 
 #include <atomic>
 #include <cstdint>
@@ -251,6 +252,7 @@ private:
     QWidget *previewPanel = nullptr;
     QLabel *lblPreviewTitle = nullptr;
     QLabel *lblPreviewImage = nullptr;
+    QScrollArea *m_previewTextScroll = nullptr;
     QTextEdit *txtPreviewText = nullptr;
     QLabel *lblTags = nullptr;
     QWidget *m_statusRow = nullptr;

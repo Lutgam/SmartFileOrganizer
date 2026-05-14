@@ -4,7 +4,10 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDialogButtonBox>
+#include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGroupBox>
@@ -21,6 +24,21 @@ static constexpr const char *kSettingsModelPathKey = "ai/model_path";
 static constexpr const char *kSettingsBgAutoAnalyze = "workspace/background_auto_analysis";
 static constexpr const char *kSettingsSystemFileBypass = "workspace/system_file_bypass_filter";
 static constexpr const char *kSettingsColdArchiveYears = "workspace/cold_archive_years";
+
+QString defaultBundledModelPath()
+{
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString candidates[] = {
+        QDir(appDir).filePath(QStringLiteral("assets/models/chat_model.gguf")),
+        QDir(appDir).filePath(QStringLiteral("../assets/models/chat_model.gguf")),
+    };
+    for (const QString &p : candidates) {
+        const QString clean = QDir::cleanPath(p);
+        if (QFile::exists(clean))
+            return clean;
+    }
+    return QDir::cleanPath(QDir(appDir).filePath(QStringLiteral("assets/models/chat_model.gguf")));
+}
 } // namespace
 
 SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
@@ -169,7 +187,10 @@ void SettingsPanel::loadFromSettings() {
         m_languageCombo->setCurrentIndex(lang == LanguageManager::Language::EN_US ? 1 : 0);
     }
     if (m_modelPathEdit) {
-        m_modelPathEdit->setText(s.value(QString::fromLatin1(kSettingsModelPathKey)).toString());
+        QString modelPath = s.value(QString::fromLatin1(kSettingsModelPathKey)).toString().trimmed();
+        if (modelPath.isEmpty())
+            modelPath = defaultBundledModelPath();
+        m_modelPathEdit->setText(modelPath);
     }
     if (m_bgAutoAnalyze) {
         m_bgAutoAnalyze->setChecked(s.value(QString::fromLatin1(kSettingsBgAutoAnalyze), false).toBool());
