@@ -294,6 +294,41 @@ static bool sfPathHasAnalyzableTextOrDocSuffix(const QString &absPath)
     return plainTextFileSuffixes().contains(sfx) || zipOrPdfTextExtractSuffixes().contains(sfx);
 }
 
+static QString sfPanelTitleLabelStyleSheet()
+{
+    return QStringLiteral(
+        "QLabel { border: 1px solid rgba(148, 163, 184, 90); border-radius: 6px; "
+        "padding: 4px 10px; font-weight: 600; background-color: rgba(15, 23, 42, 72); }");
+}
+
+static void applyPanelTitleLabelStyle(QLabel *label)
+{
+    if (!label)
+        return;
+    label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    label->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    label->setStyleSheet(sfPanelTitleLabelStyleSheet());
+}
+
+static QTextEdit *makePreviewInsightTextView(QWidget *parent)
+{
+    auto *edit = new QTextEdit(parent);
+    edit->setReadOnly(true);
+    edit->setAcceptRichText(true);
+    edit->setFrameShape(QFrame::NoFrame);
+    edit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    edit->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    edit->setLineWrapMode(QTextEdit::WidgetWidth);
+    edit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    return edit;
+}
+
+static QString sfFileListAnalysisStatusStyleSheet()
+{
+    return QStringLiteral(
+        "QLabel { color: #f8fafc; font-weight: 700; font-size: 14px; padding: 2px 8px; }");
+}
+
 /// Strict workspace isolation: absolute path must live under the current workspace root.
 static bool sfAbsolutePathUnderWorkspaceRoot(const QString &absPathRaw, const QString &workspaceRootRaw)
 {
@@ -423,8 +458,7 @@ public:
     {
         setAlignment(Qt::AlignCenter);
         setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-        setMinimumHeight(160);
-        setMaximumHeight(320);
+        setFixedHeight(200);
     }
 
     void setSourcePixmap(const QPixmap &pix)
@@ -740,6 +774,11 @@ static QString tagChipDisplayStripLeadingEmoji(QString text)
     if (hadAi)
         return QStringLiteral("[AI] %1").arg(rest);
     return rest;
+}
+
+static QString aiTagLabelForTreeDisplay(const QString &raw)
+{
+    return tagChipDisplayStripLeadingEmoji(tagLibraryLabelStripAiBadge(raw));
 }
 
 static QString sfDisplayPathStripDrawerEmoji(QString path)
@@ -1651,9 +1690,13 @@ void MainWindow::refreshCurrentAnalysisTargetUi()
     }
 
     if (raw.isEmpty()) {
-        lblCurrentTarget->clear();
+        lblCurrentTarget->setText(QStringLiteral("—"));
+        lblCurrentTarget->setStyleSheet(QStringLiteral(
+            "QLabel { color: palette(mid); font-size: 13px; padding: 2px 0 6px 0; }"));
         return;
     }
+    lblCurrentTarget->setStyleSheet(QStringLiteral(
+        "QLabel { color: palette(windowText); font-size: 13px; padding: 2px 0 6px 0; }"));
     lblCurrentTarget->setText(fm.elidedText(raw, Qt::ElideRight, budget));
 }
 
@@ -1661,8 +1704,7 @@ void MainWindow::updateBackgroundStatusLabel()
 {
     const int nRemaining = m_isBatchMode ? qMax(0, m_totalBatchSize - m_batchCompletedCount) : 0;
 
-    const QString styleBusyLeft = QStringLiteral(
-        "QLabel { color:#1d4ed8; font-weight:700; font-size:14px; padding-left:12px; }");
+    const QString styleBusyLeft = sfFileListAnalysisStatusStyleSheet();
     static const QString kTaskCenterStatusSheet = QStringLiteral(
         "QLabel { background-color: #2563eb; color: white; border-radius: 4px; padding: 4px; "
         "font-weight: bold; }");
@@ -1690,10 +1732,10 @@ void MainWindow::updateBackgroundStatusLabel()
         if (manualBatchActive) {
             lblBackgroundStatus->setVisible(true);
             lblBackgroundStatus->setStyleSheet(styleBusyLeft);
-            lblBackgroundStatus->setFixedWidth(220);
-            lblBackgroundStatus->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+            lblBackgroundStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             lblBackgroundStatus->setMinimumHeight(lblBackgroundStatus->fontMetrics().height() + 4);
-            lblBackgroundStatus->setText(elideStatusLine(rawText, 208));
+            const int budget = qMax(160, lblBackgroundStatus->width() - 8);
+            lblBackgroundStatus->setText(elideStatusLine(rawText, budget));
         } else {
             lblBackgroundStatus->setVisible(false);
             lblBackgroundStatus->clear();
@@ -1760,6 +1802,7 @@ void MainWindow::applyDualTrackBatchProgressVisibility()
 
     if (batchProgressBar) batchProgressBar->setVisible(manualTrack);
     if (lblBatchStatus) lblBatchStatus->setVisible(manualTrack);
+    if (m_fileListProgressPanel) m_fileListProgressPanel->setVisible(manualTrack);
     if (m_taskCenterBatchProgress) m_taskCenterBatchProgress->setVisible(bgTrack);
 }
 
@@ -1849,9 +1892,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *graphLayout = new QVBoxLayout(m_graphTab);
     graphLayout->setContentsMargins(0, 0, 0, 0);
     m_graphTacticalTitle = new QLabel(QStringLiteral("[戰術情報網絡分析]"), m_graphTab);
-    m_graphTacticalTitle->setStyleSheet(QStringLiteral(
-        "QLabel { font-weight: 800; font-size: 15px; padding: 8px 14px; color: #e2e8f0; "
-        "background: rgba(22,22,30,0.98); border-bottom: 1px solid rgba(255,255,255,28); }"));
+    applyPanelTitleLabelStyle(m_graphTacticalTitle);
     graphLayout->addWidget(m_graphTacticalTitle);
     m_graphWidget = new GraphWidget(&tagManager, m_graphTab);
     graphLayout->addWidget(m_graphWidget, 1);
@@ -2356,21 +2397,17 @@ void MainWindow::updateAllTexts() {
                        && role.startsWith(QStringLiteral("SF_DRAWER:"))) {
                 const QString drawerBracketKey = role.mid(QStringLiteral("SF_DRAWER:").size());
                 const int n = node->data(0, Qt::UserRole + 1).toInt();
-                node->setText(0, QStringLiteral("📁 %1 (%2)").arg(drawerBracketKey).arg(n));
+                node->setText(0, QStringLiteral("(%1) %2").arg(n).arg(aiTagLabelForTreeDisplay(drawerBracketKey)));
             } else if (!role.isEmpty()) {
                 const int n = node->data(0, Qt::UserRole + 1).toInt();
                 const QString canon = normalizeDisplayTag(role);
                 const QString baseZh = node->data(0, Qt::UserRole + 2).toString();
-                const QString emoji = systemTagEmojiPrefix(canon);
-                QString displayName = baseZh.isEmpty()
-                                          ? canon
-                                          : QStringLiteral("%1 %2").arg(emoji, lm.getText(baseZh));
-                displayName = tagLibraryLabelStripAiBadge(displayName.trimmed());
-                const bool isFolder = node->data(0, Qt::UserRole + 3).toInt() == 1;
-                if (isFolder)
-                    node->setText(0, QStringLiteral("📁 %1 (%2)").arg(displayName).arg(n));
-                else
-                    node->setText(0, QStringLiteral("🏷️ %1 (%2)").arg(displayName).arg(n));
+                const QString displayName = aiTagLabelForTreeDisplay(baseZh.isEmpty()
+                                                                          ? canon
+                                                                          : QStringLiteral("%1 %2")
+                                                                                .arg(systemTagEmojiPrefix(canon),
+                                                                                     lm.getText(baseZh)));
+                node->setText(0, QStringLiteral("(%1) %2").arg(n).arg(displayName));
             }
             for (int i = 0; i < node->childCount(); ++i) walk(node->child(i));
         };
@@ -2383,12 +2420,13 @@ void MainWindow::updateAllTexts() {
         cmbTagFilter->setItemText(0, lm.getText(QStringLiteral("All Files")));
     }
 
-    if (lblTags) {
-        const QString zh = QStringLiteral("標籤: --");
-        const QString en = QStringLiteral("Tags: --");
-        if (lblTags->text() == zh || lblTags->text() == en) {
-            lblTags->setText(QStringLiteral("%1: --").arg(lm.getText(QStringLiteral("標籤"))));
-        }
+    if (m_previewInsightTabWidget && m_previewPersonalTagTab && m_previewAiSuggestTab && m_previewAiSummaryTab) {
+        m_previewInsightTabWidget->setTabText(m_previewInsightTabWidget->indexOf(m_previewPersonalTagTab),
+                                              lm.getText(QStringLiteral("個人標籤")));
+        m_previewInsightTabWidget->setTabText(m_previewInsightTabWidget->indexOf(m_previewAiSuggestTab),
+                                              lm.getText(QStringLiteral("AI 智能建議")));
+        m_previewInsightTabWidget->setTabText(m_previewInsightTabWidget->indexOf(m_previewAiSummaryTab),
+                                              lm.getText(QStringLiteral("AI 智慧摘要")));
     }
     if (lblStatus) {
         const QString zh = QStringLiteral("狀態: 就緒");
@@ -2415,12 +2453,8 @@ void MainWindow::updateAllTexts() {
     syncBatchAnalyzeButtonLabel();
     refreshCurrentAnalysisTargetUi();
 
-    if (m_lblSummaryTitle) m_lblSummaryTitle->setText(lm.getText(QStringLiteral("AI 智慧摘要")));
     if (m_aiSummaryEdit) {
         m_aiSummaryEdit->setPlaceholderText(lm.getText(QStringLiteral("尚未分析")));
-        if (m_aiSummaryEdit->toPlainText().trimmed().isEmpty()) {
-            // Keep it empty; placeholder will show.
-        }
     }
 }
 
@@ -2650,6 +2684,7 @@ void MainWindow::setupFourColumnLayout() {
     auto *tagsLayout = new QVBoxLayout(tagsPanel);
     auto *tagsHeader = new QHBoxLayout();
     lblTagLibraryTitle = new QLabel(QStringLiteral("🏷️ 標籤庫"), this);
+    applyPanelTitleLabelStyle(lblTagLibraryTitle);
     tagsHeader->addWidget(lblTagLibraryTitle);
     tagsHeader->addStretch(1);
     chkRecursive = new QCheckBox(QStringLiteral("包含子資料夾"), this);
@@ -2716,6 +2751,7 @@ void MainWindow::setupFourColumnLayout() {
     foldersPanel = new QWidget(this);
     auto *foldersLayout = new QVBoxLayout(foldersPanel);
     lblFolderTreeTitle = new QLabel(QStringLiteral("🗂️ 資料夾樹"), this);
+    applyPanelTitleLabelStyle(lblFolderTreeTitle);
     foldersLayout->addWidget(lblFolderTreeTitle);
 
     auto *navRow = new QHBoxLayout();
@@ -2806,18 +2842,16 @@ void MainWindow::setupFourColumnLayout() {
     auto *filesLayout = new QVBoxLayout(filesPanel);
     auto *fileTitleRow = new QHBoxLayout();
     lblFileListTitle = new QLabel(QStringLiteral("📂 檔案清單"), this);
+    applyPanelTitleLabelStyle(lblFileListTitle);
     fileTitleRow->addWidget(lblFileListTitle, 0);
-    fileTitleRow->addSpacerItem(
-        new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Minimum));
+    fileTitleRow->addSpacing(8);
     lblBackgroundStatus = new QLabel(this);
     lblBackgroundStatus->setVisible(false);
     lblBackgroundStatus->setWordWrap(false);
-    lblBackgroundStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    lblBackgroundStatus->setFixedWidth(220);
-    lblBackgroundStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    lblBackgroundStatus->setStyleSheet(QStringLiteral(
-        "QLabel { color:#1d4ed8; font-weight:700; font-size:14px; padding-left:12px; }"));
-    fileTitleRow->addWidget(lblBackgroundStatus, 0, Qt::AlignRight | Qt::AlignVCenter);
+    lblBackgroundStatus->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    lblBackgroundStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    lblBackgroundStatus->setStyleSheet(sfFileListAnalysisStatusStyleSheet());
+    fileTitleRow->addWidget(lblBackgroundStatus, 1, Qt::AlignLeft | Qt::AlignVCenter);
 
     m_btnRestartBackgroundAnalyze = new QPushButton(this);
     m_btnRestartBackgroundAnalyze->setVisible(false);
@@ -2832,15 +2866,21 @@ void MainWindow::setupFourColumnLayout() {
 
     filesLayout->addLayout(fileTitleRow);
 
-    lblCurrentTarget = new QLabel(this);
+    m_fileListTargetSlot = new QWidget(this);
+    m_fileListTargetSlot->setFixedHeight(28);
+    m_fileListTargetSlot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auto *targetSlotLayout = new QVBoxLayout(m_fileListTargetSlot);
+    targetSlotLayout->setContentsMargins(0, 0, 0, 0);
+    targetSlotLayout->setSpacing(0);
+    lblCurrentTarget = new QLabel(m_fileListTargetSlot);
     lblCurrentTarget->setWordWrap(false);
     lblCurrentTarget->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    lblCurrentTarget->setFixedHeight(lblCurrentTarget->fontMetrics().height() + 6);
-    lblCurrentTarget->setMinimumWidth(280);
     lblCurrentTarget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    lblCurrentTarget->setText(QStringLiteral("—"));
     lblCurrentTarget->setStyleSheet(QStringLiteral(
-        "QLabel { color: palette(windowText); font-size: 13px; padding: 2px 0 6px 0; }"));
-    filesLayout->addWidget(lblCurrentTarget);
+        "QLabel { color: palette(mid); font-size: 13px; padding: 2px 0 6px 0; }"));
+    targetSlotLayout->addWidget(lblCurrentTarget);
+    filesLayout->addWidget(m_fileListTargetSlot);
 
     m_semanticGlobalBanner = new QLabel(this);
     m_semanticGlobalBanner->setWordWrap(true);
@@ -2869,15 +2909,18 @@ void MainWindow::setupFourColumnLayout() {
     cmbSort->addItem(QStringLiteral("依名稱"));
     cmbSort->addItem(QStringLiteral("依日期"));
     cmbSort->addItem(QStringLiteral("依大小"));
-    cmbSort->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    cmbSort->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    cmbSort->setMaximumWidth(132);
     connect(cmbSort, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onSortChanged);
-    fileControlsRow->addWidget(cmbSort, 1);
+    fileControlsRow->addWidget(cmbSort, 0);
 
     cmbTagFilter = new QComboBox(this);
     cmbTagFilter->addItem(LanguageManager::instance().getText(QStringLiteral("All Files")), QStringLiteral("ALL"));
     cmbTagFilter->setToolTip(QStringLiteral("🏷️ 標籤篩選"));
-    cmbTagFilter->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    fileControlsRow->addWidget(cmbTagFilter, 2);
+    cmbTagFilter->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    cmbTagFilter->setMaximumWidth(168);
+    fileControlsRow->addWidget(cmbTagFilter, 0);
+    fileControlsRow->addStretch(1);
 
     btnBatchAnalyze = new QPushButton(QStringLiteral("資料夾分析"), this);
     btnBatchAnalyze->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
@@ -2978,6 +3021,45 @@ void MainWindow::setupFourColumnLayout() {
     loadRow->addStretch(1);
     filesLayout->addLayout(loadRow);
 
+    m_fileListProgressPanel = new QWidget(this);
+    m_fileListProgressPanel->setVisible(false);
+    m_fileListProgressPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_fileListProgressPanel->setFixedHeight(52);
+    auto *fileProgressLayout = new QVBoxLayout(m_fileListProgressPanel);
+    fileProgressLayout->setContentsMargins(0, 4, 0, 0);
+    fileProgressLayout->setSpacing(4);
+
+    batchProgressBar = new QProgressBar(m_fileListProgressPanel);
+    batchProgressBar->setVisible(false);
+    batchProgressBar->setTextVisible(true);
+    batchProgressBar->setFixedHeight(24);
+    batchProgressBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    batchProgressBar->setFormat(QStringLiteral("%p%"));
+    batchProgressBar->setAlignment(Qt::AlignCenter);
+    batchProgressBar->setStyleSheet(QStringLiteral(
+        "QProgressBar {"
+        "  border: 1px solid rgba(255,255,255,70);"
+        "  border-radius: 8px;"
+        "  background: rgba(255,255,255,10);"
+        "  padding: 2px;"
+        "  color: rgba(255,255,255,230);"
+        "  font-weight: 600;"
+        "}"
+        "QProgressBar::chunk {"
+        "  background: #2b6cb0;"
+        "  border-radius: 6px;"
+        "  margin: 0px;"
+        "}"));
+    fileProgressLayout->addWidget(batchProgressBar);
+
+    lblBatchStatus = new QLabel(m_fileListProgressPanel);
+    lblBatchStatus->setVisible(false);
+    lblBatchStatus->setWordWrap(false);
+    lblBatchStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    lblBatchStatus->setStyleSheet(QStringLiteral("QLabel { color: #e2e8f0; font-size: 12px; }"));
+    fileProgressLayout->addWidget(lblBatchStatus);
+    filesLayout->addWidget(m_fileListProgressPanel, 0);
+
     btnLoadMore->hide();
     btnLoadAll->hide();
     connect(btnLoadMore, &QPushButton::clicked, this, [this]() { renderFileListBatch(BATCH_SIZE); });
@@ -2995,37 +3077,67 @@ void MainWindow::setupFourColumnLayout() {
 
     // --- Column 4: Preview ---
     previewPanel = new QWidget(this);
+    previewPanel->setMinimumWidth(380);
     previewPanel->setMaximumWidth(520);
+    previewPanel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     auto *previewLayout = new QVBoxLayout(previewPanel);
-    previewLayout->setSizeConstraint(QLayout::SetMinimumSize);
     lblPreviewTitle = new QLabel(QStringLiteral("👁️ 預覽與控制"), this);
+    applyPanelTitleLabelStyle(lblPreviewTitle);
     previewLayout->addWidget(lblPreviewTitle);
 
-    lblPreviewImage = new ScaledPreviewImageLabel(this);
+    m_previewBodyStack = new QStackedWidget(this);
+    m_previewBodyStack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_previewBodyStack->setFixedHeight(200);
+
+    lblPreviewImage = new ScaledPreviewImageLabel(m_previewBodyStack);
     lblPreviewImage->setText(QStringLiteral("選擇檔案以預覽"));
     lblPreviewImage->setStyleSheet(QStringLiteral("border: 1px dashed gray;"));
-    previewLayout->addWidget(lblPreviewImage, 0, Qt::AlignTop);
+    m_previewBodyStack->addWidget(lblPreviewImage);
 
-    m_previewTextScroll = new QScrollArea(this);
+    m_previewTextScroll = new QScrollArea(m_previewBodyStack);
     m_previewTextScroll->setWidgetResizable(true);
     m_previewTextScroll->setFrameShape(QFrame::NoFrame);
     m_previewTextScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_previewTextScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    m_previewTextScroll->setMaximumHeight(280);
-    m_previewTextScroll->setVisible(false);
-    txtPreviewText = new QTextEdit(this);
+    txtPreviewText = new QTextEdit(m_previewTextScroll);
     txtPreviewText->setReadOnly(true);
     txtPreviewText->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
     txtPreviewText->setLineWrapMode(QTextEdit::WidgetWidth);
     m_previewTextScroll->setWidget(txtPreviewText);
-    previewLayout->addWidget(m_previewTextScroll, 1);
+    m_previewBodyStack->addWidget(m_previewTextScroll);
+    previewLayout->addWidget(m_previewBodyStack, 0);
 
-    lblTags = new QLabel(QStringLiteral("標籤: --"), this);
-    lblTags->setWordWrap(true);
-    lblTags->setStyleSheet(QStringLiteral("font-weight: bold; margin-top: 8px;"));
-    previewLayout->addWidget(lblTags);
+    m_previewInsightTabWidget = new QTabWidget(this);
+    m_previewInsightTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_previewInsightTabWidget->setFixedHeight(104);
+
+    m_previewPersonalTagTab = new QWidget(this);
+    auto *personalTagLayout = new QVBoxLayout(m_previewPersonalTagTab);
+    personalTagLayout->setContentsMargins(6, 6, 6, 6);
+    m_personalTagsView = makePreviewInsightTextView(m_previewPersonalTagTab);
+    personalTagLayout->addWidget(m_personalTagsView);
+    m_previewInsightTabWidget->addTab(m_previewPersonalTagTab, QStringLiteral("個人標籤"));
+
+    m_previewAiSuggestTab = new QWidget(this);
+    auto *aiSuggestLayout = new QVBoxLayout(m_previewAiSuggestTab);
+    aiSuggestLayout->setContentsMargins(6, 6, 6, 6);
+    m_aiSuggestionsView = makePreviewInsightTextView(m_previewAiSuggestTab);
+    aiSuggestLayout->addWidget(m_aiSuggestionsView);
+    m_previewInsightTabWidget->addTab(m_previewAiSuggestTab, QStringLiteral("AI 智能建議"));
+
+    m_previewAiSummaryTab = new QWidget(this);
+    auto *aiSummaryLayout = new QVBoxLayout(m_previewAiSummaryTab);
+    aiSummaryLayout->setContentsMargins(6, 6, 6, 6);
+    m_aiSummaryEdit = makePreviewInsightTextView(m_previewAiSummaryTab);
+    m_aiSummaryEdit->setAcceptRichText(false);
+    m_aiSummaryEdit->setPlaceholderText(QStringLiteral("尚未分析"));
+    aiSummaryLayout->addWidget(m_aiSummaryEdit);
+    m_previewInsightTabWidget->addTab(m_previewAiSummaryTab, QStringLiteral("AI 智慧摘要"));
+    previewLayout->addWidget(m_previewInsightTabWidget, 0);
 
     m_statusRow = new QWidget(this);
+    m_statusRow->setFixedHeight(28);
+    m_statusRow->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto *statusHBox = new QHBoxLayout(m_statusRow);
     statusHBox->setContentsMargins(0, 0, 0, 0);
     statusHBox->setSpacing(8);
@@ -3037,48 +3149,6 @@ void MainWindow::setupFourColumnLayout() {
     lblStatus->setWordWrap(true);
     statusHBox->addWidget(lblStatus, 1);
     previewLayout->addWidget(m_statusRow);
-
-    m_lblSummaryTitle = new QLabel(QStringLiteral("AI 智慧摘要"), this);
-    m_lblSummaryTitle->setStyleSheet(QStringLiteral("font-weight: 700; margin-top: 10px;"));
-    previewLayout->addWidget(m_lblSummaryTitle);
-
-    m_aiSummaryEdit = new QTextEdit(this);
-    m_aiSummaryEdit->setReadOnly(true);
-    m_aiSummaryEdit->setAcceptRichText(false);
-    m_aiSummaryEdit->setFixedHeight(88);
-    m_aiSummaryEdit->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_aiSummaryEdit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_aiSummaryEdit->setPlaceholderText(QStringLiteral("尚未分析"));
-    previewLayout->addWidget(m_aiSummaryEdit);
-
-    batchProgressBar = new QProgressBar(this);
-    batchProgressBar->setVisible(false);
-    batchProgressBar->setTextVisible(true);
-    batchProgressBar->setFixedHeight(24);
-    batchProgressBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    batchProgressBar->setFormat(QStringLiteral("%p%"));
-    batchProgressBar->setAlignment(Qt::AlignCenter);
-    // Ensure visible on dark backgrounds (macOS can be subtle at 0%).
-    batchProgressBar->setStyleSheet(QStringLiteral(
-        "QProgressBar {"
-        "  border: 1px solid rgba(255,255,255,70);"
-        "  border-radius: 8px;"
-        "  background: rgba(255,255,255,10);"
-        "  padding: 2px;"               /* inner gap between border and fill */
-        "  color: rgba(255,255,255,230);"
-        "  font-weight: 600;"
-        "}"
-        "QProgressBar::chunk {"
-        "  background: #2b6cb0;"
-        "  border-radius: 6px;"
-        "  margin: 0px;"                /* keep fill flush within padded area */
-        "}"));
-    previewLayout->addWidget(batchProgressBar);
-
-    lblBatchStatus = new QLabel(QString(), this);
-    lblBatchStatus->setVisible(false);
-    lblBatchStatus->setWordWrap(true);
-    previewLayout->addWidget(lblBatchStatus);
 
     // ===== Tabbed controls (Tag Management / File Operations) =====
     m_previewTabWidget = new QTabWidget(this);
@@ -4740,26 +4810,22 @@ void MainWindow::updateTagListCountsOnly() {
                     if (ch) sum += ch->data(0, Qt::UserRole + 1).toInt();
                 }
                 const QString dk = role.mid(QStringLiteral("SF_DRAWER:").size());
-                const QString label = dk;
                 it->setData(0, Qt::UserRole + 1, sum);
-                it->setText(0, QStringLiteral("📁 %1 (%2)").arg(label).arg(sum));
+                it->setText(0, QStringLiteral("(%1) %2").arg(sum).arg(aiTagLabelForTreeDisplay(dk)));
                 for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
                 return;
             }
             const QString canon = normalizeDisplayTag(role);
             const int n = countTaggedFilesInWorkspace(canon);
             const QString baseZh = systemTagBaseZh(canon);
-            const QString emoji = systemTagEmojiPrefix(canon);
-            const QString displayName = baseZh.isEmpty()
-                                            ? canon
-                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-            const QString nice = tagLibraryLabelStripAiBadge(displayName).trimmed();
+            const QString nice = aiTagLabelForTreeDisplay(baseZh.isEmpty()
+                                                              ? canon
+                                                              : QStringLiteral("%1 %2")
+                                                                    .arg(systemTagEmojiPrefix(canon),
+                                                                         LanguageManager::instance().getText(baseZh)));
             it->setData(0, Qt::UserRole + 1, n);
             it->setData(0, Qt::UserRole + 2, baseZh);
-            if (isFolder)
-                it->setText(0, QStringLiteral("📁 %1 (%2)").arg(nice).arg(n));
-            else
-                it->setText(0, QStringLiteral("🏷️ %1 (%2)").arg(nice).arg(n));
+            it->setText(0, QStringLiteral("(%1) %2").arg(n).arg(nice));
             for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
         };
         for (int i = 0; i < tree->topLevelItemCount(); ++i) walk(tree->topLevelItem(i));
@@ -4915,7 +4981,7 @@ void MainWindow::updateTagList() {
             int sumFiles = 0;
             for (const QString &lf : drawerToLeaves.value(drawerKey))
                 sumFiles += countFor(lf);
-            root->setText(0, QStringLiteral("📁 %1 (%2)").arg(labelText).arg(sumFiles));
+            root->setText(0, QStringLiteral("(%1) %2").arg(sumFiles).arg(aiTagLabelForTreeDisplay(labelText)));
             root->setData(0, Qt::UserRole, QStringLiteral("SF_DRAWER:%1").arg(drawerKey));
             root->setData(0, kKindRole, kKindFolder);
             root->setData(0, Qt::UserRole + 1, sumFiles);
@@ -4924,13 +4990,13 @@ void MainWindow::updateTagList() {
             for (const QString &leaf : drawerToLeaves.value(drawerKey)) {
                 const int n = countFor(leaf);
                 const QString baseZh = systemTagBaseZh(leaf);
-                const QString emoji = systemTagEmojiPrefix(leaf);
-                const QString displayName = baseZh.isEmpty()
-                                                ? leaf
-                                                : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-                const QString nice = tagLibraryLabelStripAiBadge(displayName).trimmed();
+                const QString nice = aiTagLabelForTreeDisplay(baseZh.isEmpty()
+                                                                  ? leaf
+                                                                  : QStringLiteral("%1 %2")
+                                                                        .arg(systemTagEmojiPrefix(leaf),
+                                                                             LanguageManager::instance().getText(baseZh)));
                 QTreeWidgetItem *ch = new QTreeWidgetItem(root);
-                ch->setText(0, QStringLiteral("🏷️ %1 (%2)").arg(nice).arg(n));
+                ch->setText(0, QStringLiteral("(%1) %2").arg(n).arg(nice));
                 ch->setData(0, Qt::UserRole, leaf);
                 ch->setData(0, kKindRole, kKindLeaf);
                 ch->setData(0, Qt::UserRole + 1, n);
@@ -4994,11 +5060,11 @@ void MainWindow::syncTagFilterFromTagList() {
             }
             const QString baseZh = node->data(0, Qt::UserRole + 2).toString();
             const QString canon = normalizeDisplayTag(rawTag);
-            const QString emoji = systemTagEmojiPrefix(canon);
-            QString displayName = baseZh.isEmpty()
-                                            ? canon
-                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-            displayName = tagLibraryLabelStripAiBadge(displayName.trimmed());
+            const QString displayName = aiTagLabelForTreeDisplay(baseZh.isEmpty()
+                                                                     ? canon
+                                                                     : QStringLiteral("%1 %2")
+                                                                           .arg(systemTagEmojiPrefix(canon),
+                                                                                LanguageManager::instance().getText(baseZh)));
             cmbTagFilter->addItem(displayName, rawTag);
             for (int i = 0; i < node->childCount(); ++i) walk(node->child(i));
         };
@@ -5746,10 +5812,16 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     const QMimeType mt = db.mimeTypeForFile(fi);
     const QString typeLine = QStringLiteral("[ %1 %2 ]").arg(emojiForMime(mt), mimeDisplay(mt));
     auto *previewImg = dynamic_cast<ScaledPreviewImageLabel *>(lblPreviewImage);
+    const auto showPreviewText = [this]() {
+        if (m_previewBodyStack && m_previewTextScroll)
+            m_previewBodyStack->setCurrentWidget(m_previewTextScroll);
+    };
+    const auto showPreviewImage = [this]() {
+        if (m_previewBodyStack && lblPreviewImage)
+            m_previewBodyStack->setCurrentWidget(lblPreviewImage);
+    };
 
-    lblPreviewImage->setVisible(false);
-    if (m_previewTextScroll)
-        m_previewTextScroll->setVisible(false);
+    showPreviewImage();
     if (previewImg)
         previewImg->clearSourcePixmap();
     if (m_aiSummaryEdit) {
@@ -5762,8 +5834,7 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     }
 
     if (!fi.exists()) {
-        if (m_previewTextScroll)
-            m_previewTextScroll->setVisible(true);
+        showPreviewText();
         txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(檔案不存在)"));
         return;
     }
@@ -5771,11 +5842,10 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     if (mt.name().startsWith(QStringLiteral("image/"))) {
         QPixmap pix(absPath);
         if (!pix.isNull() && previewImg) {
-            lblPreviewImage->setVisible(true);
+            showPreviewImage();
             previewImg->setSourcePixmap(pix);
         } else {
-            if (m_previewTextScroll)
-                m_previewTextScroll->setVisible(true);
+            showPreviewText();
             txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(無法載入圖片)"));
         }
         return;
@@ -5783,8 +5853,7 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
 
     const QString suffix = fi.suffix().toLower();
     if (suffix == QStringLiteral("pdf")) {
-        if (m_previewTextScroll)
-            m_previewTextScroll->setVisible(true);
+        showPreviewText();
         QString content = DocumentParser::extractPdfText(absPath);
         if (content.size() > 2500) content = content.left(2500) + QStringLiteral("...");
         if (content.trimmed().isEmpty()) {
@@ -5795,8 +5864,7 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
         return;
     }
     if (officeZipPreviewSuffixes().contains(suffix)) {
-        if (m_previewTextScroll)
-            m_previewTextScroll->setVisible(true);
+        showPreviewText();
         QString content = DocumentParser::extractTextQString(absPath);
         if (content.size() > 2500) content = content.left(2500) + QStringLiteral("...");
         if (content.trimmed().isEmpty()) {
@@ -5808,8 +5876,7 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
     }
 
     if (mt.name().startsWith(QStringLiteral("text/")) || plainTextFileSuffixes().contains(suffix)) {
-        if (m_previewTextScroll)
-            m_previewTextScroll->setVisible(true);
+        showPreviewText();
         std::ifstream f(absPath.toStdString(), std::ios::binary);
         if (!f.is_open()) {
             txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(無法讀取)"));
@@ -5823,8 +5890,7 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
         return;
     }
 
-    if (m_previewTextScroll)
-        m_previewTextScroll->setVisible(true);
+    showPreviewText();
     txtPreviewText->setPlainText(typeLine + QStringLiteral("\n(%1)")
                                      .arg(LanguageManager::instance().getText(QStringLiteral("二進位檔：不顯示內容"))));
 }
@@ -5891,33 +5957,34 @@ void MainWindow::updateTagDisplayForFile(const QString &absPath) {
         return lm.getText(t);
     };
 
-    QString html;
-    html += QStringLiteral("<div><b>%1</b>: ").arg(displayTag(QStringLiteral("個人標籤")).toHtmlEscaped());
+    QString personalHtml;
     if (manualTags.isEmpty()) {
-        html += QStringLiteral("<span style='color:#888'>(%1)</span>").arg(displayTag(QStringLiteral("無")).toHtmlEscaped());
+        personalHtml = QStringLiteral("<span style='color:#888'>(%1)</span>")
+                           .arg(displayTag(QStringLiteral("無")).toHtmlEscaped());
     } else {
         for (const QString &t : manualTags) {
-            html += QStringLiteral("<span style='background:#444; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>%1</span>")
-                        .arg(displayTag(t).toHtmlEscaped());
+            personalHtml += QStringLiteral("<span style='background:#444; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>%1</span>")
+                                .arg(displayTag(t).toHtmlEscaped());
         }
     }
-    html += QStringLiteral("</div>");
 
-    html += QStringLiteral("<div style='margin-top:6px;'><b>%1</b>: ")
-                .arg(displayTag(QStringLiteral("AI 智能建議")).toHtmlEscaped());
+    QString aiHtml;
     if (aiShown.isEmpty()) {
-        html += QStringLiteral("<span style='color:#888'>(%1)</span>").arg(displayTag(QStringLiteral("無")).toHtmlEscaped());
+        aiHtml = QStringLiteral("<span style='color:#888'>(%1)</span>")
+                     .arg(displayTag(QStringLiteral("無")).toHtmlEscaped());
     } else {
         for (const QString &t : aiShown) {
             const QString chip = tagChipDisplayStripLeadingEmoji(
                 QStringLiteral("[AI] %1").arg(displayTag(t)));
-            html += QStringLiteral("<span style='background:#2b6cb0; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>%1</span>")
-                        .arg(chip.toHtmlEscaped());
+            aiHtml += QStringLiteral("<span style='background:#2b6cb0; color:#fff; padding:2px 6px; border-radius:8px; margin-right:6px;'>%1</span>")
+                          .arg(chip.toHtmlEscaped());
         }
     }
-    html += QStringLiteral("</div>");
 
-    lblTags->setText(html);
+    if (m_personalTagsView)
+        m_personalTagsView->setHtml(personalHtml);
+    if (m_aiSuggestionsView)
+        m_aiSuggestionsView->setHtml(aiHtml);
 }
 
 QString MainWindow::historicalTagsString() const {

@@ -233,6 +233,7 @@ private:
     QWidget *filesPanel = nullptr;
     QLabel *lblFileListTitle = nullptr;
     QLabel *lblCurrentTarget = nullptr;
+    QWidget *m_fileListTargetSlot = nullptr;
     QLabel *m_semanticGlobalBanner = nullptr;
     QPushButton *m_btnSaveSemanticResultsAsCategory = nullptr;
     QWidget *m_bgQueueFloatingMonitor = nullptr;
@@ -247,18 +248,24 @@ private:
     QStackedWidget *m_fileListPageStack = nullptr;
     QPushButton *btnLoadMore = nullptr;
     QPushButton *btnLoadAll = nullptr;
+    QWidget *m_fileListProgressPanel = nullptr;
 
     // Column 4: Preview & Controls
     QWidget *previewPanel = nullptr;
     QLabel *lblPreviewTitle = nullptr;
     QLabel *lblPreviewImage = nullptr;
     QScrollArea *m_previewTextScroll = nullptr;
+    QStackedWidget *m_previewBodyStack = nullptr;
     QTextEdit *txtPreviewText = nullptr;
-    QLabel *lblTags = nullptr;
+    QTabWidget *m_previewInsightTabWidget = nullptr;
+    QWidget *m_previewPersonalTagTab = nullptr;
+    QWidget *m_previewAiSuggestTab = nullptr;
+    QWidget *m_previewAiSummaryTab = nullptr;
+    QTextEdit *m_personalTagsView = nullptr;
+    QTextEdit *m_aiSuggestionsView = nullptr;
     QWidget *m_statusRow = nullptr;
     BusyChip *m_statusBusyChip = nullptr;
     QLabel *lblStatus = nullptr;
-    QLabel *m_lblSummaryTitle = nullptr;
     QTextEdit *m_aiSummaryEdit = nullptr;
     QPushButton *btnBatchAnalyze = nullptr;
     QPushButton *btnStopBatchAnalyze = nullptr;
