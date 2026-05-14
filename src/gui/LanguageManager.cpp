@@ -78,6 +78,10 @@ QString LanguageManager::getText(const QString &key) const {
         return en ? QStringLiteral("For safety, physical archive is not allowed on system root, user home, or Desktop. Choose a dedicated project folder.")
                   : QStringLiteral("為保護系統安全，禁止對系統核心、使用者根目錄或桌面執行全域實體歸檔；請指定專用工作資料夾。");
     }
+    if (key == QStringLiteral("physical_archive_no_moves")) {
+        return en ? QStringLiteral("No tagged files are ready to archive in this workspace.")
+                  : QStringLiteral("目前工作區沒有可歸檔的已標記檔案。");
+    }
 
     if (key == QStringLiteral("btn_scan")) return en ? QStringLiteral("Start Analysis") : QStringLiteral("開始分析");
 
@@ -223,6 +227,11 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("在資料夾中顯示")) return en ? QStringLiteral("Reveal in Folder") : QStringLiteral("在資料夾中顯示");
     if (key == QStringLiteral("刪除")) return en ? QStringLiteral("Delete") : QStringLiteral("刪除");
     if (key == QStringLiteral("新的檔名：")) return en ? QStringLiteral("New filename:") : QStringLiteral("新的檔名：");
+
+    if (key == QStringLiteral("副檔名分類")) return en ? QStringLiteral("Extension Classification") : QStringLiteral("副檔名分類");
+    if (key == QStringLiteral("預設標籤分類 (18大類)")) {
+        return en ? QStringLiteral("Default Categories (18)") : QStringLiteral("預設標籤分類 (18大類)");
+    }
 
     if (key == QStringLiteral("預設分類 (System Tags)")) return en ? QStringLiteral("System Tags") : QStringLiteral("預設分類 (System Tags)");
     if (key == QStringLiteral("AI 標籤 (AI Tags)")) return en ? QStringLiteral("AI Tags") : QStringLiteral("AI 標籤 (AI Tags)");

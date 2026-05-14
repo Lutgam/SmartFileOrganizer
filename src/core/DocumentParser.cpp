@@ -6,7 +6,10 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QMimeDatabase>
+#include <QMimeType>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStringList>
 #include <QThread>
 #include <QXmlStreamReader>
@@ -471,12 +474,50 @@ static QString extractPdfBinaryHeuristic(const QString &filePath)
     return out.simplified().trimmed();
 }
 
-static QString buildPdfMetadataContext(const QString &filePath)
+static QString buildFileMetadataContext(const QString &filePath)
 {
     const QFileInfo fi(filePath);
-    return QStringLiteral("已讀取 PDF 檔名與屬性進行智能分類。檔名: %1，大小: %2 bytes")
-        .arg(fi.fileName())
-        .arg(fi.size());
+    const QMimeType mt = QMimeDatabase().mimeTypeForFile(fi);
+    return QStringLiteral("已讀取 Metadata 進行智能分類。檔名: %1，副檔名: %2，MIME: %3，大小: %4 bytes")
+        .arg(fi.fileName(), fi.suffix().toLower(), mt.name(), QString::number(fi.size()));
+}
+
+static bool sfExtractLooksLowQuality(const QString &text, const QString &suffix)
+{
+    const QString t = text.trimmed();
+    if (t.isEmpty())
+        return true;
+    if (t.size() < 12)
+        return true;
+
+    int meaningful = 0;
+    int total = 0;
+    for (const QChar &c : t) {
+        if (c.isSpace())
+            continue;
+        ++total;
+        const ushort u = c.unicode();
+        if (c.isLetterOrNumber() || (u >= 0x4E00 && u <= 0x9FFF))
+            ++meaningful;
+    }
+    if (total > 0 && meaningful * 4 < total)
+        return true;
+
+    static const QSet<QString> richOfficeSuffixes = {
+        QStringLiteral("docx"), QStringLiteral("docm"), QStringLiteral("dotx"), QStringLiteral("dotm"),
+        QStringLiteral("xlsx"), QStringLiteral("xlsm"), QStringLiteral("xltx"), QStringLiteral("xltm"),
+        QStringLiteral("pptx"), QStringLiteral("pptm"), QStringLiteral("potx"), QStringLiteral("potm"),
+        QStringLiteral("odt"),  QStringLiteral("ods"),  QStringLiteral("odp"),  QStringLiteral("epub"),
+    };
+    if (richOfficeSuffixes.contains(suffix) && t.size() < 24)
+        return true;
+
+    return false;
+}
+
+static QString buildPdfMetadataContext(const QString &filePath)
+{
+    return buildFileMetadataContext(filePath);
 }
 
 QString DocumentParser::sanitizeTextForAi(const QString &text)
@@ -539,6 +580,17 @@ QString DocumentParser::extractTextForAi(const QString &filePath, bool *pdfMetad
         }
     } else {
         text = sanitizeTextForAi(extractTextQString(abs));
+        static const QSet<QString> metadataFallbackSuffixes = {
+            QStringLiteral("docx"), QStringLiteral("docm"), QStringLiteral("dotx"), QStringLiteral("dotm"),
+            QStringLiteral("xlsx"), QStringLiteral("xlsm"), QStringLiteral("xltx"), QStringLiteral("xltm"),
+            QStringLiteral("pptx"), QStringLiteral("pptm"), QStringLiteral("potx"), QStringLiteral("potm"),
+            QStringLiteral("odt"),  QStringLiteral("ods"),  QStringLiteral("odp"),  QStringLiteral("epub"),
+        };
+        if (metadataFallbackSuffixes.contains(suffix) && sfExtractLooksLowQuality(text, suffix)) {
+            text = buildFileMetadataContext(abs);
+            if (pdfMetadataOnly)
+                *pdfMetadataOnly = true;
+        }
     }
     return truncateForAi(text, kAiTextMaxChars);
 }

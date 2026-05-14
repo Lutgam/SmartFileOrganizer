@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QAbstractItemView>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -92,7 +93,11 @@ RedundancyReportDialog::RedundancyReportDialog(QWidget *parent,
     m_tree = new QTreeWidget(this);
     m_tree->setColumnCount(1);
     m_tree->setHeaderHidden(true);
+    m_tree->setTextElideMode(Qt::ElideNone);
+    m_tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_tree->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_tree->header()->setStretchLastSection(true);
+    m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     layout->addWidget(m_tree, 1);
 
     appendHashSection(hashToPaths);
@@ -110,7 +115,7 @@ RedundancyReportDialog::RedundancyReportDialog(QWidget *parent,
     btnRow->addWidget(btnClose);
     layout->addLayout(btnRow);
 
-    resize(820, 480);
+    resize(1024, 520);
 }
 
 void RedundancyReportDialog::appendHashSection(const QMap<QString, QSet<QString>> &hashToPaths)
@@ -144,6 +149,7 @@ void RedundancyReportDialog::appendHashSection(const QMap<QString, QSet<QString>
             auto *row = new QTreeWidgetItem(grp, {QString()});
             auto *cb = new QCheckBox(displayPathStripDrawerEmoji(path), m_tree);
             cb->setProperty("absPath", path);
+            cb->setToolTip(path);
             cb->setChecked(false);
             m_tree->setItemWidget(row, 0, cb);
         }
@@ -185,6 +191,7 @@ void RedundancyReportDialog::appendNameConflictSection(const QMap<QString, QSet<
             auto *row = new QTreeWidgetItem(grp, {QString()});
             auto *cb = new QCheckBox(displayPathStripDrawerEmoji(path), m_tree);
             cb->setProperty("absPath", path);
+            cb->setToolTip(path);
             cb->setChecked(false);
             m_tree->setItemWidget(row, 0, cb);
         }

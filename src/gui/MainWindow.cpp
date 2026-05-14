@@ -1272,6 +1272,7 @@ void MainWindow::refreshTaskCenterRedundancyTreeUi()
         auto *row = new QTreeWidgetItem(grp, {QString()});
         auto *cb = new QCheckBox(displayPath, m_taskCenterRedundancyTree);
         cb->setProperty("absPath", path);
+        cb->setToolTip(path);
         cb->setChecked(false);
         cb->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Preferred);
         m_taskCenterRedundancyTree->setItemWidget(row, 0, cb);
@@ -1364,8 +1365,8 @@ void MainWindow::refreshTaskCenterRedundancyTreeUi()
     }
 
     if (maxPathWidthPx > 0) {
-        m_taskCenterRedundancyTree->header()->resizeSection(0, maxPathWidthPx);
-        m_taskCenterRedundancyTree->resizeColumnToContents(0);
+        m_taskCenterRedundancyTree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+        m_taskCenterRedundancyTree->header()->resizeSection(0, qMax(maxPathWidthPx, m_taskCenterRedundancyTree->viewport()->width()));
     }
 
     if (vsb) {
@@ -1663,6 +1664,8 @@ void MainWindow::refreshCurrentAnalysisTargetUi()
     if (fileListMode == FileListMode::SemanticResults) {
         const QString banner =
             QStringLiteral("🔍 跨資料夾全域搜尋結果 (虛擬視圖) — 已脫離實體資料夾範圍");
+        lblCurrentTarget->setStyleSheet(QStringLiteral(
+            "QLabel { color: palette(windowText); font-size: 13px; padding: 2px 0 6px 0; }"));
         lblCurrentTarget->setText(fm.elidedText(banner, Qt::ElideRight, budget));
         return;
     }
@@ -1672,6 +1675,8 @@ void MainWindow::refreshCurrentAnalysisTargetUi()
         if (TagManager::hasAiPrefix(tagLabel))
             tagLabel = TagManager::stripAiPrefix(tagLabel);
         const QString banner = QStringLiteral("🏷️ 標籤篩選結果: %1").arg(tagLabel);
+        lblCurrentTarget->setStyleSheet(QStringLiteral(
+            "QLabel { color: palette(windowText); font-size: 13px; padding: 2px 0 6px 0; }"));
         lblCurrentTarget->setText(fm.elidedText(banner, Qt::ElideRight, budget));
         return;
     }
@@ -2270,9 +2275,6 @@ void MainWindow::updateAllTexts() {
     if (btnAnalyzeFile) btnAnalyzeFile->setText(lm.getText(QStringLiteral("btn_analyze")));
     if (btnCancelAnalysis) btnCancelAnalysis->setText(lm.getText(QStringLiteral("btn_cancel")));
     if (btnSaveTags) btnSaveTags->setText(lm.getText(QStringLiteral("btn_save")));
-    if (btnAddTag) btnAddTag->setText(lm.getText(QStringLiteral("btn_add_tag")));
-    if (btnRemoveTag) btnRemoveTag->setText(lm.getText(QStringLiteral("btn_remove_tag")));
-    if (btnAddExistingTag) btnAddExistingTag->setText(lm.getText(QStringLiteral("btn_add_existing_tag")));
     if (btnAutoMergeTags) {
         const QString normalText = lm.language() == LanguageManager::Language::EN_US
                                        ? QStringLiteral("🤖 AI tag folders (Generate Tag Folders)")
@@ -2373,8 +2375,10 @@ void MainWindow::updateAllTexts() {
 
     // Re-render tag list display names (system tags need presentation translation)
     if (m_tagTabWidget && m_systemTagListWidget && m_aiTagTreeWidget) {
-        m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_systemTagListWidget), lm.getText(QStringLiteral("預設分類 (System Tags)")));
-        m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_aiTagTreeWidget), lm.getText(QStringLiteral("AI 標籤 (AI Tags)")));
+        m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_systemTagListWidget),
+                                   lm.getText(QStringLiteral("副檔名分類")));
+        m_tagTabWidget->setTabText(m_tagTabWidget->indexOf(m_aiTagTreeWidget),
+                                   lm.getText(QStringLiteral("預設標籤分類 (18大類)")));
     }
 
     auto refreshTagLibraryList = [&](QListWidget *activeList) {
@@ -2438,9 +2442,7 @@ void MainWindow::updateAllTexts() {
         cmbTagFilter->setItemText(0, lm.getText(QStringLiteral("All Files")));
     }
 
-    if (m_previewInsightTabWidget && m_previewPersonalTagTab && m_previewAiSuggestTab && m_previewAiSummaryTab) {
-        m_previewInsightTabWidget->setTabText(m_previewInsightTabWidget->indexOf(m_previewPersonalTagTab),
-                                              lm.getText(QStringLiteral("個人標籤")));
+    if (m_previewInsightTabWidget && m_previewAiSuggestTab && m_previewAiSummaryTab) {
         m_previewInsightTabWidget->setTabText(m_previewInsightTabWidget->indexOf(m_previewAiSuggestTab),
                                               lm.getText(QStringLiteral("AI 智能建議")));
         m_previewInsightTabWidget->setTabText(m_previewInsightTabWidget->indexOf(m_previewAiSummaryTab),
@@ -2722,33 +2724,9 @@ void MainWindow::setupFourColumnLayout() {
     }
     connect(m_systemTagListWidget, &QListWidget::itemClicked, this, &MainWindow::onTagSelected);
     connect(m_aiTagTreeWidget, &QTreeWidget::itemClicked, this, &MainWindow::onAiTagTreeItemClicked);
-    m_tagTabWidget->addTab(m_systemTagListWidget, LanguageManager::instance().getText(QStringLiteral("預設分類 (System Tags)")));
-    m_tagTabWidget->addTab(m_aiTagTreeWidget, LanguageManager::instance().getText(QStringLiteral("AI 標籤 (AI Tags)")));
+    m_tagTabWidget->addTab(m_systemTagListWidget, LanguageManager::instance().getText(QStringLiteral("副檔名分類")));
+    m_tagTabWidget->addTab(m_aiTagTreeWidget, LanguageManager::instance().getText(QStringLiteral("預設標籤分類 (18大類)")));
     tagsLayout->addWidget(m_tagTabWidget);
-
-    auto *tagButtons = new QHBoxLayout();
-    btnLeftAddTag = new QPushButton(QStringLiteral("➕"), this);
-    btnLeftAddTag->setToolTip(QStringLiteral("新增標籤"));
-    connect(btnLeftAddTag, &QPushButton::clicked, this, [this]() {
-        bool ok = false;
-        const QString t = QInputDialog::getText(this, QStringLiteral("Add Tag"), QStringLiteral("New tag:"), QLineEdit::Normal, QString(), &ok).trimmed();
-        if (!ok || t.isEmpty()) return;
-        const QString fp = currentFilePath();
-        if (!fp.isEmpty()) {
-            QMutexLocker locker(&tagMutex);
-            tagManager.addTag(fp, t, true);
-            tagManager.saveTags();
-        }
-        updateTagList();
-        reloadCurrentFileListPanel();
-    });
-    tagButtons->addWidget(btnLeftAddTag);
-
-    btnLeftRemoveTag = new QPushButton(QStringLiteral("➖"), this);
-    btnLeftRemoveTag->setToolTip(QStringLiteral("刪除標籤（全域）"));
-    connect(btnLeftRemoveTag, &QPushButton::clicked, this, &MainWindow::removeGlobalTag);
-    tagButtons->addWidget(btnLeftRemoveTag);
-    tagsLayout->addLayout(tagButtons);
 
     mainSplitter->addWidget(tagsPanel);
 
@@ -2895,7 +2873,7 @@ void MainWindow::setupFourColumnLayout() {
     m_semanticGlobalBanner->setStyleSheet(QStringLiteral(
         "QLabel { background-color: #fff3cd; color: #856404; border: 1px solid #ffc107; "
         "border-radius: 6px; padding: 8px 10px; font-weight: 600; font-size: 13px; }"));
-    m_btnSaveSemanticResultsAsCategory = new QPushButton(QStringLiteral("💾 儲存為新分類"), this);
+    m_btnSaveSemanticResultsAsCategory = new QPushButton(QStringLiteral("📦 打包/新增為標籤資料夾"), this);
     m_btnSaveSemanticResultsAsCategory->setVisible(false);
     m_btnSaveSemanticResultsAsCategory->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
     connect(m_btnSaveSemanticResultsAsCategory, &QPushButton::clicked, this,
@@ -3086,9 +3064,16 @@ void MainWindow::setupFourColumnLayout() {
     previewPanel->setMaximumWidth(520);
     previewPanel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     auto *previewLayout = new QVBoxLayout(previewPanel);
+    auto *previewHeaderRow = new QHBoxLayout();
     lblPreviewTitle = new QLabel(QStringLiteral("👁️ 預覽與控制"), this);
     applyPanelTitleLabelStyle(lblPreviewTitle);
-    previewLayout->addWidget(lblPreviewTitle);
+    previewHeaderRow->addWidget(lblPreviewTitle, 0);
+    m_previewPersonalTagsHeader = makePreviewInsightTextView(previewPanel);
+    m_previewPersonalTagsHeader->setFixedHeight(28);
+    m_previewPersonalTagsHeader->setMaximumHeight(32);
+    m_previewPersonalTagsHeader->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    previewHeaderRow->addWidget(m_previewPersonalTagsHeader, 1);
+    previewLayout->addLayout(previewHeaderRow);
 
     m_previewBodyStack = new QStackedWidget(this);
     m_previewBodyStack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -3115,13 +3100,6 @@ void MainWindow::setupFourColumnLayout() {
     m_previewInsightTabWidget = new QTabWidget(this);
     m_previewInsightTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_previewInsightTabWidget->setFixedHeight(104);
-
-    m_previewPersonalTagTab = new QWidget(this);
-    auto *personalTagLayout = new QVBoxLayout(m_previewPersonalTagTab);
-    personalTagLayout->setContentsMargins(6, 6, 6, 6);
-    m_personalTagsView = makePreviewInsightTextView(m_previewPersonalTagTab);
-    personalTagLayout->addWidget(m_personalTagsView);
-    m_previewInsightTabWidget->addTab(m_previewPersonalTagTab, QStringLiteral("個人標籤"));
 
     m_previewAiSuggestTab = new QWidget(this);
     auto *aiSuggestLayout = new QVBoxLayout(m_previewAiSuggestTab);
@@ -3171,21 +3149,6 @@ void MainWindow::setupFourColumnLayout() {
     tagRow1->addWidget(btnSaveTags);
     tagRow1->addStretch(1);
     tagGroupLayout->addLayout(tagRow1);
-
-    auto *tagRow2 = new QHBoxLayout();
-    btnAddTag = new QPushButton(QStringLiteral("➕ 加入標籤"), this);
-    connect(btnAddTag, &QPushButton::clicked, this, &MainWindow::addTag);
-    tagRow2->addWidget(btnAddTag);
-
-    btnRemoveTag = new QPushButton(QStringLiteral("➖ 移除標籤"), this);
-    connect(btnRemoveTag, &QPushButton::clicked, this, &MainWindow::removeTag);
-    tagRow2->addWidget(btnRemoveTag);
-    tagRow2->addStretch(1);
-    tagGroupLayout->addLayout(tagRow2);
-
-    btnAddExistingTag = new QPushButton(QStringLiteral("🏷️ 加入現有標籤"), this);
-    tagGroupLayout->addWidget(btnAddExistingTag);
-    rebuildAddExistingTagMenu();
 
     auto *forceCategoryRow = new QHBoxLayout();
     m_cmbForceCategory = new QComboBox(this);
@@ -3912,6 +3875,147 @@ static void sfTryRemoveEmptyPhysicalArchiveDrawerDir(const QString &drawerDirRaw
         return;
     dir.rmdir(drawerDir);
 }
+
+struct PhysicalArchivePlanEntry {
+    QString srcPath;
+    QString destFolder;
+};
+
+static bool sfMoveFileForPhysicalArchive(const QString &srcPath, const QString &destPath)
+{
+    if (QFile::exists(destPath))
+        return false;
+    if (!QDir().mkpath(QFileInfo(destPath).absolutePath()))
+        return false;
+
+    QFile f(srcPath);
+    if (!f.exists())
+        return false;
+    if (f.rename(destPath))
+        return true;
+    if (!f.copy(destPath))
+        return false;
+    return f.remove();
+}
+
+static QStringList sfWorkspaceDestinationFolderNames(const QString &workspaceRoot)
+{
+    QStringList out;
+    const QString root = QDir::cleanPath(workspaceRoot);
+    if (root.isEmpty())
+        return out;
+
+    const QStringList dirs = QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QString &name : dirs) {
+        if (name == QStringLiteral(".smartfile"))
+            continue;
+        out << name;
+    }
+    out.removeDuplicates();
+    return out;
+}
+
+static bool sfPromptPhysicalArchivePlan(QWidget *parent,
+                                        const QString &workspaceRoot,
+                                        QList<PhysicalArchivePlanEntry> *entriesInOut)
+{
+    if (!parent || !entriesInOut || entriesInOut->isEmpty())
+        return false;
+
+    QStringList destinationOptions;
+    for (const QString &name : sfWorkspaceDestinationFolderNames(workspaceRoot))
+        destinationOptions << name;
+    for (const QString &k : sfFixedAiClusterDrawerKeys()) {
+        const QString sanitized = sanitizeTagFolderName(k);
+        if (!sanitized.isEmpty() && !destinationOptions.contains(sanitized))
+            destinationOptions << sanitized;
+    }
+
+    QDialog dlg(parent);
+    dlg.setWindowTitle(LanguageManager::instance().getText(QStringLiteral("physical_archive_confirm_title")));
+    dlg.setModal(true);
+    dlg.resize(960, 560);
+    dlg.setMinimumWidth(820);
+
+    auto *layout = new QVBoxLayout(&dlg);
+    auto *intro = new QLabel(
+        LanguageManager::instance().getText(QStringLiteral("physical_archive_confirm_body")).arg(workspaceRoot),
+        &dlg);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+
+    auto *hint = new QLabel(QStringLiteral("勾選「歸檔」的檔案會搬移；取消勾選則略過。目標資料夾可選工作區既有子目錄或預設分類。"),
+                            &dlg);
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+
+    auto *headerRow = new QWidget(&dlg);
+    auto *headerLayout = new QHBoxLayout(headerRow);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->addWidget(new QLabel(QStringLiteral("歸檔"), headerRow), 0);
+    headerLayout->addWidget(new QLabel(QStringLiteral("檔案"), headerRow), 1);
+    headerLayout->addWidget(new QLabel(QStringLiteral("目標資料夾"), headerRow), 1);
+    layout->addWidget(headerRow);
+
+    auto *scroll = new QScrollArea(&dlg);
+    scroll->setWidgetResizable(true);
+    auto *scrollBody = new QWidget(scroll);
+    auto *rowsLayout = new QVBoxLayout(scrollBody);
+    rowsLayout->setContentsMargins(0, 0, 0, 0);
+    rowsLayout->setSpacing(6);
+
+    QVector<QPair<QCheckBox *, QComboBox *>> rowWidgets;
+    rowWidgets.reserve(entriesInOut->size());
+    for (const PhysicalArchivePlanEntry &entry : std::as_const(*entriesInOut)) {
+        auto *row = new QWidget(scrollBody);
+        auto *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+
+        auto *archive = new QCheckBox(QStringLiteral("歸檔"), row);
+        archive->setChecked(true);
+        archive->setToolTip(QStringLiteral("取消勾選則略過此檔案，不進行歸檔。"));
+
+        auto *pathLabel = new QLabel(QFileInfo(entry.srcPath).fileName(), row);
+        pathLabel->setToolTip(entry.srcPath);
+
+        auto *destination = new QComboBox(row);
+        destination->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        for (const QString &opt : std::as_const(destinationOptions))
+            destination->addItem(opt, opt);
+        const int idx = destination->findData(entry.destFolder);
+        destination->setCurrentIndex(idx >= 0 ? idx : destination->findText(entry.destFolder));
+
+        rowLayout->addWidget(archive, 0);
+        rowLayout->addWidget(pathLabel, 1);
+        rowLayout->addWidget(destination, 1);
+        rowsLayout->addWidget(row);
+        rowWidgets.push_back(qMakePair(archive, destination));
+    }
+    scroll->setWidget(scrollBody);
+    layout->addWidget(scroll, 1);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+
+    for (int i = 0; i < entriesInOut->size(); ++i) {
+        const auto &widgets = rowWidgets.at(i);
+        if (widgets.first && !widgets.first->isChecked()) {
+            (*entriesInOut)[i].destFolder.clear();
+            continue;
+        }
+        if (widgets.second) {
+            const QString chosen = widgets.second->currentData().toString().trimmed();
+            (*entriesInOut)[i].destFolder =
+                chosen.isEmpty() ? widgets.second->currentText().trimmed() : chosen;
+        }
+    }
+    return true;
+}
 } // namespace
 
 void MainWindow::physicalArchiveFiles() {
@@ -3940,74 +4044,78 @@ void MainWindow::physicalArchiveFiles() {
         return;
     }
 
-    const int answer = QMessageBox::warning(
-        this,
-        lm.getText(QStringLiteral("physical_archive_confirm_title")),
-        lm.getText(QStringLiteral("physical_archive_confirm_body")).arg(rootPath),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (answer != QMessageBox::Yes) {
+    QList<PhysicalArchivePlanEntry> plan;
+    {
+        std::vector<QString> taggedPaths;
+        {
+            QMutexLocker locker(&tagMutex);
+            taggedPaths = tagManager.taggedFilePaths();
+        }
+
+        for (const QString &pathEntry : taggedPaths) {
+            const QString srcPath = QDir::cleanPath(pathEntry);
+            if (!sfAbsolutePathUnderWorkspaceRoot(srcPath, rootClean))
+                continue;
+
+            std::vector<QString> tagsForFile;
+            {
+                QMutexLocker locker(&tagMutex);
+                tagsForFile = tagManager.getTags(srcPath);
+            }
+
+            const QFileInfo fiSrc(srcPath);
+            if (!fiSrc.exists() || !fiSrc.isFile())
+                continue;
+
+            const QString rel = QDir(rootClean).relativeFilePath(fiSrc.absoluteFilePath());
+            if (rel.startsWith(QStringLiteral("..")))
+                continue;
+            if (rel == QStringLiteral(".smartfile") || rel.startsWith(QStringLiteral(".smartfile/")))
+                continue;
+
+            const QString folderName = sfPhysicalArchiveFolderNameFromAllFileTags(tagsForFile, m_aiTagToDrawerKey);
+            const QString destDir = QDir(rootClean).absoluteFilePath(folderName);
+            if (QDir::cleanPath(fiSrc.absolutePath()) == QDir::cleanPath(destDir))
+                continue;
+
+            PhysicalArchivePlanEntry entry;
+            entry.srcPath = srcPath;
+            entry.destFolder = folderName;
+            plan.push_back(entry);
+        }
+    }
+
+    if (plan.isEmpty()) {
+        QMessageBox::information(this,
+                                 lm.getText(QStringLiteral("physical_archive_confirm_title")),
+                                 lm.getText(QStringLiteral("physical_archive_no_moves")));
         return;
     }
 
+    if (!sfPromptPhysicalArchivePlan(this, rootClean, &plan))
+        return;
+
     m_lastMoveHistory.clear();
-    if (btnUndoPhysicalArchive) {
+    if (btnUndoPhysicalArchive)
         btnUndoPhysicalArchive->setEnabled(false);
-    }
 
     QSet<QString> sourceDirsForCleanup;
-    std::vector<QString> taggedPaths;
-    {
-        QMutexLocker locker(&tagMutex);
-        taggedPaths = tagManager.taggedFilePaths();
-    }
+    for (const PhysicalArchivePlanEntry &entry : std::as_const(plan)) {
+        if (entry.destFolder.trimmed().isEmpty())
+            continue;
 
-    for (const QString &pathEntry : taggedPaths) {
-        const QString srcPath = QDir::cleanPath(pathEntry);
-        if (!sfAbsolutePathUnderWorkspaceRoot(srcPath, rootClean)) continue;
-        std::vector<QString> tagsForFile;
-        {
-            QMutexLocker locker(&tagMutex);
-            tagsForFile = tagManager.getTags(srcPath);
-        }
-
+        const QString srcPath = entry.srcPath;
         const QFileInfo fiSrc(srcPath);
-        if (!fiSrc.exists() || !fiSrc.isFile()) {
-            qDebug() << "physicalArchiveFiles: skip (missing or not a file):" << srcPath;
+        if (!fiSrc.exists() || !fiSrc.isFile())
             continue;
-        }
 
-        const QString rel = QDir(rootClean).relativeFilePath(fiSrc.absoluteFilePath());
-        if (rel.startsWith(QStringLiteral(".."))) {
-            qDebug() << "physicalArchiveFiles: skip (outside root):" << srcPath;
-            continue;
-        }
-        if (rel == QStringLiteral(".smartfile") || rel.startsWith(QStringLiteral(".smartfile/"))) {
-            qDebug() << "physicalArchiveFiles: skip (.smartfile):" << srcPath;
-            continue;
-        }
-
-        const QString folderName = sfPhysicalArchiveFolderNameFromAllFileTags(tagsForFile, m_aiTagToDrawerKey);
-        const QString destDir = QDir(rootClean).absoluteFilePath(folderName);
+        const QString destDir = QDir(rootClean).absoluteFilePath(entry.destFolder);
         const QString destPath = QDir(destDir).absoluteFilePath(fiSrc.fileName());
-
-        if (QDir::cleanPath(fiSrc.absolutePath()) == QDir::cleanPath(destDir)) {
+        if (QDir::cleanPath(fiSrc.absolutePath()) == QDir::cleanPath(destDir))
             continue;
-        }
 
-        if (QFile::exists(destPath)) {
-            qDebug() << "physicalArchiveFiles: skip (target exists):" << destPath;
-            continue;
-        }
-
-        if (!QDir().mkpath(destDir)) {
-            qDebug() << "physicalArchiveFiles: mkpath failed:" << destDir;
-            continue;
-        }
-
-        QFile f(srcPath);
-        if (!f.rename(destPath)) {
-            qDebug() << "physicalArchiveFiles: rename failed" << srcPath << "->" << destPath << f.errorString();
+        if (!sfMoveFileForPhysicalArchive(srcPath, destPath)) {
+            qDebug() << "physicalArchiveFiles: move failed" << srcPath << "->" << destPath;
             continue;
         }
 
@@ -4027,16 +4135,14 @@ void MainWindow::physicalArchiveFiles() {
         tagManager.saveTags();
     }
 
-    if (btnUndoPhysicalArchive) {
+    if (btnUndoPhysicalArchive)
         btnUndoPhysicalArchive->setEnabled(!m_lastMoveHistory.isEmpty());
-    }
 
     scanFiles();
     updateTagList();
     const QString fp = currentFilePath();
-    if (!fp.isEmpty()) {
+    if (!fp.isEmpty())
         updateTagDisplayForFile(fp);
-    }
 }
 
 void MainWindow::undoLastPhysicalArchive() {
@@ -4206,7 +4312,6 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     refreshWorkspacePickerTitle();
     if (m_settingsPanel)
         m_settingsPanel->setRootPath(rootPath);
-    rebuildAddExistingTagMenu();
     sfPersistLastWorkspacePath(rootPath);
 }
 
@@ -5116,7 +5221,6 @@ void MainWindow::updateTagList() {
     }
 
     syncTagFilterFromTagList();
-    rebuildAddExistingTagMenu();
 }
 
 void MainWindow::syncTagFilterFromTagList() {
@@ -5543,56 +5647,91 @@ void MainWindow::onSaveSemanticResultsAsAiCategory()
 {
     if (m_semanticPickedPaths.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("Smartflie"),
-                                 QStringLiteral("目前沒有可儲存的搜尋結果。"));
+                                 QStringLiteral("目前沒有可打包的搜尋結果。"));
+        return;
+    }
+    if (rootPath.trimmed().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("請先開啟工作區。"));
         return;
     }
 
     bool ok = false;
-    QString name = QInputDialog::getText(
+    QString folderName = QInputDialog::getText(
         this,
-        QStringLiteral("儲存為新分類"),
-        QStringLiteral("請輸入新 AI 分類名稱（例如：專案 A）"),
+        QStringLiteral("打包/新增為標籤資料夾"),
+        QStringLiteral("請輸入新資料夾名稱："),
         QLineEdit::Normal,
         QString(),
         &ok);
-    if (!ok) return;
+    if (!ok)
+        return;
 
-    name = TagManager::stripAiPrefix(name.trimmed());
-    if (name.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("分類名稱不可為空。"));
+    folderName = sanitizeTagFolderName(folderName.trimmed());
+    if (folderName.isEmpty() || folderName == QStringLiteral("_未命名標籤")) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("資料夾名稱不可為空。"));
         return;
     }
 
-    const QString newTag = QStringLiteral("[AI] ") + name;
-    int touched = 0;
+    const QString rootClean = QDir::cleanPath(rootPath);
+    const QString destDir = QDir(rootClean).absoluteFilePath(folderName);
+    if (!QDir().mkpath(destDir)) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("無法建立目標資料夾。"));
+        return;
+    }
 
+    m_lastMoveHistory.clear();
+    if (btnUndoPhysicalArchive)
+        btnUndoPhysicalArchive->setEnabled(false);
+
+    QSet<QString> sourceDirsForCleanup;
+    int moved = 0;
+    for (const QString &pathRaw : std::as_const(m_semanticPickedPaths)) {
+        const QString srcPath = QDir::cleanPath(pathRaw);
+        if (srcPath.isEmpty())
+            continue;
+
+        const QFileInfo fiSrc(srcPath);
+        if (!fiSrc.exists() || !fiSrc.isFile())
+            continue;
+        if (!sfAbsolutePathUnderWorkspaceRoot(srcPath, rootClean))
+            continue;
+
+        const QString destPath = QDir(destDir).absoluteFilePath(fiSrc.fileName());
+        if (QDir::cleanPath(fiSrc.absolutePath()) == QDir::cleanPath(destDir))
+            continue;
+        if (!sfMoveFileForPhysicalArchive(srcPath, destPath)) {
+            qDebug() << "onSaveSemanticResultsAsAiCategory: move failed" << srcPath << "->" << destPath;
+            continue;
+        }
+
+        m_lastMoveHistory.push_back(qMakePair(destPath, srcPath));
+        sourceDirsForCleanup.insert(fiSrc.absolutePath());
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.relocateFilePath(srcPath, destPath, false);
+        }
+        ++moved;
+    }
+
+    if (moved <= 0) {
+        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("沒有任何檔案被搬移。"));
+        return;
+    }
+
+    sfCleanupEmptySourceDirsAfterPhysicalArchive(sourceDirsForCleanup, rootClean);
     {
         QMutexLocker locker(&tagMutex);
-        for (const QString &pathRaw : std::as_const(m_semanticPickedPaths)) {
-            const QString path = QDir::cleanPath(pathRaw);
-            if (path.isEmpty()) continue;
-
-            std::vector<QString> kept;
-            kept.reserve(8);
-            for (const QString &t : tagManager.getTags(path)) {
-                if (!TagManager::hasAiPrefix(t))
-                    kept.push_back(t);
-            }
-            kept.push_back(newTag);
-            tagManager.setTags(path, kept);
-            ++touched;
-        }
+        tagManager.saveTags();
     }
 
-    if (touched <= 0) {
-        QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("沒有任何檔案被更新。"));
-        return;
-    }
+    if (btnUndoPhysicalArchive)
+        btnUndoPhysicalArchive->setEnabled(!m_lastMoveHistory.isEmpty());
 
+    scanFiles();
     updateTagList();
     populateSemanticResultFiles();
     if (lblStatus) {
-        lblStatus->setText(QStringLiteral("✅ 已將 %1 個檔案歸類為「%2」。").arg(touched).arg(name));
+        lblStatus->setText(QStringLiteral("✅ 已將 %1 個檔案打包至「%2」。").arg(moved).arg(folderName));
     }
 }
 
@@ -6088,8 +6227,8 @@ void MainWindow::updateTagDisplayForFile(const QString &absPath) {
         }
     }
 
-    if (m_personalTagsView)
-        m_personalTagsView->setHtml(personalHtml);
+    if (m_previewPersonalTagsHeader)
+        m_previewPersonalTagsHeader->setHtml(personalHtml);
     if (m_aiSuggestionsView)
         m_aiSuggestionsView->setHtml(aiHtml);
 }
@@ -6464,17 +6603,17 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
     }
 
     if (zipXmlExtractable.contains(suffix) && suffix != QStringLiteral("pdf")
-        && contentQ.trimmed().isEmpty()) {
+        && contentQ.trimmed().isEmpty() && !pdfMetadataOnly) {
         qDebug() << "MainWindow: extract empty for Office; using filename stub" << suffix << fp;
         contentQ = QStringLiteral("[Text extraction empty — filename: %1]").arg(filename);
     }
 
-    if (suffix == QStringLiteral("pdf") && !pdfMetadataOnly && contentQ.trimmed().size() > 10) {
-        qDebug() << "MainWindow: PDF extracted text length" << contentQ.size() << "for" << fp;
+    if (pdfMetadataOnly && contentQ.trimmed().isEmpty()) {
+        contentQ = QStringLiteral("[Metadata-only classification — filename: %1]").arg(filename);
     }
 
     const bool contentReadable =
-        (!contentQ.trimmed().isEmpty() && !pdfMetadataOnly) || contentQ.trimmed().size() > 10;
+        pdfMetadataOnly || !contentQ.trimmed().isEmpty() || contentQ.trimmed().size() > 10;
     const std::string content = contentQ.toStdString();
 
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析中…")));
@@ -8488,61 +8627,6 @@ void MainWindow::saveTags() {
     btnSaveTags->setEnabled(false);
 }
 
-void MainWindow::addTag() {
-    const QString fp = currentFilePath();
-    if (fp.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
-        return;
-    }
-    bool ok = false;
-    const QString t = QInputDialog::getText(this, QStringLiteral("Add Tag"), QStringLiteral("標籤:"), QLineEdit::Normal, QString(), &ok).trimmed();
-    if (!ok || t.isEmpty()) return;
-
-    {
-        QMutexLocker locker(&tagMutex);
-        tagManager.addTag(fp, t, true);
-        tagManager.saveTags();
-    }
-    updateTagDisplayForFile(fp);
-    updateTagList();
-    reloadCurrentFileListPanel();
-}
-
-void MainWindow::removeTag() {
-    const QString fp = currentFilePath();
-    if (fp.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
-        return;
-    }
-
-    std::vector<QString> tags;
-    {
-        QMutexLocker locker(&tagMutex);
-        tags = tagManager.getTags(fp);
-    }
-    if (tags.empty()) {
-        QMessageBox::information(this, QStringLiteral("Info"), QStringLiteral("無標籤"));
-        return;
-    }
-
-    QStringList items;
-    for (const auto &t : tags) items << t;
-
-    bool ok = false;
-    const QString chosen = QInputDialog::getItem(this, QStringLiteral("Remove"), QStringLiteral("選擇要移除的標籤:"), items, 0, false, &ok);
-    if (!ok || chosen.isEmpty()) return;
-
-    {
-        QMutexLocker locker(&tagMutex);
-        tagManager.removeTag(fp, chosen);
-        tagManager.addRejectedTag(chosen);
-        tagManager.saveTags();
-    }
-    updateTagDisplayForFile(fp);
-    updateTagList();
-    reloadCurrentFileListPanel();
-}
-
 void MainWindow::removeGlobalTag() {
     QString data;
     if (m_tagTabWidget && m_tagTabWidget->currentIndex() == 1) {
@@ -8637,98 +8721,6 @@ void MainWindow::removeGlobalTag() {
     activeVirtualTag.clear();
     updateTagList();
     reloadCurrentFileListPanel();
-}
-
-void MainWindow::rebuildAddExistingTagMenu() {
-    auto *menu = new QMenu(this);
-
-    const QString workspaceRoot = QDir::cleanPath(rootPath);
-    QStringList history;
-    if (!workspaceRoot.isEmpty()) {
-        std::vector<QString> allTags;
-        {
-            QMutexLocker locker(&tagMutex);
-            allTags = tagManager.getAllTags();
-            for (const QString &rawTag : allTags) {
-                const std::vector<QString> files = tagManager.getFilesByTag(rawTag);
-                bool usedInWorkspace = false;
-                for (const QString &p : files) {
-                    if (sfAbsolutePathUnderWorkspaceRoot(p, workspaceRoot)) {
-                        usedInWorkspace = true;
-                        break;
-                    }
-                }
-                if (!usedInWorkspace)
-                    continue;
-                history << normalizeDisplayTag(rawTag);
-            }
-        }
-    }
-    history.removeDuplicates();
-
-    auto addCategory = [&](const QString &name, const QStringList &preset) {
-        QMenu *sub = menu->addMenu(LanguageManager::instance().getText(name));
-        for (const QString &t : preset) {
-            const QString canon = normalizeDisplayTag(t);
-            const QString baseZh = systemTagBaseZh(canon).isEmpty() ? canon : systemTagBaseZh(canon);
-            const QString emoji = systemTagEmojiPrefix(canon);
-            const QString display = (LanguageManager::instance().getText(baseZh) == baseZh)
-                                        ? canon
-                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-            QAction *a = sub->addAction(display.trimmed());
-            a->setData(canon);
-            connect(a, &QAction::triggered, this, [this, a]() {
-                const QString fp = currentFilePath();
-                if (fp.isEmpty()) return;
-                const QString tag = a->data().toString();
-                {
-                    QMutexLocker locker(&tagMutex);
-                    tagManager.addTag(fp, tag, true);
-                    tagManager.saveTags();
-                }
-                updateTagDisplayForFile(fp);
-                updateTagList();
-                reloadCurrentFileListPanel();
-            });
-        }
-        if (!history.isEmpty()) {
-            sub->addSeparator();
-            for (const QString &t : history) {
-                const QString canon = normalizeDisplayTag(t);
-                const QString baseZh = systemTagBaseZh(canon).isEmpty() ? canon : systemTagBaseZh(canon);
-                const QString emoji = systemTagEmojiPrefix(canon);
-                QString display = (LanguageManager::instance().getText(baseZh) == baseZh)
-                                            ? canon
-                                            : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
-                display = display.trimmed();
-                if (TagManager::hasAiPrefix(canon)) display = tagLibraryLabelStripAiBadge(display);
-                QAction *a = sub->addAction(display);
-                a->setData(canon);
-                connect(a, &QAction::triggered, this, [this, a]() {
-                    const QString fp = currentFilePath();
-                    if (fp.isEmpty()) return;
-                    const QString tag = a->data().toString();
-                    {
-                        QMutexLocker locker(&tagMutex);
-                        tagManager.addTag(fp, tag, true);
-                        tagManager.saveTags();
-                    }
-                    updateTagDisplayForFile(fp);
-                    updateTagList();
-                    reloadCurrentFileListPanel();
-                });
-            }
-        }
-    };
-
-    addCategory(QStringLiteral("🖼️ 圖片"), {QStringLiteral("相片"), QStringLiteral("截圖")});
-    addCategory(QStringLiteral("🎬 影片"), {QStringLiteral("剪輯"), QStringLiteral("錄影")});
-    addCategory(QStringLiteral("🎧 音訊"), {QStringLiteral("音樂"), QStringLiteral("錄音")});
-    addCategory(QStringLiteral("📄 文件"), {QStringLiteral("報告"), QStringLiteral("簡報")});
-    addCategory(QStringLiteral("📦 壓縮檔"), {QStringLiteral("備份"), QStringLiteral("打包")});
-    addCategory(QStringLiteral("🧩 專案"), {QStringLiteral("程式碼"), QStringLiteral("研究")});
-
-    btnAddExistingTag->setMenu(menu);
 }
 
 QStringList MainWindow::getFastPathTags(const QString &filename) {

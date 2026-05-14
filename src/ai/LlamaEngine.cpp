@@ -353,8 +353,8 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
 
   if (pdfMetadataOnly) {
     const std::string fixedSummaryEn =
-        "Read PDF filename and attributes for intelligent classification.";
-    const std::string fixedSummaryZh = "已讀取 PDF 檔名與屬性進行智能分類。";
+        "Read filename and attributes for intelligent classification.";
+    const std::string fixedSummaryZh = "已讀取 Metadata 進行智能分類。";
 
     std::string prompt;
     if (en) {
@@ -363,7 +363,7 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
           "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n"
           "Output format: {\"summary\":\"...\",\"tags\":[\"...\",\"...\"]}\n"
           "\n"
-          "This is a PDF with no extractable text. Use filename and attributes only.\n"
+          "This file has no reliable extractable text. Use filename and attributes only.\n"
           "Filename: " +
           filename + "\n" + "File extension: " + fileExt + "\n" + "Context: " + content +
           "\n\n"
@@ -381,7 +381,7 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
           "你必須只輸出一個有效的 JSON 物件。不要 markdown、不要反引號、不要任何解釋文字。\n"
           "輸出格式：{\"summary\":\"...\",\"tags\":[\"...\",\"...\"]}\n"
           "\n"
-          "此 PDF 無法抽取內文，僅能依檔名與屬性分類。\n"
+          "此檔案無法抽取可靠內文，僅能依檔名與屬性分類。\n"
           "檔名: " +
           filename + "\n" + "副檔名: " + fileExt + "\n" + "屬性: " + content +
           "\n\n"

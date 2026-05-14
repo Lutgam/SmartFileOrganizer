@@ -142,8 +142,6 @@ private slots:
     void onAnalysisFinished();
 
     void saveTags();
-    void addTag();
-    void removeTag();
     void removeGlobalTag();
 
     void onHeroOmniboxReturnPressed();
@@ -219,8 +217,6 @@ private:
     QPushButton *m_btnStartAnalysis = nullptr;
     QListWidget *m_systemTagListWidget = nullptr;
     QTreeWidget *m_aiTagTreeWidget = nullptr;
-    QPushButton *btnLeftAddTag = nullptr;
-    QPushButton *btnLeftRemoveTag = nullptr;
 
     // Column 2: Folders + navigation under title
     QWidget *foldersPanel = nullptr;
@@ -257,15 +253,14 @@ private:
     // Column 4: Preview & Controls
     QWidget *previewPanel = nullptr;
     QLabel *lblPreviewTitle = nullptr;
+    QTextEdit *m_previewPersonalTagsHeader = nullptr;
     QLabel *lblPreviewImage = nullptr;
     QScrollArea *m_previewTextScroll = nullptr;
     QStackedWidget *m_previewBodyStack = nullptr;
     QTextEdit *txtPreviewText = nullptr;
     QTabWidget *m_previewInsightTabWidget = nullptr;
-    QWidget *m_previewPersonalTagTab = nullptr;
     QWidget *m_previewAiSuggestTab = nullptr;
     QWidget *m_previewAiSummaryTab = nullptr;
-    QTextEdit *m_personalTagsView = nullptr;
     QTextEdit *m_aiSuggestionsView = nullptr;
     QWidget *m_statusRow = nullptr;
     BusyChip *m_statusBusyChip = nullptr;
@@ -295,9 +290,6 @@ private:
     QPushButton *btnAnalyzeFile = nullptr;
     QPushButton *btnCancelAnalysis = nullptr;
     QPushButton *btnSaveTags = nullptr;
-    QPushButton *btnAddTag = nullptr;
-    QPushButton *btnRemoveTag = nullptr;
-    QPushButton *btnAddExistingTag = nullptr;
     QComboBox *m_cmbForceCategory = nullptr;
     QPushButton *m_btnAssignForceCategory = nullptr;
     QPushButton *btnAutoMergeTags = nullptr;
@@ -498,7 +490,6 @@ private:
     void updatePreviewForFile(const QString &absPath);
     void updateTagDisplayForFile(const QString &absPath);
 
-    void rebuildAddExistingTagMenu();
     QString historicalTagsString() const;
     std::vector<QString> sanitizeAiTags(const QString &raw) const;
     QStringList getFastPathTags(const QString &filename);

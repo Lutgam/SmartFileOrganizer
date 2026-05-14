@@ -97,6 +97,7 @@ SfDrawerCategoryLut SfDrawerCategoryLut::builtinDefault()
           QStringLiteral("os"), QStringLiteral("docker"), QStringLiteral("devops")}},
         {QStringLiteral("🌐 網頁與後端開發"),
          {QStringLiteral("svelte"), QStringLiteral("ts"), QStringLiteral("js"), QStringLiteral("html"),
+          QStringLiteral(".html"), QStringLiteral(".htm"), QStringLiteral("htm"),
           QStringLiteral("css"), QStringLiteral("react"), QStringLiteral("vue"), QStringLiteral("angular"),
           QStringLiteral("node"), QStringLiteral("npm"), QStringLiteral("django"), QStringLiteral("flask"),
           QStringLiteral("spring"), QStringLiteral("api"), QStringLiteral("rest"), QStringLiteral("frontend"),
