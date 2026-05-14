@@ -360,6 +360,7 @@ private:
     QMap<QString, QSet<QString>> m_batchNameConflictPaths;
     int m_batchCompletedCount = 0;
     int m_folderReportAiTagAdds = 0;
+    int m_activeAnalysisWorkers = 0;
     bool m_batchTriggeredByBackgroundAuto = false;
     /// `m_workspaceEpoch` when the current batch began; used to reject stale `flushPendingBatchResults`.
     quint64 m_batchFlushWorkspaceEpoch = 0;
@@ -378,8 +379,12 @@ private:
     QSet<QString> m_coldArchiveBypassPaths;
 
     void startBatchAnalysis();
+    void startAnalysisQueue(const QStringList &paths, bool backgroundAuto = false);
     void processNextInQueue();
     void analyzeFileForPath(const QString &absPath, bool forceColdArchiveBypass = false);
+    bool tryO1AnalysisCacheBypass(const QString &absPath);
+    void advanceBatchAfterInstantCacheResult(const QString &absPath);
+    void rebuildTaskCenterRedundancyFromMetadata();
     void flushPendingBatchResults();
     void showFolderAnalysisReport();
     void persistAnalysisResultForFile(const QString &filePath,

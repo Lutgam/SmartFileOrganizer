@@ -1987,9 +1987,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_mainTabWidget->insertTab(0, m_settingsTab, tr("⚙️ 設定"));
 
     connect(m_mainTabWidget, &QTabWidget::currentChanged, this, [this](int) {
-        if (!m_mainTabWidget || !m_graphWidget || !m_graphTab) return;
-        if (m_mainTabWidget->currentWidget() == m_graphTab) {
+        if (!m_mainTabWidget) return;
+        if (m_graphWidget && m_graphTab && m_mainTabWidget->currentWidget() == m_graphTab) {
             m_graphWidget->buildGraph();
+        }
+        if (m_taskCenterTab && m_mainTabWidget->currentWidget() == m_taskCenterTab) {
+            rebuildTaskCenterRedundancyFromMetadata();
         }
     });
 
@@ -2558,35 +2561,22 @@ void MainWindow::startWorkspaceAnalysisQueue(const QStringList &paths)
         return;
     }
     if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
+        if (modelLoadWatcher && modelLoadWatcher->isRunning())
+            modelLoadWatcher->future().waitForFinished();
+        if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
+            const QString modelPath = resolveModelPath();
+            if (m_llamaEngine && QFile::exists(modelPath))
+                m_llamaEngine->loadModel(modelPath.toStdString());
+        }
+    }
+    if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
         lblStatus->setText(
             LanguageManager::instance().getText(QStringLiteral("模型自動載入失敗 (Auto-load failed)")));
         updateStartAnalysisButtonUi();
         return;
     }
 
-    cancelFlag.store(false, std::memory_order_release);
-    m_pendingResults.clear();
-    m_analysisQueue.clear();
-    QStringList ordered = paths;
-    const QString focus =
-        (fileListMode == FileListMode::PhysicalFolder) ? QDir::cleanPath(currentPath) : QString();
-    prioritizeAnalysisPaths(ordered, focus);
-    for (const QString &p : ordered)
-        m_analysisQueue.enqueue(p);
-    m_totalBatchSize = m_analysisQueue.size();
-    if (m_totalBatchSize <= 0)
-        return;
-
-    m_batchTriggeredByBackgroundAuto = false;
-    m_batchHashToPaths.clear();
-    m_batchNameConflictPaths.clear();
-    m_batchCompletedCount = 0;
-    m_folderReportAiTagAdds = 0;
-    m_isBatchMode = true;
-    beginBatchAnalysisUi();
-    processNextInQueue();
-    updateBackgroundStatusLabel();
-    updateStartAnalysisButtonUi();
+    startAnalysisQueue(paths, false);
 }
 
 void MainWindow::onStartAnalysisClicked()
@@ -6152,12 +6142,177 @@ void MainWindow::setUiBusy(bool busy) {
 }
 
 void MainWindow::analyzeFile() {
-    const QString fp = currentFilePath();
+    const QString fp = QDir::cleanPath(currentFilePath());
     if (fp.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
         return;
     }
-    analyzeFileForPath(fp);
+
+    QFileInfo fi(fp);
+    if (!isAnalyzableFile(fi) || !sfPathHasAnalyzableTextOrDocSuffix(fp)) {
+        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("此項目不可分析")));
+        return;
+    }
+
+    if (m_isBatchMode) {
+        prependSingleFileToAnalysisQueueFront(fp);
+        return;
+    }
+
+    startAnalysisQueue(QStringList{fp});
+}
+
+void MainWindow::startAnalysisQueue(const QStringList &pathsIn, bool backgroundAuto)
+{
+    if (m_isBatchMode)
+        return;
+
+    QStringList paths;
+    paths.reserve(pathsIn.size());
+    for (const QString &raw : pathsIn) {
+        const QString p = QDir::cleanPath(raw);
+        if (p.isEmpty())
+            continue;
+        QFileInfo fi(p);
+        if (!fi.exists() || !fi.isFile())
+            continue;
+        if (!isAnalyzableFile(fi))
+            continue;
+        if (!sfPathHasAnalyzableTextOrDocSuffix(p))
+            continue;
+        paths << p;
+    }
+    if (paths.isEmpty())
+        return;
+
+    const QString focus =
+        (fileListMode == FileListMode::PhysicalFolder) ? QDir::cleanPath(currentPath) : QString();
+    prioritizeAnalysisPaths(paths, focus);
+
+    cancelFlag.store(false, std::memory_order_release);
+    m_pendingResults.clear();
+    m_analysisQueue.clear();
+    for (const QString &p : paths)
+        m_analysisQueue.enqueue(p);
+
+    m_totalBatchSize = m_analysisQueue.size();
+    if (m_totalBatchSize <= 0)
+        return;
+
+    m_batchTriggeredByBackgroundAuto = backgroundAuto;
+    m_batchHashToPaths.clear();
+    m_batchNameConflictPaths.clear();
+    m_batchCompletedCount = 0;
+    m_folderReportAiTagAdds = 0;
+    m_isBatchMode = true;
+    beginBatchAnalysisUi();
+    processNextInQueue();
+    updateBackgroundStatusLabel();
+    updateStartAnalysisButtonUi();
+}
+
+bool MainWindow::tryO1AnalysisCacheBypass(const QString &absPath)
+{
+    const QString fp = QDir::cleanPath(absPath);
+    if (fp.isEmpty())
+        return false;
+
+    if (pathHasUsableAnalysisSummary(fp)) {
+        emit fileAnalysisFinished(fp);
+        return true;
+    }
+
+    QString storedHash;
+    {
+        QMutexLocker locker(&tagMutex);
+        storedHash = tagManager.fileContentHash(fp);
+    }
+    if (storedHash.isEmpty())
+        return false;
+
+    primeAnalysisCacheFromDisk(storedHash);
+
+    QJsonObject cached;
+    if (m_analysisByContentHash.contains(storedHash)) {
+        cached = m_analysisByContentHash.value(storedHash);
+    } else {
+        QMutexLocker locker(&tagMutex);
+        if (!tagManager.tryGetHashAnalysis(storedHash, &cached))
+            return false;
+        m_analysisByContentHash.insert(storedHash, cached);
+    }
+
+    const QString summary = cached.value(QStringLiteral("summary")).toString().trimmed();
+    if (!sfSummaryAcceptableForStorage(summary))
+        return false;
+
+    if (m_isBatchMode) {
+        persistAnalysisResultForFile(fp, cached, storedHash);
+    } else {
+        applyCachedAnalysisForHashHit(fp, cached, storedHash);
+    }
+    return true;
+}
+
+void MainWindow::advanceBatchAfterInstantCacheResult(const QString &absPath)
+{
+    Q_UNUSED(absPath);
+    if (!m_isBatchMode)
+        return;
+
+    ++m_batchCompletedCount;
+    setUiBusy(false);
+    if (batchProgressBar && m_totalBatchSize > 0) {
+        batchProgressBar->setValue(qMin(m_totalBatchSize, m_batchCompletedCount));
+    }
+    syncBatchProgressBars();
+    lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成（重複內容：已套用快取）")));
+    updateBackgroundStatusLabel();
+    QTimer::singleShot(0, this, &MainWindow::processNextInQueue);
+    refreshCurrentAnalysisTargetUi();
+}
+
+void MainWindow::rebuildTaskCenterRedundancyFromMetadata()
+{
+    const QString rootClean = QDir::cleanPath(rootPath);
+    if (rootClean.isEmpty()) {
+        m_persistRedundancyHash.clear();
+        m_persistRedundancyName.clear();
+        refreshTaskCenterRedundancyTreeUi();
+        return;
+    }
+
+    QMap<QString, QSet<QString>> hashToPaths;
+    std::vector<QString> paths;
+    {
+        QMutexLocker locker(&tagMutex);
+        paths = tagManager.taggedFilePaths();
+    }
+    for (const QString &pathRaw : paths) {
+        const QString path = QDir::cleanPath(pathRaw);
+        if (!sfAbsolutePathUnderWorkspaceRoot(path, rootClean))
+            continue;
+
+        QString hashHex;
+        {
+            QMutexLocker locker(&tagMutex);
+            hashHex = tagManager.fileContentHash(path);
+        }
+        if (hashHex.isEmpty())
+            continue;
+        hashToPaths[hashHex].insert(path);
+    }
+
+    m_persistRedundancyHash.clear();
+    for (auto it = hashToPaths.constBegin(); it != hashToPaths.constEnd(); ++it) {
+        if (it.value().size() >= 2)
+            m_persistRedundancyHash.insert(it.key(), it.value());
+    }
+
+    const QMap<QString, QSet<QString>> scopedName =
+        sfFilterRedundancyMapToWorkspace(collectSameBaseNameDifferentHashGroups(), rootClean);
+    m_persistRedundancyName = scopedName;
+    refreshTaskCenterRedundancyTreeUi();
 }
 
 void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiveBypass) {
@@ -6198,22 +6353,32 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
         return;
     }
 
-    const QString contentHash = sha256HexOfFile(fp);
+    if (tryO1AnalysisCacheBypass(fp)) {
+        m_currentAnalyzingFile = fp;
+        if (m_isBatchMode) {
+            advanceBatchAfterInstantCacheResult(fp);
+        } else {
+            lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
+            m_currentAnalyzingFile.clear();
+            refreshCurrentAnalysisTargetUi();
+        }
+        return;
+    }
+
+    QString contentHash;
+    {
+        QMutexLocker locker(&tagMutex);
+        contentHash = tagManager.fileContentHash(fp);
+    }
+    if (contentHash.isEmpty())
+        contentHash = sha256HexOfFile(fp);
     primeAnalysisCacheFromDisk(contentHash);
     if (!contentHash.isEmpty() && m_analysisByContentHash.contains(contentHash)) {
         const QJsonObject cached = m_analysisByContentHash.value(contentHash);
         m_currentAnalyzingFile = fp;
         applyCachedAnalysisForHashHit(fp, cached, contentHash);
         if (m_isBatchMode) {
-            ++m_batchCompletedCount;
-            setUiBusy(false);
-            if (batchProgressBar && m_totalBatchSize > 0) {
-                batchProgressBar->setValue(qMin(m_totalBatchSize, m_batchCompletedCount));
-            }
-            syncBatchProgressBars();
-            lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成（重複內容：已套用快取）")));
-            updateBackgroundStatusLabel();
-            QTimer::singleShot(0, this, &MainWindow::processNextInQueue);
+            advanceBatchAfterInstantCacheResult(fp);
         } else {
             lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成")));
             m_currentAnalyzingFile.clear();
@@ -6319,6 +6484,7 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
                                                        pdfMetadataOnly);
             return SfAnalysisOutcome{std::move(raw), flightEpoch};
         });
+    ++m_activeAnalysisWorkers;
     watcher->setFuture(future);
     refreshFileAndFolderAnalysisIndicators();
     ensureAnalysisIndicatorTimer();
@@ -6328,6 +6494,8 @@ void MainWindow::cancelAnalysis() {
     cancelFlag.store(true, std::memory_order_release);
     m_pendingPrioritySingleFile.clear();
     m_analysisUiWorkActive = false;
+    if (m_activeAnalysisWorkers > 0)
+        m_activeAnalysisWorkers = 0;
     if (m_isBatchMode) {
         m_analysisQueue.clear();
         m_isBatchMode = false;
@@ -6345,13 +6513,8 @@ void MainWindow::cancelAnalysis() {
 }
 
 void MainWindow::startBatchAnalysis() {
-    if (m_isBatchMode) return;
+    if (m_isBatchMode || !fileList) return;
 
-    m_analysisQueue.clear();
-    m_totalBatchSize = 0;
-    m_pendingResults.clear();
-
-    // Enqueue all files currently displayed in fileList (current folder first)
     QStringList batchPaths;
     for (int i = 0; i < fileList->count(); ++i) {
         auto *it = fileList->item(i);
@@ -6364,21 +6527,7 @@ void MainWindow::startBatchAnalysis() {
         if (!sfPathHasAnalyzableTextOrDocSuffix(absPath)) continue;
         batchPaths << QDir::cleanPath(absPath);
     }
-    const QString focus = (fileListMode == FileListMode::PhysicalFolder) ? QDir::cleanPath(currentPath) : QString();
-    prioritizeAnalysisPaths(batchPaths, focus);
-    for (const QString &p : batchPaths) m_analysisQueue.enqueue(p);
-
-    m_totalBatchSize = m_analysisQueue.size();
-    if (m_totalBatchSize <= 0) return;
-
-    m_batchTriggeredByBackgroundAuto = false;
-    m_batchHashToPaths.clear();
-    m_batchNameConflictPaths.clear();
-    m_batchCompletedCount = 0;
-    m_folderReportAiTagAdds = 0;
-    m_isBatchMode = true;
-    beginBatchAnalysisUi();
-    processNextInQueue();
+    startAnalysisQueue(batchPaths, false);
 }
 
 void MainWindow::processNextInQueue() {
@@ -6401,6 +6550,30 @@ void MainWindow::processNextInQueue() {
     }
 
     if (m_analysisQueue.isEmpty()) {
+        tryFinalizeBatchAnalysis();
+        return;
+    }
+
+    while (!m_analysisQueue.isEmpty()) {
+        const QString head = m_analysisQueue.head();
+        m_currentAnalyzingFile = head;
+        if (!tryO1AnalysisCacheBypass(head))
+            break;
+
+        m_analysisQueue.dequeue();
+        ++m_batchCompletedCount;
+        setUiBusy(false);
+        if (batchProgressBar && m_totalBatchSize > 0) {
+            batchProgressBar->setValue(qMin(m_totalBatchSize, m_batchCompletedCount));
+        }
+        syncBatchProgressBars();
+        lblStatus->setText(
+            LanguageManager::instance().getText(QStringLiteral("分析完成（重複內容：已套用快取）")));
+        updateBackgroundStatusLabel();
+    }
+
+    if (m_analysisQueue.isEmpty()) {
+        m_currentAnalyzingFile.clear();
         tryFinalizeBatchAnalysis();
         return;
     }
@@ -6950,6 +7123,8 @@ void MainWindow::tryFinalizeBatchAnalysis()
         return;
     if (!m_analysisQueue.isEmpty())
         return;
+    if (m_activeAnalysisWorkers > 0)
+        return;
     if (watcher && watcher->isRunning())
         return;
     if (m_analysisUiWorkActive)
@@ -7162,11 +7337,16 @@ void MainWindow::flushPendingBatchResults() {
 void MainWindow::onAnalysisFinished() {
     if (!watcher)
         return;
+    const auto finishWorker = [this]() {
+        if (m_activeAnalysisWorkers > 0)
+            --m_activeAnalysisWorkers;
+    };
     if (watcher->isCanceled()) {
         setUiBusy(false);
         m_analysisUiWorkActive = false;
         m_currentAnalyzingFile.clear();
         cancelFlag.store(false);
+        finishWorker();
         clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
@@ -7179,6 +7359,7 @@ void MainWindow::onAnalysisFinished() {
         m_analysisUiWorkActive = false;
         m_currentAnalyzingFile.clear();
         cancelFlag.store(false);
+        finishWorker();
         clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
@@ -7188,6 +7369,7 @@ void MainWindow::onAnalysisFinished() {
         m_analysisUiWorkActive = false;
         m_currentAnalyzingFile.clear();
         stopAnalysisSpinner();
+        finishWorker();
         clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
@@ -7216,6 +7398,7 @@ void MainWindow::onAnalysisFinished() {
         }
         m_currentAnalyzingFile.clear();
         refreshCurrentAnalysisTargetUi();
+        finishWorker();
         clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
@@ -7224,6 +7407,7 @@ void MainWindow::onAnalysisFinished() {
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("已取消")));
         m_currentAnalyzingFile.clear();
         refreshCurrentAnalysisTargetUi();
+        finishWorker();
         clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
@@ -7371,6 +7555,7 @@ void MainWindow::onAnalysisFinished() {
         updateBackgroundStatusLabel();
         m_currentAnalyzingFile.clear();
         refreshCurrentAnalysisTargetUi();
+        finishWorker();
         clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
@@ -7387,6 +7572,7 @@ void MainWindow::onAnalysisFinished() {
         }
         m_currentAnalyzingFile.clear();
         refreshCurrentAnalysisTargetUi();
+        finishWorker();
         clearAnalysisWorkFlagsAndSyncUi();
         return;
     }
@@ -7470,6 +7656,7 @@ void MainWindow::onAnalysisFinished() {
 
     m_currentAnalyzingFile.clear();
     refreshCurrentAnalysisTargetUi();
+    finishWorker();
     clearAnalysisWorkFlagsAndSyncUi();
     updateStartAnalysisButtonUi();
 }
