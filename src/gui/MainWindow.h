@@ -152,6 +152,7 @@ private slots:
 
     void onBackgroundScanProgress();
     void onBackgroundScanFinished();
+    void onStartAnalysisClicked();
     void generateTagFoldersWithAI();
     void onTagFolderClustersFinished();
     void onBackgroundAutoAnalyzeDebounce();
@@ -208,6 +209,7 @@ private:
     QWidget *tagsPanel = nullptr;
     QLabel *lblTagLibraryTitle = nullptr;
     QTabWidget *m_tagTabWidget = nullptr;
+    QPushButton *m_btnStartAnalysis = nullptr;
     QListWidget *m_systemTagListWidget = nullptr;
     QTreeWidget *m_aiTagTreeWidget = nullptr;
     QPushButton *btnLeftAddTag = nullptr;
@@ -355,6 +357,7 @@ private:
     int m_bgAnalyzeQueueRetries = 0;
     bool m_systemFileBypassEnabled = true;
     int m_coldArchiveYears = 0;
+    quint64 m_manualAnalysisPrepEpoch = 0;
     /// Paths that must skip cold-archive short-circuit (prepend / folder prepend).
     QSet<QString> m_coldArchiveBypassPaths;
 
@@ -412,6 +415,9 @@ private:
     void prioritizeAnalysisPaths(QStringList &paths, const QString &focusFolderAbs);
 
     void collectUnanalyzedPathsFromWorkspace(int maxFiles, QStringList *out);
+    void haltInFlightAnalysisWork();
+    void updateStartAnalysisButtonUi();
+    void startWorkspaceAnalysisQueue(const QStringList &paths);
     bool trySystemBypassPreset(const QFileInfo &fi, QString *summaryOut, QStringList *tagsOut) const;
     bool tryColdArchiveBypass(const QFileInfo &fi, bool forceLlm, QString *summaryOut, QStringList *tagsOut) const;
     void applyColdArchiveAnalysis(const QString &fp, const QString &summary, const QStringList &tags);

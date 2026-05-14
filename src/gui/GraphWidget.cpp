@@ -400,14 +400,62 @@ void GraphWidget::rebuildTagFilterOptions() {
     m_tagFilter->blockSignals(true);
     m_tagFilter->clear();
     if (tagManager) {
-        auto tags = tagManager->getAllTags();
-        std::sort(tags.begin(), tags.end(), [](const QString &a, const QString &b) {
-            return a.localeAwareCompare(b) < 0;
-        });
-        for (const auto &t : tags) {
-            if (t.trimmed().isEmpty()) continue;
-            m_tagFilter->addItem(translateVirtualTagForDisplay(t), t);
+        struct TagRank {
+            QString tag;
+            int count = 0;
+        };
+        std::vector<TagRank> ranked;
+        ranked.reserve(64);
+
+        for (const QString &t : tagManager->getAllTags()) {
+            const QString tag = t.trimmed();
+            if (tag.isEmpty())
+                continue;
+
+            int count = 0;
+            for (const QString &p : tagManager->getFilesByTag(tag)) {
+                const QFileInfo fi(p);
+                if (fi.exists() && fi.isFile())
+                    ++count;
+            }
+            if (count <= 0)
+                continue;
+            ranked.push_back(TagRank{tag, count});
         }
+
+        constexpr int kCrowdedTagThreshold = 30;
+        const bool crowded = static_cast<int>(ranked.size()) > kCrowdedTagThreshold;
+        if (crowded) {
+            ranked.erase(std::remove_if(ranked.begin(), ranked.end(),
+                                        [](const TagRank &entry) { return entry.count <= 1; }),
+                         ranked.end());
+        }
+        if (ranked.empty() && crowded) {
+            ranked.clear();
+            for (const QString &t : tagManager->getAllTags()) {
+                const QString tag = t.trimmed();
+                if (tag.isEmpty())
+                    continue;
+                int count = 0;
+                for (const QString &p : tagManager->getFilesByTag(tag)) {
+                    const QFileInfo fi(p);
+                    if (fi.exists() && fi.isFile())
+                        ++count;
+                }
+                if (count <= 0)
+                    continue;
+                ranked.push_back(TagRank{tag, count});
+            }
+        }
+
+        std::sort(ranked.begin(), ranked.end(), [](const TagRank &a, const TagRank &b) {
+            if (a.count != b.count)
+                return a.count > b.count;
+            return a.tag.localeAwareCompare(b.tag) < 0;
+        });
+
+        for (const TagRank &entry : ranked)
+            m_tagFilter->addItem(translateVirtualTagForDisplay(entry.tag), entry.tag);
     }
     // restore selection if possible; otherwise first tag (no global "show all")
     if (m_tagFilter->count() > 0) {
