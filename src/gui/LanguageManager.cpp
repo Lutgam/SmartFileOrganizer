@@ -142,6 +142,8 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("個人標籤")) return en ? QStringLiteral("Personal Tags") : QStringLiteral("個人標籤");
     if (key == QStringLiteral("AI 智能建議")) return en ? QStringLiteral("AI Suggestions") : QStringLiteral("AI 智能建議");
     if (key == QStringLiteral("AI 智慧摘要")) return en ? QStringLiteral("AI Smart Summary") : QStringLiteral("AI 智慧摘要");
+    if (key == QStringLiteral("摘要")) return en ? QStringLiteral("Summary") : QStringLiteral("摘要");
+    if (key == QStringLiteral("標籤建議")) return en ? QStringLiteral("Tag Suggestions") : QStringLiteral("標籤建議");
     if (key == QStringLiteral("尚未分析")) return en ? QStringLiteral("Not analyzed yet") : QStringLiteral("尚未分析");
     if (key == QStringLiteral("無")) return en ? QStringLiteral("None") : QStringLiteral("無");
     if (key == QStringLiteral("分析完成")) return en ? QStringLiteral("Analysis complete") : QStringLiteral("分析完成");

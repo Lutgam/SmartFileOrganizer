@@ -545,6 +545,21 @@ bool TagManager::tryGetHashAnalysis(const QString &sha256Hex, QJsonObject *out) 
     return true;
 }
 
+void TagManager::clearAnalysisCacheForPath(const QString &path, bool save) {
+    QMutexLocker locker(&m_mutex);
+    const QString clean = path.trimmed();
+    if (clean.isEmpty())
+        return;
+
+    const auto hashIt = m_pathToContentHash.find(clean);
+    if (hashIt != m_pathToContentHash.end()) {
+        m_hashAnalysisCache.erase(hashIt->second);
+        m_pathToContentHash.erase(hashIt);
+    }
+    if (save)
+        saveTags();
+}
+
 void TagManager::exportHashAnalysisCache(QHash<QString, QJsonObject> *dst) const {
     if (!dst) return;
     QMutexLocker locker(&m_mutex);

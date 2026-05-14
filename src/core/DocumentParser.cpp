@@ -520,6 +520,17 @@ static QString buildPdfMetadataContext(const QString &filePath)
     return buildFileMetadataContext(filePath);
 }
 
+static QString sanitizeRichAiExtract(QString rawText)
+{
+    static const QRegularExpression regex(
+        QStringLiteral("[^\\x{4E00}-\\x{9FA5}a-zA-Z0-9\\s，。！？、；：「」『』（）()\\-.,!?]"));
+    QString cleanText = rawText;
+    cleanText.replace(regex, QStringLiteral(" "));
+    cleanText.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+    cleanText = cleanText.trimmed();
+    return cleanText.left(800);
+}
+
 QString DocumentParser::sanitizeTextForAi(const QString &text)
 {
     QString out;
@@ -592,6 +603,17 @@ QString DocumentParser::extractTextForAi(const QString &filePath, bool *pdfMetad
                 *pdfMetadataOnly = true;
         }
     }
+
+    static const QSet<QString> richAiSuffixes = {
+        QStringLiteral("pdf"),
+        QStringLiteral("docx"),
+        QStringLiteral("pptx"),
+    };
+    if (richAiSuffixes.contains(suffix)) {
+        text = sanitizeRichAiExtract(text);
+        return text;
+    }
+
     return truncateForAi(text, kAiTextMaxChars);
 }
 

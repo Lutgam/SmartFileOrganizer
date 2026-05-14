@@ -70,6 +70,7 @@ protected:
     void mouseReleaseEvent(QGraphicsSceneMouseEvent *event) override;
 
 private:
+    QRectF contentRect() const;
     QList<Edge *> edgeList;
     QPointF newPos;
     GraphWidget *graph;

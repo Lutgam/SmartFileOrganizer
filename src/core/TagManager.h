@@ -55,6 +55,7 @@ public:
     /// Content-hash → last successful AI JSON { summary, tags[] }.
     void recordHashAnalysis(const QString& sha256Hex, const QJsonObject& analysis, bool save = true);
     bool tryGetHashAnalysis(const QString& sha256Hex, QJsonObject* out) const;
+    void clearAnalysisCacheForPath(const QString& path, bool save = true);
     void exportHashAnalysisCache(QHash<QString, QJsonObject>* dst) const;
 
     /// Remove hash cache rows with bad summaries or only tied to non-text / non-document file extensions (in-memory; persist with saveTags if save).

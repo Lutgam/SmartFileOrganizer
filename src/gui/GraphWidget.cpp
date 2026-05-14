@@ -9,12 +9,16 @@
 #include <QStyleOptionGraphicsItem>
 #include <QRandomGenerator>
 #include <QFileInfo>
+#include <QLineF>
 #include <QListWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QResizeEvent>
 #include <QSet>
+#include <QFont>
+#include <QFontMetrics>
+#include <QFrame>
 #include <algorithm>
 
 #include "LanguageManager.h"
@@ -182,29 +186,38 @@ bool Node::advancePosition()
     return true;
 }
 
+QRectF Node::contentRect() const
+{
+    QFont font;
+    font.setBold(true);
+    const QFontMetrics fm(font);
+    const int width = fm.horizontalAdvance(m_text) + 30;
+    return QRectF(-width / 2.0, -15.0, width, 30.0);
+}
+
 QRectF Node::boundingRect() const
 {
-    qreal adjust = 2;
-    // Tags might be wider
-    int width = 20 + m_text.length() * 6; // Rough estimate
-    return QRectF(-width/2 - adjust, -15 - adjust, width + adjust, 30 + adjust);
+    constexpr qreal adjust = 2.0;
+    return contentRect().adjusted(-adjust, -adjust, adjust, adjust);
 }
 
 QPainterPath Node::shape() const
 {
     QPainterPath path;
-    int width = 20 + m_text.length() * 6;
-    path.addRoundedRect(-width/2, -15, width, 30, 5, 5);
+    const QRectF rect = contentRect();
+    path.addRoundedRect(rect, 5, 5);
     return path;
 }
 
 void Node::paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWidget *)
 {
+    const QRectF rect = contentRect();
+    const qreal width = rect.width();
+
     // Shadow
     painter->setPen(Qt::NoPen);
     painter->setBrush(Qt::darkGray);
-    int width = 20 + m_text.length() * 6;
-    painter->drawRoundedRect(-width/2 + 3, -15 + 3, width, 30, 5, 5);
+    painter->drawRoundedRect(rect.translated(3, 3), 5, 5);
 
     // Body
     QColor color;
@@ -213,8 +226,8 @@ void Node::paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWid
     } else {
         color = QColor(100, 150, 255); // Blue
     }
-    
-    QRadialGradient gradient(-3, -3, width/2);
+
+    QRadialGradient gradient(-3, -3, width / 2.0);
     if (option->state & QStyle::State_Sunken) {
         gradient.setCenter(3, 3);
         gradient.setFocalPoint(3, 3);
@@ -224,14 +237,14 @@ void Node::paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWid
         gradient.setColorAt(0, color.lighter(120));
         gradient.setColorAt(1, color.darker(120));
     }
-    
+
     painter->setBrush(gradient);
     painter->setPen(QPen(Qt::black, 0));
-    painter->drawRoundedRect(-width/2, -15, width, 30, 5, 5);
-    
+    painter->drawRoundedRect(rect, 5, 5);
+
     // Text
     painter->setPen(Qt::black);
-    painter->drawText(boundingRect(), Qt::AlignCenter, m_text);
+    painter->drawText(rect, Qt::AlignCenter, m_text);
 }
 
 QVariant Node::itemChange(GraphicsItemChange change, const QVariant &value)
@@ -274,9 +287,10 @@ GraphWidget::GraphWidget(TagManager* tagMgr, QWidget *parent)
     setViewportUpdateMode(BoundingRectViewportUpdate);
     setRenderHint(QPainter::Antialiasing);
     setTransformationAnchor(AnchorUnderMouse);
+    setFrameShape(QFrame::NoFrame);
     scale(0.9, 0.9);
-    setMinimumSize(560, 560);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    setMinimumSize(0, 0);
 
     // Initial build
     // buildGraph(); 
@@ -500,6 +514,56 @@ void GraphWidget::zoomOut()
     scaleView(1 / 1.2);
 }
 
+namespace {
+QRectF sceneBoundsForNodeAt(const Node *node, const QPointF &scenePos)
+{
+    const QRectF local = node->boundingRect();
+    return QRectF(scenePos.x() + local.x(), scenePos.y() + local.y(), local.width(), local.height());
+}
+
+bool nodePlacementCollides(QGraphicsScene *scene, const QRectF &candidate, const QList<Node *> &placed)
+{
+    for (Node *other : placed) {
+        if (!other)
+            continue;
+        if (other->sceneBoundingRect().intersects(candidate))
+            return true;
+    }
+
+    const QList<QGraphicsItem *> hits = scene->items(candidate, Qt::IntersectsItemBoundingRect);
+    for (QGraphicsItem *item : hits) {
+        if (qgraphicsitem_cast<Node *>(item))
+            return true;
+    }
+    return false;
+}
+
+QPointF findSpiralNodePosition(QGraphicsScene *scene, Node *node, const QList<Node *> &placed, QPointF desired)
+{
+    const auto boundsAt = [&](const QPointF &pos) { return sceneBoundsForNodeAt(node, pos); };
+
+    if (!nodePlacementCollides(scene, boundsAt(desired), placed))
+        return desired;
+
+    for (int step = 1; step < 600; ++step) {
+        const qreal theta = step * 0.45;
+        const qreal radius = 8.0 + step * 3.0;
+        const QPointF pos(desired.x() + radius * qCos(theta), desired.y() + radius * qSin(theta));
+        if (!nodePlacementCollides(scene, boundsAt(pos), placed))
+            return pos;
+    }
+
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        const QPointF pos(QRandomGenerator::global()->bounded(920) - 460,
+                          QRandomGenerator::global()->bounded(920) - 460);
+        if (!nodePlacementCollides(scene, boundsAt(pos), placed))
+            return pos;
+    }
+
+    return desired;
+}
+} // namespace
+
 void GraphWidget::buildGraph() {
     scene()->clear();
     fileNodes.clear();
@@ -541,14 +605,17 @@ void GraphWidget::buildGraph() {
     }
 
     // 1) Create Tag Nodes (Blue)
+    QList<Node *> placedNodes;
     const int tagCount = tagList.size();
     for (int i = 0; i < tagCount; ++i) {
         const QString &qTag = tagList[i];
         Node *tagNode = new Node(this, Node::Tag, translateVirtualTagForDisplay(qTag));
         const double angle = 2.0 * M_PI * i / std::max(1, tagCount);
-        tagNode->setPos(260 * cos(angle), 260 * sin(angle));
+        const QPointF desired(260 * cos(angle), 260 * sin(angle));
+        tagNode->setPos(findSpiralNodePosition(scene(), tagNode, placedNodes, desired));
         scene()->addItem(tagNode);
         tagNodes[qTag] = tagNode;
+        placedNodes.push_back(tagNode);
     }
 
     // 2) Create File Nodes (Green) + colored edges per selected tag
@@ -567,11 +634,13 @@ void GraphWidget::buildGraph() {
         Node *fileNode = nullptr;
         if (fileNodes.find(fp) == fileNodes.end()) {
             fileNode = new Node(this, Node::File, fi.fileName());
-            fileNode->setPos(
+            const QPointF desired(
                 QRandomGenerator::global()->bounded(460) - 230,
                 QRandomGenerator::global()->bounded(460) - 230);
+            fileNode->setPos(findSpiralNodePosition(scene(), fileNode, placedNodes, desired));
             scene()->addItem(fileNode);
             fileNodes[fp] = fileNode;
+            placedNodes.push_back(fileNode);
         } else {
             fileNode = fileNodes[fp];
         }

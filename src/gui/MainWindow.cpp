@@ -217,7 +217,94 @@ static bool sfSummaryAcceptableForStorage(const QString &s)
     const QString t = s.trimmed();
     if (t.isEmpty()) return false;
     if (t.contains(QStringLiteral("Error"), Qt::CaseInsensitive)) return false;
+    if (t.startsWith(QLatin1Char('{')) || t.startsWith(QLatin1Char('[')))
+        return false;
+    if (t.contains(QStringLiteral("\"tags\""), Qt::CaseInsensitive))
+        return false;
     return true;
+}
+
+static QString sfCoerceStorageSummary(QString summary)
+{
+    summary = summary.trimmed();
+    if (summary.isEmpty())
+        return summary;
+
+    if (summary.startsWith(QLatin1Char('{')) || summary.contains(QStringLiteral("\"summary\""))) {
+        QJsonParseError err{};
+        const QJsonDocument doc = QJsonDocument::fromJson(summary.toUtf8(), &err);
+        if (err.error == QJsonParseError::NoError && doc.isObject()) {
+            const QString inner = doc.object().value(QStringLiteral("summary")).toString().trimmed();
+            if (!inner.isEmpty())
+                summary = inner;
+        }
+    }
+
+    if (summary.size() > 500)
+        summary = summary.left(500).trimmed();
+    return summary;
+}
+
+static QString sfAiTagDedupKey(QString tag)
+{
+    tag = tag.trimmed().toLower();
+    static const QRegularExpression noiseSuffix(
+        QStringLiteral("(檔案|文件|內容|設定檔|設定|變數|配置|資料)+$"));
+    tag.remove(noiseSuffix);
+    tag.remove(QRegularExpression(QStringLiteral("\\.(txt|json|xml|yaml|yml|ini|cfg|conf)$"),
+                                 QRegularExpression::CaseInsensitiveOption));
+    return tag.trimmed();
+}
+
+static std::vector<QString> sfFilterAiAnalysisTags(const QStringList &tagsIn, int maxTags = 5, int maxLen = 15)
+{
+    std::vector<QString> out;
+    QSet<QString> seenKeys;
+    for (const QString &raw0 : tagsIn) {
+        if (out.size() >= static_cast<size_t>(maxTags))
+            break;
+
+        QString t = TagManager::stripAiPrefix(raw0.trimmed());
+        t.replace(QRegularExpression(QStringLiteral("^[-•\\s]+")), QString());
+        t.replace(QRegularExpression(QStringLiteral("^[\"'`]+|[\"'`]+$")), QString());
+        t.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+        t = t.trimmed();
+        if (t.isEmpty() || t.compare(QStringLiteral("ai"), Qt::CaseInsensitive) == 0)
+            continue;
+        if (t.size() > maxLen)
+            continue;
+
+        const QString key = sfAiTagDedupKey(t);
+        if (key.isEmpty() || seenKeys.contains(key))
+            continue;
+
+        bool overlaps = false;
+        for (const QString &existing : out) {
+            const QString existingKey = sfAiTagDedupKey(existing);
+            if (existingKey.isEmpty())
+                continue;
+            if (key == existingKey || key.contains(existingKey) || existingKey.contains(key)) {
+                overlaps = true;
+                break;
+            }
+        }
+        if (overlaps)
+            continue;
+
+        seenKeys.insert(key);
+        out.push_back(t);
+    }
+    return out;
+}
+
+static const QString kAiParseFallbackSummary =
+    QStringLiteral("[系統提示：檔案內容過於複雜或包含特殊編碼，已切換至安全模式讀取檔名進行智能分類。]");
+static const QString kAiParseFallbackTag = QStringLiteral("通用文件");
+
+static void sfApplyAiParseFallback(QString &summary, std::vector<QString> &tags)
+{
+    summary = kAiParseFallbackSummary;
+    tags = {kAiParseFallbackTag};
 }
 
 /// When JSON parsing fails, recover a one-line summary from prose ("摘要：…" / `summary:`).
@@ -326,7 +413,38 @@ static QTextEdit *makePreviewInsightTextView(QWidget *parent)
 static QString sfFileListAnalysisStatusStyleSheet()
 {
     return QStringLiteral(
-        "QLabel { color: #f8fafc; font-weight: 700; font-size: 14px; padding: 2px 8px; }");
+        "QLabel {"
+        "  border: 2px solid #4A90E2;"
+        "  border-radius: 6px;"
+        "  padding: 6px;"
+        "  background-color: rgba(74, 144, 226, 0.1);"
+        "  font-weight: bold;"
+        "  color: #f8fafc;"
+        "}");
+}
+
+static void applyRobotAnalysisStatusLabelStyle(QLabel *label)
+{
+    if (!label)
+        return;
+    label->setWordWrap(true);
+    label->setMinimumWidth(250);
+    label->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    label->setStyleSheet(sfFileListAnalysisStatusStyleSheet());
+}
+
+static void refreshRobotAnalysisStatusLabelHeight(QLabel *label)
+{
+    if (!label || !label->isVisible())
+        return;
+
+    label->setMinimumHeight(0);
+    label->adjustSize();
+    const int width = qMax(label->width(), label->minimumWidth());
+    int height = label->heightForWidth(width);
+    if (height <= 0)
+        height = label->sizeHint().height();
+    label->setMinimumHeight(qMax(56, height + 12));
 }
 
 /// Strict workspace isolation: absolute path must live under the current workspace root.
@@ -1719,7 +1837,6 @@ void MainWindow::updateBackgroundStatusLabel()
 {
     const int nRemaining = m_isBatchMode ? qMax(0, m_totalBatchSize - m_batchCompletedCount) : 0;
 
-    const QString styleBusyLeft = sfFileListAnalysisStatusStyleSheet();
     static const QString kTaskCenterStatusSheet = QStringLiteral(
         "QLabel { background-color: #2563eb; color: white; border-radius: 4px; padding: 4px; "
         "font-weight: bold; }");
@@ -1740,11 +1857,9 @@ void MainWindow::updateBackgroundStatusLabel()
     if (lblBackgroundStatus) {
         if (manualBatchActive) {
             lblBackgroundStatus->setVisible(true);
-            lblBackgroundStatus->setStyleSheet(styleBusyLeft);
-            lblBackgroundStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-            lblBackgroundStatus->setMinimumHeight(lblBackgroundStatus->fontMetrics().height() + 4);
-            const int budget = qMax(160, lblBackgroundStatus->width() - 8);
-            lblBackgroundStatus->setText(elideStatusLine(rawText, budget));
+            applyRobotAnalysisStatusLabelStyle(lblBackgroundStatus);
+            lblBackgroundStatus->setText(rawText);
+            refreshRobotAnalysisStatusLabelHeight(lblBackgroundStatus);
         } else {
             lblBackgroundStatus->setVisible(false);
             lblBackgroundStatus->clear();
@@ -1889,6 +2004,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     workspaceLayout->addWidget(m_workspaceTopBar);
 
     setupFourColumnLayout();
+    wirePreviewControlSignals();
     workspaceLayout->addWidget(mainSplitter, 1);
     m_mainTabWidget->addTab(m_workspaceTab, tr("核心工作區"));
 
@@ -1898,14 +2014,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     connect(m_cmbSearchMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onHeroSearchModeChanged);
 
     m_graphTab = new QWidget(this);
-    auto *graphLayout = new QVBoxLayout(m_graphTab);
-    graphLayout->setContentsMargins(0, 0, 0, 0);
-    m_graphTacticalTitle = new QLabel(QStringLiteral("[戰術情報網絡分析]"), m_graphTab);
-    applyPanelTitleLabelStyle(m_graphTacticalTitle);
-    graphLayout->addWidget(m_graphTacticalTitle, 0);
     m_graphWidget = new GraphWidget(&tagManager, m_graphTab);
-    m_graphWidget->setMinimumHeight(520);
-    graphLayout->addWidget(m_graphWidget, 1);
+    if (!m_graphTab->layout()) {
+        QVBoxLayout *layout = new QVBoxLayout(m_graphTab);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+        layout->addWidget(m_graphWidget);
+    }
+    m_graphWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_mainTabWidget->addTab(m_graphTab, tr("關聯圖譜分析"));
 
     m_taskCenterTab = new QWidget(this);
@@ -2112,6 +2228,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() { updateAllTexts(); });
     updateAllTexts();
+
+    if (btnPhysicalArchive) {
+        disconnect(btnPhysicalArchive, nullptr, nullptr, nullptr);
+        connect(btnPhysicalArchive, &QPushButton::clicked, this, [this]() { executePhysicalArchive(); });
+    }
 }
 
 void MainWindow::onDirectoryChanged(const QString &path) {
@@ -2443,10 +2564,10 @@ void MainWindow::updateAllTexts() {
     }
 
     if (m_previewInsightTabWidget && m_previewAiSuggestTab && m_previewAiSummaryTab) {
-        m_previewInsightTabWidget->setTabText(m_previewInsightTabWidget->indexOf(m_previewAiSuggestTab),
-                                              lm.getText(QStringLiteral("AI 智能建議")));
         m_previewInsightTabWidget->setTabText(m_previewInsightTabWidget->indexOf(m_previewAiSummaryTab),
-                                              lm.getText(QStringLiteral("AI 智慧摘要")));
+                                              lm.getText(QStringLiteral("摘要")));
+        m_previewInsightTabWidget->setTabText(m_previewInsightTabWidget->indexOf(m_previewAiSuggestTab),
+                                              lm.getText(QStringLiteral("標籤建議")));
     }
     if (lblStatus) {
         const QString zh = QStringLiteral("狀態: 就緒");
@@ -2830,10 +2951,8 @@ void MainWindow::setupFourColumnLayout() {
     fileTitleRow->addSpacing(8);
     lblBackgroundStatus = new QLabel(this);
     lblBackgroundStatus->setVisible(false);
-    lblBackgroundStatus->setWordWrap(false);
     lblBackgroundStatus->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    lblBackgroundStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    lblBackgroundStatus->setStyleSheet(sfFileListAnalysisStatusStyleSheet());
+    applyRobotAnalysisStatusLabelStyle(lblBackgroundStatus);
     fileTitleRow->addWidget(lblBackgroundStatus, 1, Qt::AlignLeft | Qt::AlignVCenter);
 
     m_btnRestartBackgroundAnalyze = new QPushButton(this);
@@ -3006,8 +3125,8 @@ void MainWindow::setupFourColumnLayout() {
 
     m_fileListProgressPanel = new QWidget(this);
     m_fileListProgressPanel->setVisible(false);
-    m_fileListProgressPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    m_fileListProgressPanel->setFixedHeight(52);
+    m_fileListProgressPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    m_fileListProgressPanel->setMinimumHeight(56);
     auto *fileProgressLayout = new QVBoxLayout(m_fileListProgressPanel);
     fileProgressLayout->setContentsMargins(0, 4, 0, 0);
     fileProgressLayout->setSpacing(4);
@@ -3037,9 +3156,8 @@ void MainWindow::setupFourColumnLayout() {
 
     lblBatchStatus = new QLabel(m_fileListProgressPanel);
     lblBatchStatus->setVisible(false);
-    lblBatchStatus->setWordWrap(false);
-    lblBatchStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    lblBatchStatus->setStyleSheet(QStringLiteral("QLabel { color: #e2e8f0; font-size: 12px; }"));
+    lblBatchStatus->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    applyRobotAnalysisStatusLabelStyle(lblBatchStatus);
     fileProgressLayout->addWidget(lblBatchStatus);
     filesLayout->addWidget(m_fileListProgressPanel, 0);
 
@@ -3101,13 +3219,6 @@ void MainWindow::setupFourColumnLayout() {
     m_previewInsightTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_previewInsightTabWidget->setFixedHeight(104);
 
-    m_previewAiSuggestTab = new QWidget(this);
-    auto *aiSuggestLayout = new QVBoxLayout(m_previewAiSuggestTab);
-    aiSuggestLayout->setContentsMargins(6, 6, 6, 6);
-    m_aiSuggestionsView = makePreviewInsightTextView(m_previewAiSuggestTab);
-    aiSuggestLayout->addWidget(m_aiSuggestionsView);
-    m_previewInsightTabWidget->addTab(m_previewAiSuggestTab, QStringLiteral("AI 智能建議"));
-
     m_previewAiSummaryTab = new QWidget(this);
     auto *aiSummaryLayout = new QVBoxLayout(m_previewAiSummaryTab);
     aiSummaryLayout->setContentsMargins(6, 6, 6, 6);
@@ -3115,12 +3226,20 @@ void MainWindow::setupFourColumnLayout() {
     m_aiSummaryEdit->setAcceptRichText(false);
     m_aiSummaryEdit->setPlaceholderText(QStringLiteral("尚未分析"));
     aiSummaryLayout->addWidget(m_aiSummaryEdit);
-    m_previewInsightTabWidget->addTab(m_previewAiSummaryTab, QStringLiteral("AI 智慧摘要"));
+    m_previewInsightTabWidget->addTab(m_previewAiSummaryTab, QStringLiteral("摘要"));
+
+    m_previewAiSuggestTab = new QWidget(this);
+    auto *aiSuggestLayout = new QVBoxLayout(m_previewAiSuggestTab);
+    aiSuggestLayout->setContentsMargins(6, 6, 6, 6);
+    m_aiSuggestionsView = makePreviewInsightTextView(m_previewAiSuggestTab);
+    aiSuggestLayout->addWidget(m_aiSuggestionsView);
+    m_previewInsightTabWidget->addTab(m_previewAiSuggestTab, QStringLiteral("標籤建議"));
+    m_previewInsightTabWidget->setCurrentIndex(0);
     previewLayout->addWidget(m_previewInsightTabWidget, 0);
 
     m_statusRow = new QWidget(this);
-    m_statusRow->setFixedHeight(28);
-    m_statusRow->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_statusRow->setMinimumHeight(36);
+    m_statusRow->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     auto *statusHBox = new QHBoxLayout(m_statusRow);
     statusHBox->setContentsMargins(0, 0, 0, 0);
     statusHBox->setSpacing(8);
@@ -3128,7 +3247,7 @@ void MainWindow::setupFourColumnLayout() {
     m_statusBusyChip->setFixedSize(20, 20);
     m_statusBusyChip->hide();
     statusHBox->addWidget(m_statusBusyChip, 0, Qt::AlignTop);
-    lblStatus = new QLabel(QStringLiteral("狀態: 就緒"), this);
+    lblStatus = new QLabel(QStringLiteral("狀態: 就緒"), m_statusRow);
     lblStatus->setWordWrap(true);
     statusHBox->addWidget(lblStatus, 1);
     previewLayout->addWidget(m_statusRow);
@@ -3189,11 +3308,10 @@ void MainWindow::setupFourColumnLayout() {
 
     auto *analysisRow = new QHBoxLayout();
     btnAnalyzeFile = new QPushButton(QStringLiteral("✨ 分析"), this);
-    connect(btnAnalyzeFile, &QPushButton::clicked, this, &MainWindow::analyzeFile);
+    connect(btnAnalyzeFile, &QPushButton::clicked, this, &MainWindow::executeSingleAnalysis);
     analysisRow->addWidget(btnAnalyzeFile);
 
     btnCancelAnalysis = new QPushButton(QStringLiteral("⛔ 取消"), this);
-    connect(btnCancelAnalysis, &QPushButton::clicked, this, &MainWindow::cancelAnalysis);
     btnCancelAnalysis->setEnabled(false);
     analysisRow->addWidget(btnCancelAnalysis);
     analysisRow->addStretch(1);
@@ -3201,11 +3319,10 @@ void MainWindow::setupFourColumnLayout() {
 
     auto *archiveRow = new QHBoxLayout();
     btnPhysicalArchive = new QPushButton(QStringLiteral("實體歸檔 (依標籤)"), this);
-    connect(btnPhysicalArchive, &QPushButton::clicked, this, &MainWindow::physicalArchiveFiles);
+    connect(btnPhysicalArchive, &QPushButton::clicked, this, &MainWindow::executePhysicalArchive);
     archiveRow->addWidget(btnPhysicalArchive);
 
     btnUndoPhysicalArchive = new QPushButton(QStringLiteral("回上一步 (復原歸檔)"), this);
-    connect(btnUndoPhysicalArchive, &QPushButton::clicked, this, &MainWindow::undoLastPhysicalArchive);
     btnUndoPhysicalArchive->setEnabled(false);
     archiveRow->addWidget(btnUndoPhysicalArchive);
     archiveRow->addStretch(1);
@@ -3232,6 +3349,27 @@ void MainWindow::setupFourColumnLayout() {
     mainSplitter->setStretchFactor(3, 3);
 
     syncNavigationButtons();
+    wirePreviewControlSignals();
+}
+
+void MainWindow::wirePreviewControlSignals()
+{
+    if (btnAnalyzeFile) {
+        disconnect(btnAnalyzeFile, &QPushButton::clicked, this, nullptr);
+        connect(btnAnalyzeFile, &QPushButton::clicked, this, &MainWindow::executeSingleAnalysis);
+    }
+    if (btnPhysicalArchive) {
+        disconnect(btnPhysicalArchive, nullptr, nullptr, nullptr);
+        connect(btnPhysicalArchive, &QPushButton::clicked, this, [this]() { executePhysicalArchive(); });
+    }
+    if (btnUndoPhysicalArchive) {
+        disconnect(btnUndoPhysicalArchive, &QPushButton::clicked, this, nullptr);
+        connect(btnUndoPhysicalArchive, &QPushButton::clicked, this, &MainWindow::undoLastPhysicalArchive);
+    }
+    if (btnCancelAnalysis) {
+        disconnect(btnCancelAnalysis, &QPushButton::clicked, this, nullptr);
+        connect(btnCancelAnalysis, &QPushButton::clicked, this, &MainWindow::cancelAnalysis);
+    }
 }
 
 void MainWindow::setupContextMenus() {
@@ -3897,171 +4035,24 @@ static bool sfMoveFileForPhysicalArchive(const QString &srcPath, const QString &
         return false;
     return f.remove();
 }
-
-static QStringList sfWorkspaceDestinationFolderNames(const QString &workspaceRoot)
-{
-    QStringList out;
-    const QString root = QDir::cleanPath(workspaceRoot);
-    if (root.isEmpty())
-        return out;
-
-    const QStringList dirs = QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-    for (const QString &name : dirs) {
-        if (name == QStringLiteral(".smartfile"))
-            continue;
-        out << name;
-    }
-    out.removeDuplicates();
-    return out;
-}
-
-static bool sfPromptPhysicalArchivePlan(QWidget *parent,
-                                        const QString &workspaceRoot,
-                                        QList<PhysicalArchivePlanEntry> *entriesInOut)
-{
-    if (!parent || !entriesInOut || entriesInOut->isEmpty())
-        return false;
-
-    QStringList destinationOptions;
-    for (const QString &name : sfWorkspaceDestinationFolderNames(workspaceRoot))
-        destinationOptions << name;
-    for (const QString &k : sfFixedAiClusterDrawerKeys()) {
-        const QString sanitized = sanitizeTagFolderName(k);
-        if (!sanitized.isEmpty() && !destinationOptions.contains(sanitized))
-            destinationOptions << sanitized;
-    }
-
-    QDialog dlg(parent);
-    dlg.setWindowTitle(LanguageManager::instance().getText(QStringLiteral("physical_archive_confirm_title")));
-    dlg.setModal(true);
-    dlg.resize(960, 560);
-    dlg.setMinimumWidth(820);
-
-    auto *layout = new QVBoxLayout(&dlg);
-    auto *intro = new QLabel(
-        LanguageManager::instance().getText(QStringLiteral("physical_archive_confirm_body")).arg(workspaceRoot),
-        &dlg);
-    intro->setWordWrap(true);
-    layout->addWidget(intro);
-
-    auto *hint = new QLabel(QStringLiteral("勾選「歸檔」的檔案會搬移；取消勾選則略過。目標資料夾可選工作區既有子目錄或預設分類。"),
-                            &dlg);
-    hint->setWordWrap(true);
-    layout->addWidget(hint);
-
-    auto *headerRow = new QWidget(&dlg);
-    auto *headerLayout = new QHBoxLayout(headerRow);
-    headerLayout->setContentsMargins(0, 0, 0, 0);
-    headerLayout->addWidget(new QLabel(QStringLiteral("歸檔"), headerRow), 0);
-    headerLayout->addWidget(new QLabel(QStringLiteral("檔案"), headerRow), 1);
-    headerLayout->addWidget(new QLabel(QStringLiteral("目標資料夾"), headerRow), 1);
-    layout->addWidget(headerRow);
-
-    auto *scroll = new QScrollArea(&dlg);
-    scroll->setWidgetResizable(true);
-    auto *scrollBody = new QWidget(scroll);
-    auto *rowsLayout = new QVBoxLayout(scrollBody);
-    rowsLayout->setContentsMargins(0, 0, 0, 0);
-    rowsLayout->setSpacing(6);
-
-    QVector<QPair<QCheckBox *, QComboBox *>> rowWidgets;
-    rowWidgets.reserve(entriesInOut->size());
-    for (const PhysicalArchivePlanEntry &entry : std::as_const(*entriesInOut)) {
-        auto *row = new QWidget(scrollBody);
-        auto *rowLayout = new QHBoxLayout(row);
-        rowLayout->setContentsMargins(0, 0, 0, 0);
-
-        auto *archive = new QCheckBox(QStringLiteral("歸檔"), row);
-        archive->setChecked(true);
-        archive->setToolTip(QStringLiteral("取消勾選則略過此檔案，不進行歸檔。"));
-
-        auto *pathLabel = new QLabel(QFileInfo(entry.srcPath).fileName(), row);
-        pathLabel->setToolTip(entry.srcPath);
-
-        auto *destination = new QComboBox(row);
-        destination->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        for (const QString &opt : std::as_const(destinationOptions))
-            destination->addItem(opt, opt);
-        const int idx = destination->findData(entry.destFolder);
-        destination->setCurrentIndex(idx >= 0 ? idx : destination->findText(entry.destFolder));
-
-        rowLayout->addWidget(archive, 0);
-        rowLayout->addWidget(pathLabel, 1);
-        rowLayout->addWidget(destination, 1);
-        rowsLayout->addWidget(row);
-        rowWidgets.push_back(qMakePair(archive, destination));
-    }
-    scroll->setWidget(scrollBody);
-    layout->addWidget(scroll, 1);
-
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    layout->addWidget(buttons);
-
-    if (dlg.exec() != QDialog::Accepted)
-        return false;
-
-    for (int i = 0; i < entriesInOut->size(); ++i) {
-        const auto &widgets = rowWidgets.at(i);
-        if (widgets.first && !widgets.first->isChecked()) {
-            (*entriesInOut)[i].destFolder.clear();
-            continue;
-        }
-        if (widgets.second) {
-            const QString chosen = widgets.second->currentData().toString().trimmed();
-            (*entriesInOut)[i].destFolder =
-                chosen.isEmpty() ? widgets.second->currentText().trimmed() : chosen;
-        }
-    }
-    return true;
-}
 } // namespace
 
-void MainWindow::physicalArchiveFiles() {
-    auto &lm = LanguageManager::instance();
-    if (rootPath.isEmpty()) {
-        QMessageBox::information(this, lm.getText(QStringLiteral("physical_archive_confirm_title")),
-                                 lm.getText(QStringLiteral("physical_archive_need_workspace")));
+void MainWindow::executePhysicalArchive() {
+    if (rootPath.isEmpty())
         return;
-    }
 
     const QString rootClean = QDir::cleanPath(rootPath);
-    const QString homeClean = QDir::cleanPath(QDir::homePath());
-    const QString desktopClean = QDir::cleanPath(QDir(homeClean).filePath(QStringLiteral("Desktop")));
-
-    const bool isRootDir = QDir(rootClean).isRoot()
-#ifdef Q_OS_WIN
-                           || QRegularExpression(QStringLiteral("^[A-Za-z]:/$")).match(rootClean + QLatin1Char('/')).hasMatch()
-#endif
-        ;
-    const bool isHighRisk = isRootDir || rootClean == homeClean || rootClean == desktopClean;
-    if (isHighRisk) {
-        QMessageBox::critical(
-            this,
-            lm.getText(QStringLiteral("physical_archive_confirm_title")),
-            lm.getText(QStringLiteral("physical_archive_high_risk")));
-        return;
-    }
-
-    QList<PhysicalArchivePlanEntry> plan;
+    QStringList filesToArchive;
     {
         std::vector<QString> taggedPaths;
         {
             QMutexLocker locker(&tagMutex);
             taggedPaths = tagManager.taggedFilePaths();
         }
-
         for (const QString &pathEntry : taggedPaths) {
             const QString srcPath = QDir::cleanPath(pathEntry);
             if (!sfAbsolutePathUnderWorkspaceRoot(srcPath, rootClean))
                 continue;
-
-            std::vector<QString> tagsForFile;
-            {
-                QMutexLocker locker(&tagMutex);
-                tagsForFile = tagManager.getTags(srcPath);
-            }
 
             const QFileInfo fiSrc(srcPath);
             if (!fiSrc.exists() || !fiSrc.isFile())
@@ -4073,26 +4064,79 @@ void MainWindow::physicalArchiveFiles() {
             if (rel == QStringLiteral(".smartfile") || rel.startsWith(QStringLiteral(".smartfile/")))
                 continue;
 
-            const QString folderName = sfPhysicalArchiveFolderNameFromAllFileTags(tagsForFile, m_aiTagToDrawerKey);
-            const QString destDir = QDir(rootClean).absoluteFilePath(folderName);
-            if (QDir::cleanPath(fiSrc.absolutePath()) == QDir::cleanPath(destDir))
-                continue;
-
-            PhysicalArchivePlanEntry entry;
-            entry.srcPath = srcPath;
-            entry.destFolder = folderName;
-            plan.push_back(entry);
+            filesToArchive.append(srcPath);
         }
     }
 
-    if (plan.isEmpty()) {
-        QMessageBox::information(this,
-                                 lm.getText(QStringLiteral("physical_archive_confirm_title")),
-                                 lm.getText(QStringLiteral("physical_archive_no_moves")));
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("實體歸檔規劃"));
+    dialog.resize(500, 400);
+    QVBoxLayout mainLayout(&dialog);
+
+    mainLayout.addWidget(new QLabel(QStringLiteral("請勾選要歸檔的檔案 (取消勾選即不歸檔/留在原地)："), &dialog));
+    QListWidget listWidget(&dialog);
+    for (const QString &file : filesToArchive) {
+        QListWidgetItem *item = new QListWidgetItem(file, &listWidget);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(Qt::Checked);
+    }
+    mainLayout.addWidget(&listWidget);
+
+    mainLayout.addWidget(new QLabel(QStringLiteral("選擇歸檔目標資料夾："), &dialog));
+    QComboBox folderCombo(&dialog);
+    folderCombo.addItem(QStringLiteral("[維持 AI 預設 18 大分類]"));
+
+    QDir dir(rootClean);
+    const QStringList subDirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &subDir : subDirs) {
+        if (subDir == QStringLiteral(".smartfile"))
+            continue;
+        folderCombo.addItem(subDir);
+    }
+    mainLayout.addWidget(&folderCombo);
+
+    QDialogButtonBox buttonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(&buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(&buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    mainLayout.addWidget(&buttonBox);
+
+    if (dialog.exec() != QDialog::Accepted)
         return;
+
+    const bool useAiDefault = folderCombo.currentIndex() == 0;
+    const QString legacyFolder = folderCombo.currentText().trimmed();
+
+    QList<PhysicalArchivePlanEntry> plan;
+    for (int i = 0; i < listWidget.count(); ++i) {
+        QListWidgetItem *item = listWidget.item(i);
+        if (!item || item->checkState() != Qt::Checked)
+            continue;
+
+        const QString srcPath = QDir::cleanPath(item->text());
+        if (srcPath.isEmpty())
+            continue;
+
+        QString folder;
+        if (useAiDefault) {
+            std::vector<QString> tagsForFile;
+            {
+                QMutexLocker locker(&tagMutex);
+                tagsForFile = tagManager.getTags(srcPath);
+            }
+            folder = sfPhysicalArchiveFolderNameFromAllFileTags(tagsForFile, m_aiTagToDrawerKey);
+        } else {
+            folder = legacyFolder;
+        }
+        if (folder.isEmpty())
+            continue;
+
+        PhysicalArchivePlanEntry entry;
+        entry.srcPath = srcPath;
+        entry.destFolder = folder;
+        plan.push_back(entry);
     }
 
-    if (!sfPromptPhysicalArchivePlan(this, rootClean, &plan))
+    if (plan.isEmpty())
         return;
 
     m_lastMoveHistory.clear();
@@ -4115,7 +4159,7 @@ void MainWindow::physicalArchiveFiles() {
             continue;
 
         if (!sfMoveFileForPhysicalArchive(srcPath, destPath)) {
-            qDebug() << "physicalArchiveFiles: move failed" << srcPath << "->" << destPath;
+            qDebug() << "executePhysicalArchive: move failed" << srcPath << "->" << destPath;
             continue;
         }
 
@@ -6250,24 +6294,7 @@ std::vector<QString> MainWindow::sanitizeAiTags(const QString &raw) const {
     cleaned.replace(QStringLiteral("\n"), QStringLiteral(" ")).replace(QStringLiteral("\r"), QStringLiteral(" "));
 
     QStringList parts = cleaned.split(QRegularExpression(QStringLiteral("[,，、]")), Qt::SkipEmptyParts);
-    QSet<QString> seen;
-    std::vector<QString> out;
-    const bool en = (LanguageManager::instance().language() == LanguageManager::Language::EN_US);
-    const int maxLen = en ? 24 : 15;
-
-    for (const QString &p0 : parts) {
-        QString p = TagManager::stripAiPrefix(p0.trimmed());
-        // Do NOT strip '[' / ']' here — that mangles "[AI] …" into "AI] …" / "[ …" garbage. Only trim punctuation/symbols.
-        p.replace(QRegularExpression(QStringLiteral("[\\s\\.。;；:：\\(\\)<>\"'`~!@#$%^&*+=\\|\\\\/?]+")), QString());
-        p = p.trimmed();
-        if (p.isEmpty()) continue;
-        if (p.size() > maxLen) continue;
-        if (seen.contains(p)) continue;
-        seen.insert(p);
-        out.push_back(p);
-        if (out.size() >= 5) break;
-    }
-    return out;
+    return sfFilterAiAnalysisTags(parts);
 }
 
 void MainWindow::setUiBusy(bool busy) {
@@ -6289,7 +6316,32 @@ void MainWindow::setUiBusy(bool busy) {
     refreshCurrentAnalysisTargetUi();
 }
 
-void MainWindow::analyzeFile() {
+void MainWindow::clearAnalysisCacheForReanalysis(const QString &absPath)
+{
+    const QString fp = QDir::cleanPath(absPath);
+    if (fp.isEmpty())
+        return;
+
+    m_aiSummaryByPath.remove(fp);
+    m_pendingResults.remove(fp);
+    m_forceReanalyzePaths.insert(fp);
+    m_coldArchiveBypassPaths.insert(fp);
+
+    QString hashHex;
+    {
+        QMutexLocker locker(&tagMutex);
+        hashHex = tagManager.fileContentHash(fp);
+        tagManager.clearAnalysisCacheForPath(fp, true);
+    }
+    if (!hashHex.isEmpty())
+        m_analysisByContentHash.remove(hashHex);
+
+    if (m_aiSummaryEdit && QDir::cleanPath(currentFilePath()) == fp)
+        m_aiSummaryEdit->clear();
+}
+
+void MainWindow::executeSingleAnalysis() {
+    qDebug() << "Analyze Button Triggered";
     const QString fp = QDir::cleanPath(currentFilePath());
     if (fp.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
@@ -6302,12 +6354,14 @@ void MainWindow::analyzeFile() {
         return;
     }
 
+    clearAnalysisCacheForReanalysis(fp);
+
     if (m_isBatchMode) {
         prependSingleFileToAnalysisQueueFront(fp);
         return;
     }
 
-    startAnalysisQueue(QStringList{fp}, false, true);
+    startBatchAnalysis(QStringList{fp});
 }
 
 void MainWindow::startAnalysisQueue(const QStringList &pathsIn, bool backgroundAuto, bool singleFileMode)
@@ -6364,6 +6418,9 @@ bool MainWindow::tryO1AnalysisCacheBypass(const QString &absPath)
 {
     const QString fp = QDir::cleanPath(absPath);
     if (fp.isEmpty())
+        return false;
+
+    if (m_forceReanalyzePaths.contains(fp))
         return false;
 
     if (pathHasUsableAnalysisSummary(fp)) {
@@ -6464,7 +6521,7 @@ void MainWindow::rebuildTaskCenterRedundancyFromMetadata()
     refreshTaskCenterRedundancyTreeUi();
 }
 
-void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiveBypass) {
+void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiveBypass, bool forceReanalyze) {
     const QString fp = QDir::cleanPath(absPath);
     if (fp.isEmpty()) return;
 
@@ -6478,9 +6535,11 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
         return;
     }
 
+    const bool force = forceReanalyze || m_forceReanalyzePaths.contains(fp);
+
     QString bypassSummary;
     QStringList bypassTags;
-    if (trySystemBypassPreset(fi, &bypassSummary, &bypassTags)) {
+    if (!force && trySystemBypassPreset(fi, &bypassSummary, &bypassTags)) {
         m_currentAnalyzingFile = fp;
         applyPresetBypassAnalysis(fp, bypassSummary, bypassTags);
         return;
@@ -6491,18 +6550,18 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
         m_coldArchiveBypassPaths.remove(fp);
         fromBypassSet = true;
     }
-    const bool forceLlmCold = forceColdArchiveBypass || fromBypassSet || !m_isBatchMode
+    const bool forceLlmCold = force || forceColdArchiveBypass || fromBypassSet || !m_isBatchMode
                               || (m_isBatchMode && !m_batchTriggeredByBackgroundAuto);
 
     QString coldSummary;
     QStringList coldTags;
-    if (tryColdArchiveBypass(fi, forceLlmCold, &coldSummary, &coldTags)) {
+    if (!force && tryColdArchiveBypass(fi, forceLlmCold, &coldSummary, &coldTags)) {
         m_currentAnalyzingFile = fp;
         applyColdArchiveAnalysis(fp, coldSummary, coldTags);
         return;
     }
 
-    if (tryO1AnalysisCacheBypass(fp)) {
+    if (!force && tryO1AnalysisCacheBypass(fp)) {
         m_currentAnalyzingFile = fp;
         if (m_isBatchMode) {
             advanceBatchAfterInstantCacheResult(fp);
@@ -6522,7 +6581,7 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
     if (contentHash.isEmpty())
         contentHash = sha256HexOfFile(fp);
     primeAnalysisCacheFromDisk(contentHash);
-    if (!contentHash.isEmpty() && m_analysisByContentHash.contains(contentHash)) {
+    if (!force && !contentHash.isEmpty() && m_analysisByContentHash.contains(contentHash)) {
         const QJsonObject cached = m_analysisByContentHash.value(contentHash);
         m_currentAnalyzingFile = fp;
         applyCachedAnalysisForHashHit(fp, cached, contentHash);
@@ -6535,6 +6594,8 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
         }
         return;
     }
+
+    m_forceReanalyzePaths.remove(fp);
 
     if (!m_llamaEngine || !m_llamaEngine->isModelLoaded()) {
         // If we're auto-loading in background, wait (blocking) to avoid "Model not loaded" race.
@@ -6675,7 +6736,13 @@ void MainWindow::startBatchAnalysis() {
         if (!sfPathHasAnalyzableTextOrDocSuffix(absPath)) continue;
         batchPaths << QDir::cleanPath(absPath);
     }
-    startAnalysisQueue(batchPaths, false);
+    startAnalysisQueue(batchPaths, false, false);
+}
+
+void MainWindow::startBatchAnalysis(const QStringList &explicitPaths) {
+    if (m_isBatchMode)
+        return;
+    startAnalysisQueue(explicitPaths, false, explicitPaths.size() <= 1);
 }
 
 void MainWindow::processNextInQueue() {
@@ -6740,6 +6807,7 @@ void MainWindow::processNextInQueue() {
     updateBackgroundStatusLabel();
     if (lblBatchStatus) {
         lblBatchStatus->setText(formatBatchAnalyzingStatusLine());
+        refreshRobotAnalysisStatusLabelHeight(lblBatchStatus);
     }
 
     analyzeFileForPath(nextFile);
@@ -7080,6 +7148,7 @@ void MainWindow::beginBatchAnalysisUi()
     }
     if (lblBatchStatus) {
         lblBatchStatus->setText(formatBatchAnalyzingStatusLine());
+        refreshRobotAnalysisStatusLabelHeight(lblBatchStatus);
     }
     if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(false);
     if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(false);
@@ -7503,16 +7572,13 @@ void MainWindow::onAnalysisFinished() {
     }
 
     SfAnalysisOutcome outcome;
+    bool usedAiParseFallback = false;
     try {
         outcome = watcher->result();
     } catch (...) {
-        setUiBusy(false);
-        m_analysisUiWorkActive = false;
-        m_currentAnalyzingFile.clear();
-        cancelFlag.store(false);
-        finishWorker();
-        clearAnalysisWorkFlagsAndSyncUi();
-        return;
+        qWarning() << "[analyze] watcher result exception; applying AI parse fallback";
+        outcome.raw.clear();
+        usedAiParseFallback = true;
     }
 
     if (outcome.workspaceEpochAtSubmit != static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire))) {
@@ -7536,22 +7602,14 @@ void MainWindow::onAnalysisFinished() {
                                || cancelFlag.load(std::memory_order_acquire);
         if (cancelled) {
             lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("已取消")));
-        } else {
-            lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析失敗")));
-            qWarning() << "[analyze]" << qRaw;
-            if (!fp.isEmpty()) m_aiSummaryByPath.remove(fp);
+            m_currentAnalyzingFile.clear();
+            refreshCurrentAnalysisTargetUi();
+            finishWorker();
+            clearAnalysisWorkFlagsAndSyncUi();
+            return;
         }
-        if (m_isBatchMode && !cancelled) {
-            ++m_batchCompletedCount;
-            setUiBusy(false);
-            updateBackgroundStatusLabel();
-            QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
-        }
-        m_currentAnalyzingFile.clear();
-        refreshCurrentAnalysisTargetUi();
-        finishWorker();
-        clearAnalysisWorkFlagsAndSyncUi();
-        return;
+        qWarning() << "[analyze] model error; applying AI parse fallback:" << qRaw;
+        usedAiParseFallback = true;
     }
 
     if (cancelFlag.load(std::memory_order_acquire)) {
@@ -7598,19 +7656,11 @@ void MainWindow::onAnalysisFinished() {
         return out;
     };
 
-    auto normalizeAiTag = [](QString tag) -> QString {
-        tag = tag.trimmed().toLower();
-        tag.replace(QRegularExpression(QStringLiteral("^[-•\\s]+")), QString());
-        tag.replace(QRegularExpression(QStringLiteral("^[\"'`]+|[\"'`]+$")), QString());
-        tag.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
-        tag = tag.trimmed();
-        return tag;
-    };
-
     QString summary;
     std::vector<QString> tags;
 
-    {
+    if (!usedAiParseFallback) {
+        try {
         const QStringList candidates = extractJsonObjectCandidates(qRaw);
         QStringList tagsList;
 
@@ -7624,18 +7674,16 @@ void MainWindow::onAnalysisFinished() {
 
             const QJsonObject obj = doc.object();
 
-            const QString s = obj.value(QStringLiteral("summary")).toString().trimmed();
+            const QString s = sfCoerceStorageSummary(obj.value(QStringLiteral("summary")).toString().trimmed());
             if (summary.isEmpty() && sfSummaryAcceptableForStorage(s)) summary = s;
 
             const QJsonValue tagsV = obj.value(QStringLiteral("tags"));
             if (tagsV.isArray()) {
                 const QJsonArray arr = tagsV.toArray();
                 for (const auto &v : arr) {
-                    if (tagsList.size() >= 5) break; // hard limit across all blocks
-                    QString t = normalizeAiTag(v.toString());
+                    if (tagsList.size() >= 32) break;
+                    const QString t = v.toString().trimmed();
                     if (t.isEmpty()) continue;
-                    if (t == QStringLiteral("ai")) continue; // drop meaningless tag
-                    if (t.size() > 15) continue; // drop long phrases
                     tagsList << t;
                 }
             }
@@ -7643,59 +7691,45 @@ void MainWindow::onAnalysisFinished() {
             if (sfSummaryAcceptableForStorage(summary) && tagsList.size() >= 5) break;
         }
 
-        if (!tagsList.isEmpty()) {
-            QSet<QString> seen;
-            tags.clear();
-            for (const QString &raw : tagsList) {
-                if (tags.size() >= 5) break;
-                QString t = TagManager::stripAiPrefix(raw.trimmed());
-                t = normalizeAiTag(t);
-                if (t.isEmpty()) continue;
-                if (t == QStringLiteral("ai")) continue;
-                if (t.size() > 15) continue;
-                if (seen.contains(t)) continue;
-                seen.insert(t);
-                tags.push_back(t);
-            }
+        if (!tagsList.isEmpty())
+            tags = sfFilterAiAnalysisTags(tagsList);
+        } catch (...) {
+            qWarning() << "[analyze] JSON parse exception; applying AI parse fallback for" << fp;
+            usedAiParseFallback = true;
         }
     }
 
-    if (!sfSummaryAcceptableForStorage(summary)) {
-        const QString rx = sfExtractSummaryRegexFallback(qRaw);
-        if (!rx.isEmpty()) summary = rx;
+    if (!usedAiParseFallback) {
+        summary = sfCoerceStorageSummary(summary);
+        if (!sfSummaryAcceptableForStorage(summary)) {
+            const QString rx = sfExtractSummaryRegexFallback(qRaw);
+            if (!rx.isEmpty()) summary = sfCoerceStorageSummary(rx);
+        }
+
+        if (tags.empty() && sfSummaryAcceptableForStorage(summary)) {
+            QStringList rawTagList;
+            for (const QString &t : sanitizeAiTags(qRaw))
+                rawTagList << t;
+            tags = sfFilterAiAnalysisTags(rawTagList);
+        }
+
+        if (!tags.empty()) {
+            QStringList tagList;
+            for (const QString &t : tags)
+                tagList << t;
+            tags = sfFilterAiAnalysisTags(tagList);
+        }
+
+        if (!sfSummaryAcceptableForStorage(summary) || tags.empty()) {
+            usedAiParseFallback = true;
+        }
     }
 
-    if (tags.empty() && sfSummaryAcceptableForStorage(summary)) {
-        // Fallback tags: still enforce hard limits to avoid long-sentence hallucinations.
-        const auto rawTags = sanitizeAiTags(qRaw);
-        std::vector<QString> filtered;
-        QSet<QString> seen;
-        for (const auto &t0 : rawTags) {
-            if (filtered.size() >= 5) break;
-            QString t = normalizeAiTag(t0);
-            if (t.isEmpty()) continue;
-            if (t == QStringLiteral("ai")) continue;
-            if (t.size() > 15) continue;
-            if (seen.contains(t)) continue;
-            seen.insert(t);
-            filtered.push_back(t);
-        }
-        tags = filtered;
+    if (usedAiParseFallback) {
+        sfApplyAiParseFallback(summary, tags);
     }
 
-    {
-        std::vector<QString> deduped;
-        QSet<QString> seenKeys;
-        for (const QString &t0 : tags) {
-            const QString t = t0.trimmed();
-            if (t.isEmpty()) continue;
-            const QString k = t.toLower();
-            if (seenKeys.contains(k)) continue;
-            seenKeys.insert(k);
-            deduped.push_back(t);
-        }
-        tags = std::move(deduped);
-    }
+    summary = sfCoerceStorageSummary(summary);
 
     if (fp.isEmpty()) {
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成（無選取檔案）")));
@@ -7711,21 +7745,8 @@ void MainWindow::onAnalysisFinished() {
         return;
     }
 
-    if (!sfSummaryAcceptableForStorage(summary)) {
-        m_aiSummaryByPath.remove(fp);
-        lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析失敗")));
-        qWarning() << "[analyze] invalid or empty summary; not persisting for" << fp;
-        if (m_isBatchMode) {
-            ++m_batchCompletedCount;
-            setUiBusy(false);
-            updateBackgroundStatusLabel();
-            QTimer::singleShot(100, this, &MainWindow::processNextInQueue);
-        }
-        m_currentAnalyzingFile.clear();
-        refreshCurrentAnalysisTargetUi();
-        finishWorker();
-        clearAnalysisWorkFlagsAndSyncUi();
-        return;
+    if (!sfSummaryAcceptableForStorage(summary) || tags.empty()) {
+        sfApplyAiParseFallback(summary, tags);
     }
 
     QString persistedHash;

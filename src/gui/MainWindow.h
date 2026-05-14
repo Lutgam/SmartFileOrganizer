@@ -127,7 +127,7 @@ private slots:
     void onTagSelected(QListWidgetItem *item);
     void onAiTagTreeItemClicked(QTreeWidgetItem *item, int column);
 
-    void physicalArchiveFiles();
+    void executePhysicalArchive();
     void undoLastPhysicalArchive();
     void onDirectoryChanged(const QString &path);
     void openSettings();
@@ -137,7 +137,7 @@ private slots:
     void goHome();
     void onSortChanged(int index);
 
-    void analyzeFile();
+    void executeSingleAnalysis();
     void cancelAnalysis();
     void onAnalysisFinished();
 
@@ -180,7 +180,6 @@ private:
     QWidget *m_settingsTab = nullptr;
     SettingsPanel *m_settingsPanel = nullptr;
     QWidget *m_graphTab = nullptr;
-    QLabel *m_graphTacticalTitle = nullptr;
     QWidget *m_taskCenterTab = nullptr;
     GraphWidget *m_graphWidget = nullptr;
 
@@ -370,11 +369,17 @@ private:
     quint64 m_manualAnalysisPrepEpoch = 0;
     /// Paths that must skip cold-archive short-circuit (prepend / folder prepend).
     QSet<QString> m_coldArchiveBypassPaths;
+    /// Single-file re-analyze: skip O(1) / hash / summary cache until LLM run starts.
+    QSet<QString> m_forceReanalyzePaths;
 
     void startBatchAnalysis();
+    void startBatchAnalysis(const QStringList &explicitPaths);
     void startAnalysisQueue(const QStringList &paths, bool backgroundAuto = false, bool singleFileMode = false);
     void processNextInQueue();
-    void analyzeFileForPath(const QString &absPath, bool forceColdArchiveBypass = false);
+    void analyzeFileForPath(const QString &absPath,
+                            bool forceColdArchiveBypass = false,
+                            bool forceReanalyze = false);
+    void clearAnalysisCacheForReanalysis(const QString &absPath);
     bool tryO1AnalysisCacheBypass(const QString &absPath);
     void advanceBatchAfterInstantCacheResult(const QString &absPath);
     void rebuildTaskCenterRedundancyFromMetadata();
@@ -452,7 +457,7 @@ private:
     QVector<QString> navHistory;
     int navIndex = -1;
 
-    // [newPath, oldPath] for last physicalArchiveFiles() run
+    // [newPath, oldPath] for last executePhysicalArchive() run
     QList<QPair<QString, QString>> m_lastMoveHistory;
 
     QFileSystemWatcher *m_dirWatcher = nullptr;
@@ -465,6 +470,7 @@ private:
     QString currentFilePath() const;
 
     void setupFourColumnLayout();
+    void wirePreviewControlSignals();
     void setupContextMenus();
 
     void bumpWorkspaceEpochAndPurgeStaleAsyncWork();

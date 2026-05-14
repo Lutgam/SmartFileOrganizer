@@ -3,10 +3,14 @@
 #include <QDebug>
 #include <QtGlobal>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMetaObject>
 #include <QMutexLocker>
 #include <QThread>
 #include <QRegularExpression>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <algorithm>
@@ -143,9 +147,8 @@ bool LlamaEngine::ensureModelLoaded() {
   }
 
   llama_context_params ctx_params = llama_context_default_params();
-  ctx_params.n_ctx = 2048;
-  // Default n_batch is often smaller than n_ctx; our decode path submits the full prompt in one batch.
-  ctx_params.n_batch = std::max(ctx_params.n_batch, ctx_params.n_ctx);
+  ctx_params.n_ctx = 8192;
+  ctx_params.n_batch = 2048;
   ctx = llama_init_from_model(model, ctx_params);
 
   if (!ctx) {
@@ -318,6 +321,198 @@ std::string LlamaEngine::generateResponseImpl(const std::string &prompt, int max
   return response_ss.str();
 }
 
+namespace {
+constexpr const char kSuggestTagsFallbackJson[] =
+    R"({"summary":"[系統提示：檔案內容過於複雜或包含特殊編碼，已切換至安全模式讀取檔名進行智能分類。]","tags":["通用文件"]})";
+
+std::string suggestTagsFailsafeJson()
+{
+  const QString fallbackJson = QString::fromUtf8(kSuggestTagsFallbackJson);
+  const QJsonDocument doc = QJsonDocument::fromJson(fallbackJson.toUtf8());
+  return doc.toJson(QJsonDocument::Compact).toStdString();
+}
+
+QString stripMarkdownJsonFences(QString text)
+{
+  text = text.trimmed();
+  text.remove(QRegularExpression(QStringLiteral("^```\\s*json\\s*"), QRegularExpression::CaseInsensitiveOption));
+  text.remove(QRegularExpression(QStringLiteral("^```\\s*")));
+  text.remove(QRegularExpression(QStringLiteral("```\\s*$")));
+  return text.trimmed();
+}
+
+bool suggestTagsJsonObjectValid(const QJsonObject &obj)
+{
+  const QString summary = obj.value(QStringLiteral("summary")).toString().trimmed();
+  if (summary.isEmpty()) return false;
+  const QJsonValue tagsV = obj.value(QStringLiteral("tags"));
+  if (!tagsV.isArray()) return false;
+  for (const QJsonValue &v : tagsV.toArray()) {
+    if (!v.toString().trimmed().isEmpty()) return true;
+  }
+  return false;
+}
+
+QString extractOutermostJsonObject(QString text)
+{
+  text = stripMarkdownJsonFences(text);
+  const int startIndex = text.indexOf(QLatin1Char('{'));
+  const int endIndex = text.lastIndexOf(QLatin1Char('}'));
+  if (startIndex != -1 && endIndex != -1 && endIndex > startIndex)
+    return text.mid(startIndex, endIndex - startIndex + 1);
+  return text;
+}
+
+QString aiTagDedupKey(QString tag)
+{
+  tag = tag.trimmed().toLower();
+  static const QRegularExpression noiseSuffix(
+      QStringLiteral("(檔案|文件|內容|設定檔|設定|變數|配置|資料)+$"));
+  tag.remove(noiseSuffix);
+  tag.remove(QRegularExpression(QStringLiteral("\\.(txt|json|xml|yaml|yml|ini|cfg|conf)$"),
+                               QRegularExpression::CaseInsensitiveOption));
+  return tag.trimmed();
+}
+
+QJsonArray sanitizeTagsArray(const QJsonArray &arr, int maxTags = 5, int maxLen = 15)
+{
+  QJsonArray out;
+  QSet<QString> seenKeys;
+  for (const QJsonValue &v : arr) {
+    if (out.size() >= maxTags) break;
+
+    QString t = v.toString().trimmed();
+    if (t.isEmpty() || t.compare(QStringLiteral("ai"), Qt::CaseInsensitive) == 0)
+      continue;
+    if (t.size() > maxLen)
+      continue;
+
+    const QString key = aiTagDedupKey(t);
+    if (key.isEmpty() || seenKeys.contains(key))
+      continue;
+
+    bool overlaps = false;
+    for (int i = 0; i < out.size(); ++i) {
+      const QString existingKey = aiTagDedupKey(out.at(i).toString());
+      if (existingKey.isEmpty())
+        continue;
+      if (key == existingKey || key.contains(existingKey) || existingKey.contains(key)) {
+        overlaps = true;
+        break;
+      }
+    }
+    if (overlaps)
+      continue;
+
+    seenKeys.insert(key);
+    out.append(t);
+  }
+
+  if (out.isEmpty())
+    out.append(QStringLiteral("通用文件"));
+  return out;
+}
+
+QString coerceSummaryText(QString summary)
+{
+  summary = summary.trimmed();
+  if (summary.isEmpty())
+    return summary;
+
+  if (summary.startsWith(QLatin1Char('{')) || summary.contains(QStringLiteral("\"summary\""))) {
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(summary.toUtf8(), &err);
+    if (err.error == QJsonParseError::NoError && doc.isObject()) {
+      const QString inner = doc.object().value(QStringLiteral("summary")).toString().trimmed();
+      if (!inner.isEmpty())
+        summary = inner;
+    }
+  }
+
+  if (summary.size() > 500)
+    summary = summary.left(500).trimmed();
+  return summary;
+}
+
+QJsonObject sanitizeSuggestTagsObject(const QJsonObject &obj)
+{
+  QJsonObject out;
+  QString summary = coerceSummaryText(obj.value(QStringLiteral("summary")).toString());
+  if (summary.isEmpty())
+    summary = QStringLiteral("檔案內容過於複雜，AI 無法產生有效文本。");
+  out.insert(QStringLiteral("summary"), summary);
+  out.insert(QStringLiteral("tags"), sanitizeTagsArray(obj.value(QStringLiteral("tags")).toArray()));
+  return out;
+}
+
+std::string wrapRawLlmOutputAsSuggestTagsJson(const QString &rawResponse)
+{
+  const QString cleanOutput = stripMarkdownJsonFences(rawResponse).trimmed();
+  if (cleanOutput.isEmpty()) {
+  QJsonObject fallbackObj;
+  fallbackObj.insert(QStringLiteral("summary"),
+                   QStringLiteral("檔案內容過於複雜，AI 無法產生有效文本。"));
+  fallbackObj.insert(QStringLiteral("tags"), sanitizeTagsArray(QJsonArray()));
+  return QJsonDocument(fallbackObj).toJson(QJsonDocument::Compact).toStdString();
+  }
+
+  const QString maybeJson = extractOutermostJsonObject(cleanOutput);
+  QJsonParseError parseError{};
+  const QJsonDocument doc = QJsonDocument::fromJson(maybeJson.toUtf8(), &parseError);
+  if (parseError.error == QJsonParseError::NoError && doc.isObject())
+    return QJsonDocument(sanitizeSuggestTagsObject(doc.object())).toJson(QJsonDocument::Compact).toStdString();
+
+  if (cleanOutput.startsWith(QLatin1Char('{'))) {
+    QJsonObject fallbackObj;
+    fallbackObj.insert(QStringLiteral("summary"),
+                     QStringLiteral("檔案內容過於複雜，AI 無法產生有效文本。"));
+    fallbackObj.insert(QStringLiteral("tags"), sanitizeTagsArray(QJsonArray()));
+    return QJsonDocument(fallbackObj).toJson(QJsonDocument::Compact).toStdString();
+  }
+
+  QJsonObject fallbackObj;
+  fallbackObj.insert(QStringLiteral("summary"), cleanOutput);
+  fallbackObj.insert(QStringLiteral("tags"), sanitizeTagsArray(QJsonArray()));
+  return QJsonDocument(fallbackObj).toJson(QJsonDocument::Compact).toStdString();
+}
+
+std::string ensureSuggestTagsJson(const std::string &raw)
+{
+  const QString llmOutputString = QString::fromStdString(raw).trimmed();
+  if (llmOutputString.isEmpty()) return suggestTagsFailsafeJson();
+  if (llmOutputString.startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive)) {
+    if (llmOutputString.startsWith(QStringLiteral("Error: Cancelled"), Qt::CaseInsensitive))
+      return raw;
+    return suggestTagsFailsafeJson();
+  }
+
+  QString rawResponse = extractOutermostJsonObject(llmOutputString);
+  QJsonParseError parseError{};
+  QJsonDocument doc = QJsonDocument::fromJson(rawResponse.toUtf8(), &parseError);
+  if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+    return wrapRawLlmOutputAsSuggestTagsJson(llmOutputString);
+  if (suggestTagsJsonObjectValid(doc.object())) {
+    return QJsonDocument(sanitizeSuggestTagsObject(doc.object())).toJson(QJsonDocument::Compact).toStdString();
+  }
+
+  static const QRegularExpression re(QStringLiteral("\\{.*?\\}"));
+  QRegularExpression jsonBlockRe(re);
+  jsonBlockRe.setPatternOptions(QRegularExpression::DotMatchesEverythingOption);
+  auto it = jsonBlockRe.globalMatch(llmOutputString);
+  while (it.hasNext()) {
+    const QString block = extractOutermostJsonObject(it.next().captured(0).trimmed());
+    if (block.isEmpty()) continue;
+    QJsonParseError blockError{};
+    const QJsonDocument blockDoc = QJsonDocument::fromJson(block.toUtf8(), &blockError);
+    if (blockError.error != QJsonParseError::NoError || !blockDoc.isObject()) continue;
+    if (!suggestTagsJsonObjectValid(blockDoc.object())) continue;
+    return QJsonDocument(sanitizeSuggestTagsObject(blockDoc.object())).toJson(QJsonDocument::Compact).toStdString();
+  }
+
+  return wrapRawLlmOutputAsSuggestTagsJson(llmOutputString);
+}
+} // namespace
+
 std::string LlamaEngine::suggestTags(const std::string &filename,
                                      const std::string &content,
                                      const std::string &rejectedTagsCsv,
@@ -326,8 +521,8 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
                                      const std::string &fileExt,
                                      bool pdfMetadataOnly)
 {
-  return suggestTagsImpl(filename, content, rejectedTagsCsv, existingTags, contentReadable, fileExt,
-                         pdfMetadataOnly);
+  return ensureSuggestTagsJson(suggestTagsImpl(filename, content, rejectedTagsCsv, existingTags, contentReadable,
+                                               fileExt, pdfMetadataOnly));
 }
 
 std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
@@ -340,6 +535,10 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
 {
   InferenceGuard guard(this);
   if (!ensureModelLoaded()) return "Error: Model not loaded";
+
+#if defined(LLAMA_API_VERSION)
+  if (ctx) llama_kv_cache_clear(ctx);
+#endif
 
   // --- Language awareness ---
   QString lang;
