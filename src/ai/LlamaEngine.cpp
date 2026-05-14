@@ -348,6 +348,8 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
     lang = m_currentLanguage.trimmed();
   }
   const bool en = (lang.compare(QStringLiteral("en_US"), Qt::CaseInsensitive) == 0);
+  const QString contentQ = QString::fromStdString(content).trimmed();
+  const bool treatContentReadable = contentReadable || contentQ.size() > 10;
 
   if (pdfMetadataOnly) {
     const std::string fixedSummaryEn =
@@ -395,7 +397,7 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
   }
 
   // If content is not readable (binary), do NOT hallucinate based on raw bytes.
-  if (!contentReadable) {
+  if (!treatContentReadable) {
     const std::string fixedSummaryEn =
         "System cannot read the content of this file format. Classifying based on filename only.";
     const std::string fixedSummaryZh =

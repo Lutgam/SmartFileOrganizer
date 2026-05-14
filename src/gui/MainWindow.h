@@ -362,6 +362,7 @@ private:
     int m_folderReportAiTagAdds = 0;
     int m_activeAnalysisWorkers = 0;
     bool m_batchTriggeredByBackgroundAuto = false;
+    bool m_isSingleFileBatchMode = false;
     /// `m_workspaceEpoch` when the current batch began; used to reject stale `flushPendingBatchResults`.
     quint64 m_batchFlushWorkspaceEpoch = 0;
     /// Immediate parent folder name for the file currently processed in batch (status label).
@@ -379,7 +380,7 @@ private:
     QSet<QString> m_coldArchiveBypassPaths;
 
     void startBatchAnalysis();
-    void startAnalysisQueue(const QStringList &paths, bool backgroundAuto = false);
+    void startAnalysisQueue(const QStringList &paths, bool backgroundAuto = false, bool singleFileMode = false);
     void processNextInQueue();
     void analyzeFileForPath(const QString &absPath, bool forceColdArchiveBypass = false);
     bool tryO1AnalysisCacheBypass(const QString &absPath);

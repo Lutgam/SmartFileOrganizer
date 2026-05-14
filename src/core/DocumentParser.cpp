@@ -144,7 +144,7 @@ QString DocumentParser::extractTextQString(const QString& filePath)
         const QByteArray utf8 = abs.toUtf8();
         const QString s = QString::fromStdString(
             parsDocx(std::string(utf8.constData(), static_cast<size_t>(utf8.size()))));
-        return cleanseXmlTagNoise(s).trimmed();
+        return sanitizeTextForAi(cleanseXmlTagNoise(s));
     }
     if (suffix == QStringLiteral("xlsx") || suffix == QStringLiteral("xlsm") || suffix == QStringLiteral("xltx")
         || suffix == QStringLiteral("xltm")) {
@@ -538,9 +538,8 @@ QString DocumentParser::extractTextForAi(const QString &filePath, bool *pdfMetad
                 *pdfMetadataOnly = true;
         }
     } else {
-        text = extractTextQString(abs);
+        text = sanitizeTextForAi(extractTextQString(abs));
     }
-    text = sanitizeTextForAi(text);
     return truncateForAi(text, kAiTextMaxChars);
 }
 

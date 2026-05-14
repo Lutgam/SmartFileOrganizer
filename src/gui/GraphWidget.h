@@ -3,6 +3,7 @@
 
 #include <QGraphicsView>
 #include <QGraphicsItem>
+#include <QListWidget>
 #include <vector>
 #include <map>
 
@@ -18,7 +19,7 @@ class QWidget;
 class Edge : public QGraphicsItem
 {
 public:
-    Edge(Node *sourceNode, Node *destNode);
+    Edge(Node *sourceNode, Node *destNode, const QColor &lineColor = QColor(160, 160, 160));
 
     Node *sourceNode() const { return source; }
     Node *destNode() const { return dest; }
@@ -37,6 +38,7 @@ private:
     QPointF sourcePoint;
     QPointF destPoint;
     qreal arrowSize;
+    QColor m_lineColor;
 };
 
 // --- Node Class ---
@@ -102,7 +104,8 @@ private:
 
     void ensureToolbar();
     void rebuildTagFilterOptions();
-    QString selectedFilterTag() const;
+    QStringList selectedFilterTags() const;
+    QColor edgeColorForTag(const QString &tag, int paletteIndex) const;
 
     int timerId;
     TagManager* tagManager;
@@ -112,8 +115,9 @@ private:
     std::map<QString, Node*> tagNodes;
 
     QWidget *m_toolbar = nullptr;
+    QWidget *m_filterPanel = nullptr;
     QLabel *m_filterLabel = nullptr;
-    QComboBox *m_tagFilter = nullptr;
+    QListWidget *m_tagFilterList = nullptr;
     QLabel *m_maxNodesHint = nullptr;
 };
 

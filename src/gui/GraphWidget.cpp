@@ -9,7 +9,8 @@
 #include <QStyleOptionGraphicsItem>
 #include <QRandomGenerator>
 #include <QFileInfo>
-#include <QComboBox>
+#include <QListWidget>
+#include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QResizeEvent>
@@ -50,8 +51,8 @@ static QString translateVirtualTagForDisplay(const QString &tag) {
 }
 
 // --- Edge Implementation ---
-Edge::Edge(Node *sourceNode, Node *destNode)
-    : source(sourceNode), dest(destNode)
+Edge::Edge(Node *sourceNode, Node *destNode, const QColor &lineColor)
+    : source(sourceNode), dest(destNode), m_lineColor(lineColor)
 {
     setAcceptedMouseButtons(Qt::NoButton);
     source->addEdge(this);
@@ -97,7 +98,7 @@ void Edge::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *)
     QLineF line(sourcePoint, destPoint);
     if (qFuzzyCompare(line.length(), qreal(0.))) return;
 
-    painter->setPen(QPen(Qt::gray, 1, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter->setPen(QPen(m_lineColor, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     painter->drawLine(line);
 }
 
@@ -273,8 +274,9 @@ GraphWidget::GraphWidget(TagManager* tagMgr, QWidget *parent)
     setViewportUpdateMode(BoundingRectViewportUpdate);
     setRenderHint(QPainter::Antialiasing);
     setTransformationAnchor(AnchorUnderMouse);
-    scale(0.8, 0.8);
-    setMinimumSize(400, 400);
+    scale(0.9, 0.9);
+    setMinimumSize(560, 560);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     // Initial build
     // buildGraph(); 
@@ -341,14 +343,38 @@ void GraphWidget::scaleView(qreal scaleFactor)
 
 void GraphWidget::resizeEvent(QResizeEvent *event) {
     QGraphicsView::resizeEvent(event);
-    if (!m_toolbar) return;
     const int margin = 10;
+    if (m_filterPanel) {
+        const int panelWidth = qMin(240, qMax(180, width() / 4));
+        m_filterPanel->setGeometry(margin, margin + 8, panelWidth, height() - margin * 2 - 8);
+    }
+    if (!m_toolbar) return;
     const QSize s = m_toolbar->sizeHint();
     m_toolbar->setGeometry(width() - s.width() - margin, margin, s.width(), s.height());
 }
 
 void GraphWidget::ensureToolbar() {
     if (m_toolbar) return;
+
+    m_filterPanel = new QWidget(this);
+    m_filterPanel->setObjectName(QStringLiteral("graphFilterPanel"));
+    m_filterPanel->setStyleSheet(QStringLiteral(
+        "QWidget#graphFilterPanel { background: rgba(20,20,20,220); border: 1px solid rgba(255,255,255,35); border-radius: 8px; }"
+        "QLabel { color: white; }"
+        "QListWidget { background: rgba(0,0,0,40); color: #e2e8f0; border: none; }"
+        "QListWidget::item { padding: 4px 2px; }"));
+    auto *filterLayout = new QVBoxLayout(m_filterPanel);
+    filterLayout->setContentsMargins(8, 8, 8, 8);
+    filterLayout->setSpacing(6);
+
+    m_filterLabel = new QLabel(QStringLiteral("標籤過濾"), m_filterPanel);
+    filterLayout->addWidget(m_filterLabel);
+
+    m_tagFilterList = new QListWidget(m_filterPanel);
+    m_tagFilterList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    filterLayout->addWidget(m_tagFilterList, 1);
+
+    connect(m_tagFilterList, &QListWidget::itemChanged, this, [this](QListWidgetItem *) { buildGraph(); });
 
     m_toolbar = new QWidget(this);
     m_toolbar->setObjectName(QStringLiteral("graphToolbar"));
@@ -361,15 +387,12 @@ void GraphWidget::ensureToolbar() {
     row->setContentsMargins(10, 8, 10, 8);
     row->setSpacing(8);
 
-    m_filterLabel = new QLabel(QStringLiteral("標籤過濾"), m_toolbar);
-    row->addWidget(m_filterLabel);
+    m_maxNodesHint = new QLabel(QStringLiteral("節點上限：50（固定）"), m_toolbar);
+    row->addWidget(m_maxNodesHint);
 
-    m_tagFilter = new QComboBox(m_toolbar);
-    row->addWidget(m_tagFilter, 1);
-
-    connect(m_tagFilter, &QComboBox::currentIndexChanged, this, [this](int) { buildGraph(); });
     connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() {
-        if (m_filterLabel) m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
+        if (m_filterLabel)
+            m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
         if (m_maxNodesHint) {
             m_maxNodesHint->setText(LanguageManager::instance().language() == LanguageManager::Language::EN_US
                                         ? QStringLiteral("Max nodes: 50 (fixed)")
@@ -378,27 +401,52 @@ void GraphWidget::ensureToolbar() {
         rebuildTagFilterOptions();
     });
 
-    m_maxNodesHint = new QLabel(QStringLiteral("節點上限：50（固定）"), m_toolbar);
-    row->addWidget(m_maxNodesHint);
-
     m_toolbar->show();
+    m_filterPanel->show();
 }
 
-QString GraphWidget::selectedFilterTag() const {
-    if (!m_tagFilter || m_tagFilter->count() <= 0) return {};
-    return m_tagFilter->currentData().toString().trimmed();
+QStringList GraphWidget::selectedFilterTags() const
+{
+    QStringList out;
+    if (!m_tagFilterList)
+        return out;
+    for (int i = 0; i < m_tagFilterList->count(); ++i) {
+        QListWidgetItem *item = m_tagFilterList->item(i);
+        if (!item || item->checkState() != Qt::Checked)
+            continue;
+        const QString tag = item->data(Qt::UserRole).toString().trimmed();
+        if (!tag.isEmpty())
+            out << tag;
+    }
+    return out;
+}
+
+QColor GraphWidget::edgeColorForTag(const QString &tag, int paletteIndex) const
+{
+    Q_UNUSED(tag);
+    static const QColor palette[] = {
+        QColor(248, 113, 113),
+        QColor(96, 165, 250),
+        QColor(74, 222, 128),
+        QColor(251, 191, 36),
+        QColor(192, 132, 252),
+        QColor(45, 212, 191),
+        QColor(244, 114, 182),
+        QColor(148, 163, 184),
+    };
+    return palette[paletteIndex % (sizeof(palette) / sizeof(palette[0]))];
 }
 
 void GraphWidget::rebuildTagFilterOptions() {
     ensureToolbar();
-    if (!m_tagFilter) return;
+    if (!m_tagFilterList) return;
 
     if (m_filterLabel) m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
 
-    const QString prev = selectedFilterTag();
+    const QStringList prevChecked = selectedFilterTags();
 
-    m_tagFilter->blockSignals(true);
-    m_tagFilter->clear();
+    m_tagFilterList->blockSignals(true);
+    m_tagFilterList->clear();
     if (tagManager) {
         struct TagRank {
             QString tag;
@@ -423,46 +471,23 @@ void GraphWidget::rebuildTagFilterOptions() {
             ranked.push_back(TagRank{tag, count});
         }
 
-        constexpr int kCrowdedTagThreshold = 30;
-        const bool crowded = static_cast<int>(ranked.size()) > kCrowdedTagThreshold;
-        if (crowded) {
-            ranked.erase(std::remove_if(ranked.begin(), ranked.end(),
-                                        [](const TagRank &entry) { return entry.count <= 1; }),
-                         ranked.end());
-        }
-        if (ranked.empty() && crowded) {
-            ranked.clear();
-            for (const QString &t : tagManager->getAllTags()) {
-                const QString tag = t.trimmed();
-                if (tag.isEmpty())
-                    continue;
-                int count = 0;
-                for (const QString &p : tagManager->getFilesByTag(tag)) {
-                    const QFileInfo fi(p);
-                    if (fi.exists() && fi.isFile())
-                        ++count;
-                }
-                if (count <= 0)
-                    continue;
-                ranked.push_back(TagRank{tag, count});
-            }
-        }
-
         std::sort(ranked.begin(), ranked.end(), [](const TagRank &a, const TagRank &b) {
             if (a.count != b.count)
                 return a.count > b.count;
             return a.tag.localeAwareCompare(b.tag) < 0;
         });
 
-        for (const TagRank &entry : ranked)
-            m_tagFilter->addItem(translateVirtualTagForDisplay(entry.tag), entry.tag);
+        int added = 0;
+        for (const TagRank &entry : ranked) {
+            auto *item = new QListWidgetItem(translateVirtualTagForDisplay(entry.tag), m_tagFilterList);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setData(Qt::UserRole, entry.tag);
+            const bool checked = prevChecked.contains(entry.tag) || (prevChecked.isEmpty() && added < 3);
+            item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
+            ++added;
+        }
     }
-    // restore selection if possible; otherwise first tag (no global "show all")
-    if (m_tagFilter->count() > 0) {
-        const int idx = prev.isEmpty() ? 0 : m_tagFilter->findData(prev);
-        m_tagFilter->setCurrentIndex(idx >= 0 ? idx : 0);
-    }
-    m_tagFilter->blockSignals(false);
+    m_tagFilterList->blockSignals(false);
 }
 
 void GraphWidget::zoomIn()
@@ -484,14 +509,19 @@ void GraphWidget::buildGraph() {
 
     rebuildTagFilterOptions();
 
-    const QString filterTag = selectedFilterTag();
-    if (filterTag.isEmpty()) {
+    const QStringList filterTags = selectedFilterTags();
+    if (filterTags.isEmpty()) {
         return;
     }
 
-    QStringList candidateFiles;
-    const std::vector<QString> files = tagManager->getFilesByTag(filterTag);
-    for (const auto &p : files) candidateFiles.push_back(p);
+    QSet<QString> candidateSet;
+    for (const QString &filterTag : filterTags) {
+        const std::vector<QString> files = tagManager->getFilesByTag(filterTag);
+        for (const auto &p : files)
+            candidateSet.insert(p);
+    }
+
+    QStringList candidateFiles = candidateSet.values();
     candidateFiles.removeDuplicates();
     std::sort(candidateFiles.begin(), candidateFiles.end(), [](const QString &a, const QString &b) {
         return a.localeAwareCompare(b) < 0;
@@ -501,27 +531,14 @@ void GraphWidget::buildGraph() {
     if (candidateFiles.size() > userCap) {
         candidateFiles = candidateFiles.mid(0, userCap);
     }
-    
-    // Decide which tag nodes should exist
-    QSet<QString> tagsToRender;
-    if (!filterTag.isEmpty()) {
-        tagsToRender.insert(filterTag);
-    } else {
-        for (const QString &fp : candidateFiles) {
-            const auto tags = tagManager->getTags(fp);
-            for (const auto &t : tags) {
-                if (!t.trimmed().isEmpty()) tagsToRender.insert(t);
-            }
-        }
-    }
-    if (tagsToRender.isEmpty() || candidateFiles.isEmpty()) {
-        return;
-    }
 
-    QStringList tagList = tagsToRender.values();
+    QStringList tagList = filterTags;
     std::sort(tagList.begin(), tagList.end(), [](const QString &a, const QString &b) {
         return a.localeAwareCompare(b) < 0;
     });
+    if (tagList.isEmpty() || candidateFiles.isEmpty()) {
+        return;
+    }
 
     // 1) Create Tag Nodes (Blue)
     const int tagCount = tagList.size();
@@ -529,52 +546,47 @@ void GraphWidget::buildGraph() {
         const QString &qTag = tagList[i];
         Node *tagNode = new Node(this, Node::Tag, translateVirtualTagForDisplay(qTag));
         const double angle = 2.0 * M_PI * i / std::max(1, tagCount);
-        tagNode->setPos(220 * cos(angle), 220 * sin(angle));
+        tagNode->setPos(260 * cos(angle), 260 * sin(angle));
         scene()->addItem(tagNode);
         tagNodes[qTag] = tagNode;
     }
 
-    // 2) Create File Nodes (Green) + Edges
+    // 2) Create File Nodes (Green) + colored edges per selected tag
     for (const QString &fp : candidateFiles) {
         const QFileInfo fi(fp);
-        if (!fi.exists() || !fi.isFile()) continue;
+        if (!fi.exists() || !fi.isFile())
+            continue;
 
-        // Filter logic: if a tag is selected, only include files that have that tag.
-        if (!filterTag.isEmpty()) {
-            const auto tags = tagManager->getTags(fp);
-            bool ok = false;
-            for (const auto &t : tags) {
-                if (t == filterTag) {
-                    ok = true;
-                    break;
-                }
-            }
-            if (!ok) continue;
+        const auto tags = tagManager->getTags(fp);
+        QSet<QString> fileTags;
+        for (const auto &t : tags) {
+            if (!t.trimmed().isEmpty())
+                fileTags.insert(t);
         }
 
         Node *fileNode = nullptr;
         if (fileNodes.find(fp) == fileNodes.end()) {
             fileNode = new Node(this, Node::File, fi.fileName());
             fileNode->setPos(
-                QRandomGenerator::global()->bounded(400) - 200,
-                QRandomGenerator::global()->bounded(400) - 200);
+                QRandomGenerator::global()->bounded(460) - 230,
+                QRandomGenerator::global()->bounded(460) - 230);
             scene()->addItem(fileNode);
             fileNodes[fp] = fileNode;
         } else {
             fileNode = fileNodes[fp];
         }
 
-        if (!filterTag.isEmpty()) {
-            Node *tagNode = tagNodes[filterTag];
-            if (tagNode) scene()->addItem(new Edge(tagNode, fileNode));
-            continue;
-        }
-
-        const auto tags = tagManager->getTags(fp);
-        for (const auto &t : tags) {
-            auto it = tagNodes.find(t);
-            if (it == tagNodes.end()) continue;
-            scene()->addItem(new Edge(it->second, fileNode));
+        for (int ti = 0; ti < filterTags.size(); ++ti) {
+            const QString &filterTag = filterTags[ti];
+            if (!fileTags.contains(filterTag))
+                continue;
+            Node *tagNode = nullptr;
+            const auto tagIt = tagNodes.find(filterTag);
+            if (tagIt != tagNodes.end())
+                tagNode = tagIt->second;
+            if (!tagNode)
+                continue;
+            scene()->addItem(new Edge(tagNode, fileNode, edgeColorForTag(filterTag, ti)));
         }
     }
 }

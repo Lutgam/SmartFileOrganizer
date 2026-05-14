@@ -1801,7 +1801,7 @@ void MainWindow::syncBatchProgressBars()
 void MainWindow::applyDualTrackBatchProgressVisibility()
 {
     const bool manualTrack =
-        m_isBatchMode && !m_batchTriggeredByBackgroundAuto && m_totalBatchSize > 0;
+        m_isBatchMode && !m_batchTriggeredByBackgroundAuto && m_totalBatchSize > 0 && !m_isSingleFileBatchMode;
     const bool bgTrack = m_isBatchMode && m_batchTriggeredByBackgroundAuto && m_totalBatchSize > 0;
 
     if (batchProgressBar) batchProgressBar->setVisible(manualTrack);
@@ -1897,8 +1897,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     graphLayout->setContentsMargins(0, 0, 0, 0);
     m_graphTacticalTitle = new QLabel(QStringLiteral("[戰術情報網絡分析]"), m_graphTab);
     applyPanelTitleLabelStyle(m_graphTacticalTitle);
-    graphLayout->addWidget(m_graphTacticalTitle);
+    graphLayout->addWidget(m_graphTacticalTitle, 0);
     m_graphWidget = new GraphWidget(&tagManager, m_graphTab);
+    m_graphWidget->setMinimumHeight(520);
     graphLayout->addWidget(m_graphWidget, 1);
     m_mainTabWidget->addTab(m_graphTab, tr("關聯圖譜分析"));
 
@@ -2080,6 +2081,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     fileListMode = FileListMode::PhysicalFolder;
     activeVirtualTag.clear();
     scanFiles();
+    refreshFileAndFolderAnalysisIndicators();
+    const QString restoredSelection = currentFilePath();
+    if (!restoredSelection.isEmpty()) {
+        updateTagDisplayForFile(restoredSelection);
+        updatePreviewForFile(restoredSelection);
+    }
+    if (m_graphWidget)
+        m_graphWidget->buildGraph();
 
     const QString modelPath = resolveModelPath();
     if (!QFile::exists(modelPath)) {
@@ -2093,7 +2102,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         }));
     }
 
-    resize(1200, 800);
+    resize(1400, 900);
     setWindowTitle(QStringLiteral("Smart File Organizer"));
 
     connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() { updateAllTexts(); });
@@ -6159,10 +6168,10 @@ void MainWindow::analyzeFile() {
         return;
     }
 
-    startAnalysisQueue(QStringList{fp});
+    startAnalysisQueue(QStringList{fp}, false, true);
 }
 
-void MainWindow::startAnalysisQueue(const QStringList &pathsIn, bool backgroundAuto)
+void MainWindow::startAnalysisQueue(const QStringList &pathsIn, bool backgroundAuto, bool singleFileMode)
 {
     if (m_isBatchMode)
         return;
@@ -6200,6 +6209,7 @@ void MainWindow::startAnalysisQueue(const QStringList &pathsIn, bool backgroundA
         return;
 
     m_batchTriggeredByBackgroundAuto = backgroundAuto;
+    m_isSingleFileBatchMode = singleFileMode;
     m_batchHashToPaths.clear();
     m_batchNameConflictPaths.clear();
     m_batchCompletedCount = 0;
@@ -6437,11 +6447,8 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
     QString contentQ;
     bool pdfMetadataOnly = false;
     if (isTextExt) {
-        if (suffix == QStringLiteral("pdf")) {
+        if (suffix == QStringLiteral("pdf") || zipXmlExtractable.contains(suffix)) {
             contentQ = DocumentParser::extractTextForAi(fp, &pdfMetadataOnly);
-        } else if (zipXmlExtractable.contains(suffix)) {
-            contentQ = DocumentParser::extractTextQString(fp);
-            contentQ = DocumentParser::truncateForAi(contentQ);
         } else {
             // Read textual content only. (Never feed binary bytes to AI.)
             std::ifstream f(fp.toStdString(), std::ios::binary);
@@ -6466,7 +6473,8 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
         qDebug() << "MainWindow: PDF extracted text length" << contentQ.size() << "for" << fp;
     }
 
-    const bool contentReadable = !contentQ.trimmed().isEmpty() && !pdfMetadataOnly;
+    const bool contentReadable =
+        (!contentQ.trimmed().isEmpty() && !pdfMetadataOnly) || contentQ.trimmed().size() > 10;
     const std::string content = contentQ.toStdString();
 
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析中…")));
@@ -6499,6 +6507,7 @@ void MainWindow::cancelAnalysis() {
     if (m_isBatchMode) {
         m_analysisQueue.clear();
         m_isBatchMode = false;
+        m_isSingleFileBatchMode = false;
         m_batchTriggeredByBackgroundAuto = false;
         m_currentAnalyzingFile.clear();
         m_backgroundAnalyzeFolderLabel.clear();
@@ -7130,7 +7139,9 @@ void MainWindow::tryFinalizeBatchAnalysis()
     if (m_analysisUiWorkActive)
         return;
 
+    const bool silentSingle = m_isSingleFileBatchMode;
     m_isBatchMode = false;
+    m_isSingleFileBatchMode = false;
     m_currentAnalyzingFile.clear();
     m_backgroundAnalyzeFolderLabel.clear();
     m_priorityFolderBannerPath.clear();
@@ -7152,7 +7163,8 @@ void MainWindow::tryFinalizeBatchAnalysis()
 
     updateTagList();
     reloadCurrentFileListPanel();
-    showFolderAnalysisReport();
+    if (!silentSingle)
+        showFolderAnalysisReport();
     refreshFileAndFolderAnalysisIndicators();
     ensureAnalysisIndicatorTimer();
     updateStartAnalysisButtonUi();
