@@ -6,6 +6,9 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
+#include <QSpinBox>
+#include <QThread>
+#include <QThreadPool>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -17,6 +20,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
+#include <QTimeEdit>
 #include <QVBoxLayout>
 
 namespace {
@@ -24,6 +28,11 @@ static constexpr const char *kSettingsModelPathKey = "ai/model_path";
 static constexpr const char *kSettingsBgAutoAnalyze = "workspace/background_auto_analysis";
 static constexpr const char *kSettingsSystemFileBypass = "workspace/system_file_bypass_filter";
 static constexpr const char *kSettingsColdArchiveYears = "workspace/cold_archive_years";
+static constexpr const char *kSettingsAiConcurrency = "ai/concurrency_limit";
+static constexpr const char *kSettingsO1CacheBypass = "analysis/enable_o1_cache_bypass";
+static constexpr const char *kSettingsTimeSchedule = "analysis/enable_time_schedule";
+static constexpr const char *kSettingsScheduleStart = "analysis/schedule_start_time";
+static constexpr const char *kSettingsScheduleEnd = "analysis/schedule_end_time";
 
 QString defaultBundledModelPath()
 {
@@ -92,6 +101,57 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
     }
 
     {
+        auto *grp = new QGroupBox(QStringLiteral("系統效能與排程控制 (Performance & Scheduling)"), this);
+        auto *gv = new QVBoxLayout(grp);
+
+        {
+            auto *row = new QHBoxLayout();
+            row->addWidget(new QLabel(QStringLiteral("AI 併發執行緒數"), grp));
+            m_concurrencySpin = new QSpinBox(grp);
+            const int ideal = qMax(1, QThread::idealThreadCount());
+            m_concurrencySpin->setRange(1, ideal);
+            m_concurrencySpin->setValue(2);
+            row->addWidget(m_concurrencySpin);
+            row->addStretch(1);
+            gv->addLayout(row);
+        }
+
+        m_o1CacheBypass = new QCheckBox(QStringLiteral("啟用 O(1) 快取機制"), grp);
+        m_o1CacheBypass->setChecked(true);
+        m_o1CacheBypass->setToolTip(
+            QStringLiteral("勾選時可讀取 metadata.json 快取以略過重複 LLM 分析；取消勾選則每次強制重新分析。"));
+        gv->addWidget(m_o1CacheBypass);
+
+        m_enableTimeSchedule = new QCheckBox(QStringLiteral("啟用指定時段分析"), grp);
+        gv->addWidget(m_enableTimeSchedule);
+
+        {
+            auto *row = new QHBoxLayout();
+            row->addWidget(new QLabel(QStringLiteral("開始時間"), grp));
+            m_scheduleStart = new QTimeEdit(grp);
+            m_scheduleStart->setDisplayFormat(QStringLiteral("HH:mm"));
+            m_scheduleStart->setTime(QTime(2, 0));
+            row->addWidget(m_scheduleStart);
+            row->addWidget(new QLabel(QStringLiteral("結束時間"), grp));
+            m_scheduleEnd = new QTimeEdit(grp);
+            m_scheduleEnd->setDisplayFormat(QStringLiteral("HH:mm"));
+            m_scheduleEnd->setTime(QTime(6, 0));
+            row->addWidget(m_scheduleEnd);
+            row->addStretch(1);
+            gv->addLayout(row);
+        }
+
+        root->addWidget(grp);
+
+        connect(m_concurrencySpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+            applyConcurrencyToThreadPool(value);
+            QSettings s;
+            s.setValue(QString::fromLatin1(kSettingsAiConcurrency), value);
+        });
+        connect(m_enableTimeSchedule, &QCheckBox::toggled, this, &SettingsPanel::syncScheduleTimeEditEnabled);
+    }
+
+    {
         auto *grp = new QGroupBox(tr("資料與快取管理"), this);
         auto *gv = new QVBoxLayout(grp);
         m_btnClearAi = new QPushButton(tr("清除 AI 分析快取（保留路徑與 Hash）"), grp);
@@ -136,10 +196,26 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
     root->addStretch(1);
 
     loadFromSettings();
+    syncScheduleTimeEditEnabled();
     refreshDataActionButtons();
 
     connect(m_browseBtn, &QPushButton::clicked, this, &SettingsPanel::browseModel);
     connect(m_btnSave, &QPushButton::clicked, this, &SettingsPanel::applyAndSave);
+}
+
+void SettingsPanel::applyConcurrencyToThreadPool(int limit)
+{
+    const int ideal = qMax(1, QThread::idealThreadCount());
+    QThreadPool::globalInstance()->setMaxThreadCount(qBound(1, limit, ideal));
+}
+
+void SettingsPanel::syncScheduleTimeEditEnabled()
+{
+    const bool on = m_enableTimeSchedule && m_enableTimeSchedule->isChecked();
+    if (m_scheduleStart)
+        m_scheduleStart->setEnabled(on);
+    if (m_scheduleEnd)
+        m_scheduleEnd->setEnabled(on);
 }
 
 void SettingsPanel::setRootPath(const QString &path)
@@ -180,6 +256,31 @@ int SettingsPanel::coldArchiveYears() const
     return m_coldArchiveCombo->currentData().toInt();
 }
 
+int SettingsPanel::concurrencyLimit() const
+{
+    return m_concurrencySpin ? m_concurrencySpin->value() : 2;
+}
+
+bool SettingsPanel::o1CacheBypassEnabled() const
+{
+    return !m_o1CacheBypass || m_o1CacheBypass->isChecked();
+}
+
+bool SettingsPanel::timeScheduleEnabled() const
+{
+    return m_enableTimeSchedule && m_enableTimeSchedule->isChecked();
+}
+
+QTime SettingsPanel::scheduleStartTime() const
+{
+    return m_scheduleStart ? m_scheduleStart->time() : QTime(2, 0);
+}
+
+QTime SettingsPanel::scheduleEndTime() const
+{
+    return m_scheduleEnd ? m_scheduleEnd->time() : QTime(6, 0);
+}
+
 void SettingsPanel::loadFromSettings() {
     QSettings s;
     const auto lang = LanguageManager::instance().language();
@@ -203,6 +304,26 @@ void SettingsPanel::loadFromSettings() {
         int idx = m_coldArchiveCombo->findData(y);
         if (idx < 0) idx = 0;
         m_coldArchiveCombo->setCurrentIndex(idx);
+    }
+    if (m_concurrencySpin) {
+        const int ideal = qMax(1, QThread::idealThreadCount());
+        const int c = qBound(1, s.value(QString::fromLatin1(kSettingsAiConcurrency), 2).toInt(), ideal);
+        m_concurrencySpin->blockSignals(true);
+        m_concurrencySpin->setValue(c);
+        m_concurrencySpin->blockSignals(false);
+        applyConcurrencyToThreadPool(c);
+    }
+    if (m_o1CacheBypass) {
+        m_o1CacheBypass->setChecked(s.value(QString::fromLatin1(kSettingsO1CacheBypass), true).toBool());
+    }
+    if (m_enableTimeSchedule) {
+        m_enableTimeSchedule->setChecked(s.value(QString::fromLatin1(kSettingsTimeSchedule), false).toBool());
+    }
+    if (m_scheduleStart) {
+        m_scheduleStart->setTime(s.value(QString::fromLatin1(kSettingsScheduleStart), QTime(2, 0)).toTime());
+    }
+    if (m_scheduleEnd) {
+        m_scheduleEnd->setTime(s.value(QString::fromLatin1(kSettingsScheduleEnd), QTime(6, 0)).toTime());
     }
 }
 
@@ -240,6 +361,42 @@ void SettingsPanel::saveToSettings() {
     const int newCold = coldArchiveYears();
     if (prevCold != newCold) {
         s.setValue(QString::fromLatin1(kSettingsColdArchiveYears), newCold);
+        m_changed = true;
+    }
+
+    const int prevConcurrency = s.value(QString::fromLatin1(kSettingsAiConcurrency), 2).toInt();
+    const int newConcurrency = concurrencyLimit();
+    if (prevConcurrency != newConcurrency) {
+        s.setValue(QString::fromLatin1(kSettingsAiConcurrency), newConcurrency);
+        applyConcurrencyToThreadPool(newConcurrency);
+        m_changed = true;
+    }
+
+    const bool prevO1 = s.value(QString::fromLatin1(kSettingsO1CacheBypass), true).toBool();
+    const bool newO1 = o1CacheBypassEnabled();
+    if (prevO1 != newO1) {
+        s.setValue(QString::fromLatin1(kSettingsO1CacheBypass), newO1);
+        m_changed = true;
+    }
+
+    const bool prevSchedule = s.value(QString::fromLatin1(kSettingsTimeSchedule), false).toBool();
+    const bool newSchedule = timeScheduleEnabled();
+    if (prevSchedule != newSchedule) {
+        s.setValue(QString::fromLatin1(kSettingsTimeSchedule), newSchedule);
+        m_changed = true;
+    }
+
+    const QTime prevStart = s.value(QString::fromLatin1(kSettingsScheduleStart), QTime(2, 0)).toTime();
+    const QTime newStart = scheduleStartTime();
+    if (prevStart != newStart) {
+        s.setValue(QString::fromLatin1(kSettingsScheduleStart), newStart);
+        m_changed = true;
+    }
+
+    const QTime prevEnd = s.value(QString::fromLatin1(kSettingsScheduleEnd), QTime(6, 0)).toTime();
+    const QTime newEnd = scheduleEndTime();
+    if (prevEnd != newEnd) {
+        s.setValue(QString::fromLatin1(kSettingsScheduleEnd), newEnd);
         m_changed = true;
     }
 }

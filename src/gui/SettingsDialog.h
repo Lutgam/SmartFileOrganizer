@@ -2,12 +2,16 @@
 #define SETTINGSDIALOG_H
 
 #include <QDialog>
+#include <QTime>
 #include <QWidget>
 
 class QComboBox;
 class QCheckBox;
 class QLineEdit;
 class QPushButton;
+class QSpinBox;
+class QTimeEdit;
+class QGroupBox;
 
 class SettingsPanel : public QWidget {
     Q_OBJECT
@@ -24,6 +28,11 @@ public:
     bool backgroundAutoAnalysis() const;
     bool systemFileBypassFilter() const;
     int coldArchiveYears() const;
+    int concurrencyLimit() const;
+    bool o1CacheBypassEnabled() const;
+    bool timeScheduleEnabled() const;
+    QTime scheduleStartTime() const;
+    QTime scheduleEndTime() const;
 
 signals:
     void settingsApplied();
@@ -36,6 +45,8 @@ private:
     void saveToSettings();
     void browseModel();
     void refreshDataActionButtons();
+    void syncScheduleTimeEditEnabled();
+    void applyConcurrencyToThreadPool(int limit);
 
     QString m_rootPath;
     bool m_changed = false;
@@ -46,6 +57,12 @@ private:
     QCheckBox *m_bgAutoAnalyze = nullptr;
     QCheckBox *m_systemFileBypass = nullptr;
     QComboBox *m_coldArchiveCombo = nullptr;
+
+    QSpinBox *m_concurrencySpin = nullptr;
+    QCheckBox *m_o1CacheBypass = nullptr;
+    QCheckBox *m_enableTimeSchedule = nullptr;
+    QTimeEdit *m_scheduleStart = nullptr;
+    QTimeEdit *m_scheduleEnd = nullptr;
 
     QPushButton *m_btnClearAi = nullptr;
     QPushButton *m_btnClearHash = nullptr;

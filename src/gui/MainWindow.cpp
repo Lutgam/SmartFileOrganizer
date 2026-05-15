@@ -37,6 +37,7 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QSettings>
+#include <QSpinBox>
 #include <QVector>
 #include <QTimer>
 #include <QUrl>
@@ -1738,6 +1739,40 @@ void MainWindow::clearAnalysisWorkFlagsAndSyncUi()
     ensureAnalysisIndicatorTimer();
     if (fileList && fileList->viewport())
         fileList->viewport()->update();
+    syncFolderNavigationLockState();
+}
+
+void MainWindow::lockUI()
+{
+    if (m_isAnalysisRunning)
+        return;
+    m_isAnalysisRunning = true;
+    syncFolderNavigationLockState();
+}
+
+void MainWindow::unlockUI()
+{
+    if (!m_isAnalysisRunning)
+        return;
+    m_isAnalysisRunning = false;
+    syncFolderNavigationLockState();
+    syncNavigationButtons();
+}
+
+void MainWindow::syncFolderNavigationLockState()
+{
+    const bool lockNav = m_isAnalysisRunning || m_isBatchMode || m_analysisUiWorkActive
+                         || m_activeAnalysisWorkers > 0 || (watcher && watcher->isRunning());
+    if (btnBack)
+        btnBack->setEnabled(!lockNav);
+    if (btnForward)
+        btnForward->setEnabled(!lockNav);
+    if (btnHome)
+        btnHome->setEnabled(!lockNav);
+    if (folderTree)
+        folderTree->setEnabled(!lockNav);
+    if (m_btnWorkspacePicker)
+        m_btnWorkspacePicker->setEnabled(!lockNav);
 }
 
 void MainWindow::startAnalysisSpinnerForPath(const QString &absPath)
@@ -2149,12 +2184,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_bgAutoAnalyzeDebounce->setInterval(2000);
     connect(m_bgAutoAnalyzeDebounce, &QTimer::timeout, this, &MainWindow::onBackgroundAutoAnalyzeDebounce);
 
-    loadBackgroundAutoAnalyzeSetting();
+    m_scheduleRetryTimer = new QTimer(this);
+    m_scheduleRetryTimer->setSingleShot(true);
+    connect(m_scheduleRetryTimer, &QTimer::timeout, this, [this]() {
+        if (m_isBatchMode && m_timeScheduleEnabled && !m_analysisQueue.isEmpty())
+            processNextInQueue();
+    });
 
-    // 保留至少一個核心給 UI 執行緒
-    int idealThreads = QThread::idealThreadCount();
-    int maxThreads = qMax(1, idealThreads - 1); // 如果單核就維持 1，多核則減 1
-    QThreadPool::globalInstance()->setMaxThreadCount(maxThreads);
+    loadBackgroundAutoAnalyzeSetting();
+    loadAnalysisPreferencesSettings();
 
     watcher = new QFutureWatcher<SfAnalysisOutcome>(this);
     connect(watcher, &QFutureWatcher<SfAnalysisOutcome>::finished, this, &MainWindow::onAnalysisFinished);
@@ -2261,8 +2299,51 @@ void MainWindow::openSettings() {
         m_mainTabWidget->setCurrentWidget(m_settingsTab);
 }
 
+void MainWindow::loadAnalysisPreferencesSettings()
+{
+    QSettings s;
+    const int ideal = qMax(1, QThread::idealThreadCount());
+    m_aiConcurrencyLimit = qBound(1, s.value(QStringLiteral("ai/concurrency_limit"), 2).toInt(), ideal);
+    m_o1CacheBypassEnabled =
+        s.value(QStringLiteral("analysis/enable_o1_cache_bypass"), true).toBool();
+    m_timeScheduleEnabled = s.value(QStringLiteral("analysis/enable_time_schedule"), false).toBool();
+    m_scheduleStartTime = s.value(QStringLiteral("analysis/schedule_start_time"), QTime(2, 0)).toTime();
+    m_scheduleEndTime = s.value(QStringLiteral("analysis/schedule_end_time"), QTime(6, 0)).toTime();
+    applyAnalysisConcurrencyLimit(m_aiConcurrencyLimit);
+}
+
+void MainWindow::applyAnalysisConcurrencyLimit(int limit)
+{
+    const int ideal = qMax(1, QThread::idealThreadCount());
+    m_aiConcurrencyLimit = qBound(1, limit, ideal);
+    QThreadPool::globalInstance()->setMaxThreadCount(m_aiConcurrencyLimit);
+}
+
+bool MainWindow::isWithinAnalysisSchedule() const
+{
+    if (!m_timeScheduleEnabled)
+        return true;
+
+    const QTime now = QTime::currentTime();
+    const QTime start = m_scheduleStartTime;
+    const QTime end = m_scheduleEndTime;
+    if (start <= end)
+        return now >= start && now <= end;
+    return now >= start || now <= end;
+}
+
+void MainWindow::scheduleBackgroundAnalysisRetry()
+{
+    if (!m_scheduleRetryTimer)
+        return;
+    if (m_scheduleRetryTimer->isActive())
+        return;
+    m_scheduleRetryTimer->start(60 * 1000);
+}
+
 void MainWindow::onSettingsPanelApplied() {
     updateAllTexts();
+    loadAnalysisPreferencesSettings();
     loadBackgroundAutoAnalyzeSetting();
 
     if (!m_settingsPanel)
@@ -2395,7 +2476,6 @@ void MainWindow::updateAllTexts() {
 
     if (btnAnalyzeFile) btnAnalyzeFile->setText(lm.getText(QStringLiteral("btn_analyze")));
     if (btnCancelAnalysis) btnCancelAnalysis->setText(lm.getText(QStringLiteral("btn_cancel")));
-    if (btnSaveTags) btnSaveTags->setText(lm.getText(QStringLiteral("btn_save")));
     if (btnAutoMergeTags) {
         const QString normalText = lm.language() == LanguageManager::Language::EN_US
                                        ? QStringLiteral("🤖 AI tag folders (Generate Tag Folders)")
@@ -2634,7 +2714,7 @@ void MainWindow::onBackgroundScanFinished() {
 
 void MainWindow::haltInFlightAnalysisWork()
 {
-    const bool wasBusy = m_isBatchMode || (watcher && watcher->isRunning())
+    const bool wasBusy = m_isAnalysisRunning || m_isBatchMode || (watcher && watcher->isRunning())
                          || (initialScanWatcher && initialScanWatcher->isRunning());
     if (!wasBusy && m_analysisQueue.isEmpty())
         return;
@@ -2659,6 +2739,8 @@ void MainWindow::haltInFlightAnalysisWork()
     stopAnalysisSpinner();
     setUiBusy(false);
     m_analysisUiWorkActive = false;
+    if (m_scheduleRetryTimer)
+        m_scheduleRetryTimer->stop();
     if (btnStopBatchAnalyze)
         btnStopBatchAnalyze->setEnabled(false);
     if (btnBatchAnalyze)
@@ -2669,6 +2751,7 @@ void MainWindow::haltInFlightAnalysisWork()
     updateBackgroundStatusLabel();
     syncBatchProgressBars();
     clearAnalysisWorkFlagsAndSyncUi();
+    unlockUI();
     updateStartAnalysisButtonUi();
 }
 
@@ -2925,6 +3008,8 @@ void MainWindow::setupFourColumnLayout() {
 
     foldersLayout->addWidget(folderTree);
     connect(folderTree, &QTreeView::clicked, this, [this](const QModelIndex &idx) {
+        if (m_isAnalysisRunning)
+            return;
         if (!idx.isValid()) return;
         const QModelIndex srcIdx = proxyModel ? proxyModel->mapToSource(idx) : idx;
         const QString selectedDir = folderModel->filePath(srcIdx);
@@ -3260,14 +3345,6 @@ void MainWindow::setupFourColumnLayout() {
     m_previewTabWidget->addTab(m_previewOpsTab, QStringLiteral("檔案操作"));
 
     auto *tagGroupLayout = new QVBoxLayout(m_previewTagTab);
-
-    auto *tagRow1 = new QHBoxLayout();
-    btnSaveTags = new QPushButton(QStringLiteral("💾 儲存"), this);
-    connect(btnSaveTags, &QPushButton::clicked, this, &MainWindow::saveTags);
-    btnSaveTags->setEnabled(false);
-    tagRow1->addWidget(btnSaveTags);
-    tagRow1->addStretch(1);
-    tagGroupLayout->addLayout(tagRow1);
 
     auto *forceCategoryRow = new QHBoxLayout();
     m_cmbForceCategory = new QComboBox(this);
@@ -3746,6 +3823,104 @@ void MainWindow::showFileContextMenu(const QPoint &pos) {
 
 // File operation buttons (Rename/Delete/Reveal) were removed in favor of the right-click context menu.
 
+static const QString kArchiveAiDefaultMarker = QStringLiteral("[AI_DEFAULT]");
+
+class ArchiveDialog : public QDialog
+{
+public:
+    explicit ArchiveDialog(const QStringList &filesToArchive,
+                           const QString &currentWorkspace,
+                           QWidget *parent = nullptr)
+        : QDialog(parent)
+        , m_workspace(QDir::cleanPath(currentWorkspace))
+    {
+        setWindowTitle(QStringLiteral("實體歸檔規劃"));
+
+        auto *mainLayout = new QVBoxLayout(this);
+        mainLayout->addWidget(
+            new QLabel(QStringLiteral("請勾選要歸檔的檔案 (取消勾選即不歸檔/留在原地)："), this));
+
+        m_fileList = new QListWidget(this);
+        m_fileList->setSelectionMode(QAbstractItemView::NoSelection);
+        for (const QString &path : filesToArchive) {
+            const QString clean = QDir::cleanPath(path);
+            if (clean.isEmpty())
+                continue;
+            auto *item = new QListWidgetItem(QFileInfo(clean).fileName(), m_fileList);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(Qt::Checked);
+            item->setData(Qt::UserRole, clean);
+            item->setToolTip(clean);
+        }
+        mainLayout->addWidget(m_fileList, 1);
+
+        auto *selectRow = new QHBoxLayout();
+        auto *btnSelectAll = new QPushButton(QStringLiteral("全選"), this);
+        auto *btnDeselectAll = new QPushButton(QStringLiteral("取消全選"), this);
+        connect(btnSelectAll, &QPushButton::clicked, this, [this]() {
+            for (int i = 0; i < m_fileList->count(); ++i) {
+                if (QListWidgetItem *item = m_fileList->item(i))
+                    item->setCheckState(Qt::Checked);
+            }
+        });
+        connect(btnDeselectAll, &QPushButton::clicked, this, [this]() {
+            for (int i = 0; i < m_fileList->count(); ++i) {
+                if (QListWidgetItem *item = m_fileList->item(i))
+                    item->setCheckState(Qt::Unchecked);
+            }
+        });
+        selectRow->addWidget(btnSelectAll);
+        selectRow->addWidget(btnDeselectAll);
+        selectRow->addStretch(1);
+        mainLayout->addLayout(selectRow);
+
+        mainLayout->addWidget(new QLabel(QStringLiteral("選擇歸檔目標資料夾："), this));
+
+        m_folderCombo = new QComboBox(this);
+        m_folderCombo->addItem(QStringLiteral("[維持 AI 預設分類 (使用 Metadata 標籤)]"),
+                             kArchiveAiDefaultMarker);
+        const QStringList subDirs =
+            QDir(m_workspace).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        for (const QString &subDir : subDirs) {
+            if (subDir == QStringLiteral(".smartfile"))
+                continue;
+            m_folderCombo->addItem(subDir, subDir);
+        }
+        mainLayout->addWidget(m_folderCombo);
+
+        auto *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        connect(buttonBox, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        if (QPushButton *okBtn = buttonBox->button(QDialogButtonBox::Ok))
+            okBtn->setEnabled(m_fileList->count() > 0);
+        mainLayout->addWidget(buttonBox);
+    }
+
+    QString getSelectedFolder() const
+    {
+        return m_folderCombo->currentData().toString();
+    }
+
+    QStringList getCheckedFiles() const
+    {
+        QStringList out;
+        for (int i = 0; i < m_fileList->count(); ++i) {
+            QListWidgetItem *item = m_fileList->item(i);
+            if (!item || item->checkState() != Qt::Checked)
+                continue;
+            const QString path = QDir::cleanPath(item->data(Qt::UserRole).toString());
+            if (!path.isEmpty())
+                out << path;
+        }
+        return out;
+    }
+
+private:
+    QString m_workspace;
+    QListWidget *m_fileList = nullptr;
+    QComboBox *m_folderCombo = nullptr;
+};
+
 namespace {
 QString sanitizeTagFolderName(const QString &tag) {
     QString s = tag.trimmed();
@@ -4014,11 +4189,6 @@ static void sfTryRemoveEmptyPhysicalArchiveDrawerDir(const QString &drawerDirRaw
     dir.rmdir(drawerDir);
 }
 
-struct PhysicalArchivePlanEntry {
-    QString srcPath;
-    QString destFolder;
-};
-
 static bool sfMoveFileForPhysicalArchive(const QString &srcPath, const QString &destPath)
 {
     if (QFile::exists(destPath))
@@ -4038,12 +4208,31 @@ static bool sfMoveFileForPhysicalArchive(const QString &srcPath, const QString &
 } // namespace
 
 void MainWindow::executePhysicalArchive() {
-    if (rootPath.isEmpty())
+    auto &lm = LanguageManager::instance();
+    if (rootPath.isEmpty()) {
+        QMessageBox::information(this, lm.getText(QStringLiteral("physical_archive_confirm_title")),
+                                 lm.getText(QStringLiteral("physical_archive_need_workspace")));
         return;
+    }
 
     const QString rootClean = QDir::cleanPath(rootPath);
-    QStringList filesToArchive;
-    {
+
+    QStringList filesToMove;
+    const QString current = QDir::cleanPath(currentFilePath());
+    if (!current.isEmpty()) {
+        QFileInfo fi(current);
+        if (fi.exists() && fi.isFile() && sfAbsolutePathUnderWorkspaceRoot(current, rootClean)) {
+            std::vector<QString> tags;
+            {
+                QMutexLocker locker(&tagMutex);
+                tags = tagManager.getTags(current);
+            }
+            if (!tags.empty())
+                filesToMove.append(current);
+        }
+    }
+
+    if (filesToMove.isEmpty()) {
         std::vector<QString> taggedPaths;
         {
             QMutexLocker locker(&tagMutex);
@@ -4053,107 +4242,68 @@ void MainWindow::executePhysicalArchive() {
             const QString srcPath = QDir::cleanPath(pathEntry);
             if (!sfAbsolutePathUnderWorkspaceRoot(srcPath, rootClean))
                 continue;
-
             const QFileInfo fiSrc(srcPath);
             if (!fiSrc.exists() || !fiSrc.isFile())
                 continue;
-
             const QString rel = QDir(rootClean).relativeFilePath(fiSrc.absoluteFilePath());
             if (rel.startsWith(QStringLiteral("..")))
                 continue;
             if (rel == QStringLiteral(".smartfile") || rel.startsWith(QStringLiteral(".smartfile/")))
                 continue;
-
-            filesToArchive.append(srcPath);
+            if (!filesToMove.contains(srcPath))
+                filesToMove.append(srcPath);
         }
     }
 
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("實體歸檔規劃"));
+    if (filesToMove.isEmpty()) {
+        qDebug() << "executePhysicalArchive: no tagged files to archive";
+        QMessageBox::information(this, lm.getText(QStringLiteral("physical_archive_confirm_title")),
+                                 lm.getText(QStringLiteral("physical_archive_no_moves")));
+        return;
+    }
+
+    ArchiveDialog dialog(filesToMove, rootClean, this);
     dialog.resize(500, 400);
-    QVBoxLayout mainLayout(&dialog);
-
-    mainLayout.addWidget(new QLabel(QStringLiteral("請勾選要歸檔的檔案 (取消勾選即不歸檔/留在原地)："), &dialog));
-    QListWidget listWidget(&dialog);
-    for (const QString &file : filesToArchive) {
-        QListWidgetItem *item = new QListWidgetItem(file, &listWidget);
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(Qt::Checked);
-    }
-    mainLayout.addWidget(&listWidget);
-
-    mainLayout.addWidget(new QLabel(QStringLiteral("選擇歸檔目標資料夾："), &dialog));
-    QComboBox folderCombo(&dialog);
-    folderCombo.addItem(QStringLiteral("[維持 AI 預設 18 大分類]"));
-
-    QDir dir(rootClean);
-    const QStringList subDirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const QString &subDir : subDirs) {
-        if (subDir == QStringLiteral(".smartfile"))
-            continue;
-        folderCombo.addItem(subDir);
-    }
-    mainLayout.addWidget(&folderCombo);
-
-    QDialogButtonBox buttonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    connect(&buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(&buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    mainLayout.addWidget(&buttonBox);
-
     if (dialog.exec() != QDialog::Accepted)
         return;
 
-    const bool useAiDefault = folderCombo.currentIndex() == 0;
-    const QString legacyFolder = folderCombo.currentText().trimmed();
-
-    QList<PhysicalArchivePlanEntry> plan;
-    for (int i = 0; i < listWidget.count(); ++i) {
-        QListWidgetItem *item = listWidget.item(i);
-        if (!item || item->checkState() != Qt::Checked)
-            continue;
-
-        const QString srcPath = QDir::cleanPath(item->text());
-        if (srcPath.isEmpty())
-            continue;
-
-        QString folder;
-        if (useAiDefault) {
-            std::vector<QString> tagsForFile;
-            {
-                QMutexLocker locker(&tagMutex);
-                tagsForFile = tagManager.getTags(srcPath);
-            }
-            folder = sfPhysicalArchiveFolderNameFromAllFileTags(tagsForFile, m_aiTagToDrawerKey);
-        } else {
-            folder = legacyFolder;
-        }
-        if (folder.isEmpty())
-            continue;
-
-        PhysicalArchivePlanEntry entry;
-        entry.srcPath = srcPath;
-        entry.destFolder = folder;
-        plan.push_back(entry);
-    }
-
-    if (plan.isEmpty())
+    const QString targetFolder = dialog.getSelectedFolder();
+    const QStringList confirmedFiles = dialog.getCheckedFiles();
+    if (confirmedFiles.isEmpty()) {
+        QMessageBox::information(this, lm.getText(QStringLiteral("physical_archive_confirm_title")),
+                                 lm.getText(QStringLiteral("physical_archive_no_moves")));
         return;
+    }
 
     m_lastMoveHistory.clear();
     if (btnUndoPhysicalArchive)
         btnUndoPhysicalArchive->setEnabled(false);
 
     QSet<QString> sourceDirsForCleanup;
-    for (const PhysicalArchivePlanEntry &entry : std::as_const(plan)) {
-        if (entry.destFolder.trimmed().isEmpty())
-            continue;
+    int movedCount = 0;
 
-        const QString srcPath = entry.srcPath;
+    for (const QString &oldPath : confirmedFiles) {
+        const QString srcPath = QDir::cleanPath(oldPath);
         const QFileInfo fiSrc(srcPath);
         if (!fiSrc.exists() || !fiSrc.isFile())
             continue;
 
-        const QString destDir = QDir(rootClean).absoluteFilePath(entry.destFolder);
+        QString destFolder;
+        if (targetFolder == kArchiveAiDefaultMarker) {
+            std::vector<QString> tagsForFile;
+            {
+                QMutexLocker locker(&tagMutex);
+                tagsForFile = tagManager.getTags(srcPath);
+            }
+            destFolder = sfPhysicalArchiveFolderNameFromAllFileTags(tagsForFile, m_aiTagToDrawerKey);
+        } else {
+            destFolder = targetFolder.trimmed();
+        }
+
+        if (destFolder.isEmpty())
+            continue;
+
+        const QString destDir = QDir(rootClean).absoluteFilePath(destFolder);
         const QString destPath = QDir(destDir).absoluteFilePath(fiSrc.fileName());
         if (QDir::cleanPath(fiSrc.absolutePath()) == QDir::cleanPath(destDir))
             continue;
@@ -4163,6 +4313,8 @@ void MainWindow::executePhysicalArchive() {
             continue;
         }
 
+        qDebug() << "executePhysicalArchive: moved" << srcPath << "->" << destPath;
+        ++movedCount;
         m_lastMoveHistory.push_back(qMakePair(destPath, srcPath));
         sourceDirsForCleanup.insert(fiSrc.absolutePath());
 
@@ -4170,6 +4322,12 @@ void MainWindow::executePhysicalArchive() {
             QMutexLocker locker(&tagMutex);
             tagManager.relocateFilePath(srcPath, destPath, false);
         }
+    }
+
+    if (movedCount == 0) {
+        QMessageBox::information(this, lm.getText(QStringLiteral("physical_archive_confirm_title")),
+                                 lm.getText(QStringLiteral("physical_archive_no_moves")));
+        return;
     }
 
     sfCleanupEmptySourceDirsAfterPhysicalArchive(sourceDirsForCleanup, rootClean);
@@ -4399,12 +4557,20 @@ void MainWindow::pushHistory(const QString &path) {
 }
 
 void MainWindow::syncNavigationButtons() {
-    btnBack->setEnabled(navIndex > 0);
-    btnForward->setEnabled(navIndex >= 0 && navIndex + 1 < navHistory.size());
+    const bool lockNav = m_isAnalysisRunning || m_isBatchMode || m_analysisUiWorkActive
+                         || m_activeAnalysisWorkers > 0 || (watcher && watcher->isRunning());
+    if (lockNav)
+        return;
+    if (btnBack)
+        btnBack->setEnabled(navIndex > 0);
+    if (btnForward)
+        btnForward->setEnabled(navIndex >= 0 && navIndex + 1 < navHistory.size());
 }
 
 void MainWindow::navigateToFolder(const QString &path, bool pushToHistory) {
     if (path.isEmpty()) return;
+    if (m_isAnalysisRunning)
+        return;
     haltInFlightAnalysisWork();
     QFileInfo fi(path);
     if (!fi.exists() || !fi.isDir()) return;
@@ -4423,6 +4589,8 @@ void MainWindow::navigateToFolder(const QString &path, bool pushToHistory) {
 }
 
 void MainWindow::goBack() {
+    if (m_isAnalysisRunning)
+        return;
     if (navIndex <= 0) return;
     haltInFlightAnalysisWork();
     --navIndex;
@@ -4440,6 +4608,8 @@ void MainWindow::goBack() {
 }
 
 void MainWindow::goForward() {
+    if (m_isAnalysisRunning)
+        return;
     if (navIndex + 1 >= navHistory.size()) return;
     haltInFlightAnalysisWork();
     ++navIndex;
@@ -4457,6 +4627,8 @@ void MainWindow::goForward() {
 }
 
 void MainWindow::goHome() {
+    if (m_isAnalysisRunning)
+        return;
     bumpWorkspaceEpochAndPurgeStaleAsyncWork();
     const QString home = QDir::homePath();
     rootPath = home;
@@ -6056,7 +6228,6 @@ void MainWindow::onFileSelected(QListWidgetItem *item) {
 
     updatePreviewForFile(absPath);
     updateTagDisplayForFile(absPath);
-    btnSaveTags->setEnabled(false);
 }
 
 void MainWindow::onTagSelected(QListWidgetItem *item) {
@@ -6309,7 +6480,6 @@ void MainWindow::setUiBusy(bool busy) {
 
     btnAnalyzeFile->setEnabled(!busy && !currentFilePath().isEmpty());
     btnCancelAnalysis->setEnabled(busy);
-    btnSaveTags->setEnabled(!busy && btnSaveTags->isEnabled());
     if (!busy)
         syncNavigationButtons();
     syncBatchAnalyzeButtonLabel();
@@ -6408,6 +6578,7 @@ void MainWindow::startAnalysisQueue(const QStringList &pathsIn, bool backgroundA
     m_batchCompletedCount = 0;
     m_folderReportAiTagAdds = 0;
     m_isBatchMode = true;
+    lockUI();
     beginBatchAnalysisUi();
     processNextInQueue();
     updateBackgroundStatusLabel();
@@ -6416,6 +6587,9 @@ void MainWindow::startAnalysisQueue(const QStringList &pathsIn, bool backgroundA
 
 bool MainWindow::tryO1AnalysisCacheBypass(const QString &absPath)
 {
+    if (!m_o1CacheBypassEnabled)
+        return false;
+
     const QString fp = QDir::cleanPath(absPath);
     if (fp.isEmpty())
         return false;
@@ -6581,7 +6755,8 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
     if (contentHash.isEmpty())
         contentHash = sha256HexOfFile(fp);
     primeAnalysisCacheFromDisk(contentHash);
-    if (!force && !contentHash.isEmpty() && m_analysisByContentHash.contains(contentHash)) {
+    if (m_o1CacheBypassEnabled && !force && !contentHash.isEmpty()
+        && m_analysisByContentHash.contains(contentHash)) {
         const QJsonObject cached = m_analysisByContentHash.value(contentHash);
         m_currentAnalyzingFile = fp;
         applyCachedAnalysisForHashHit(fp, cached, contentHash);
@@ -6628,6 +6803,7 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
     m_analysisUiWorkActive = true;
     updateBackgroundStatusLabel();
     refreshCurrentAnalysisTargetUi();
+    syncFolderNavigationLockState();
     startAnalysisSpinnerForPath(fp);
     const QString filename = fi.fileName();
     // IMPORTANT: Do NOT feed full historical tags into the prompt.
@@ -6718,7 +6894,11 @@ void MainWindow::cancelAnalysis() {
     }
     stopAnalysisSpinner();
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("取消中…")));
+    if (m_scheduleRetryTimer)
+        m_scheduleRetryTimer->stop();
     updateStartAnalysisButtonUi();
+    unlockUI();
+    syncFolderNavigationLockState();
 }
 
 void MainWindow::startBatchAnalysis() {
@@ -6761,6 +6941,10 @@ void MainWindow::processNextInQueue() {
         syncBatchAnalyzeButtonLabel();
         updateBackgroundStatusLabel();
         refreshCurrentAnalysisTargetUi();
+        if (m_scheduleRetryTimer)
+            m_scheduleRetryTimer->stop();
+        unlockUI();
+        syncFolderNavigationLockState();
         return;
     }
 
@@ -6768,6 +6952,20 @@ void MainWindow::processNextInQueue() {
         tryFinalizeBatchAnalysis();
         return;
     }
+
+    if (m_timeScheduleEnabled && !isWithinAnalysisSchedule()) {
+        qDebug() << "目前非排定分析時段，暫停背景佇列處理。";
+        if (lblBatchStatus) {
+            lblBatchStatus->setText(QStringLiteral("⏸️ 非排定分析時段，背景佇列已暫停"));
+            refreshRobotAnalysisStatusLabelHeight(lblBatchStatus);
+        }
+        updateBackgroundStatusLabel();
+        scheduleBackgroundAnalysisRetry();
+        return;
+    }
+
+    if (m_scheduleRetryTimer)
+        m_scheduleRetryTimer->stop();
 
     while (!m_analysisQueue.isEmpty()) {
         const QString head = m_analysisQueue.head();
@@ -7159,6 +7357,7 @@ void MainWindow::beginBatchAnalysisUi()
     refreshFileAndFolderAnalysisIndicators();
     ensureAnalysisIndicatorTimer();
     updateStartAnalysisButtonUi();
+    syncFolderNavigationLockState();
 }
 
 void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached, const QString &contentHashHex)
@@ -7353,6 +7552,8 @@ void MainWindow::tryFinalizeBatchAnalysis()
     m_currentAnalyzingFile.clear();
     m_backgroundAnalyzeFolderLabel.clear();
     m_priorityFolderBannerPath.clear();
+    if (m_scheduleRetryTimer)
+        m_scheduleRetryTimer->stop();
     m_showRestartBackgroundPrompt = false;
     if (m_btnRestartBackgroundAnalyze)
         m_btnRestartBackgroundAnalyze->setVisible(false);
@@ -7376,6 +7577,8 @@ void MainWindow::tryFinalizeBatchAnalysis()
     refreshFileAndFolderAnalysisIndicators();
     ensureAnalysisIndicatorTimer();
     updateStartAnalysisButtonUi();
+    unlockUI();
+    syncFolderNavigationLockState();
 }
 
 void MainWindow::showFolderAnalysisReport()
@@ -7568,6 +7771,7 @@ void MainWindow::onAnalysisFinished() {
         cancelFlag.store(false);
         finishWorker();
         clearAnalysisWorkFlagsAndSyncUi();
+        tryFinalizeBatchAnalysis();
         return;
     }
 
@@ -8635,17 +8839,6 @@ void MainWindow::onTagFolderClustersFinished()
     QTimer::singleShot(0, this, [this, newMap = std::move(newMap)]() mutable {
         applyTagClusterDrawerUi_commit(std::move(newMap));
     });
-}
-
-void MainWindow::saveTags() {
-    const QString fp = currentFilePath();
-    if (fp.isEmpty()) return;
-    {
-        QMutexLocker locker(&tagMutex);
-        tagManager.saveTags();
-    }
-    lblStatus->setText(QStringLiteral("已儲存"));
-    btnSaveTags->setEnabled(false);
 }
 
 void MainWindow::removeGlobalTag() {

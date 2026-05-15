@@ -29,6 +29,7 @@
 #include <QStringList>
 #include <QSet>
 #include <QMutex>
+#include <QTime>
 #include <QTimer>
 #include <QVector>
 #include <QHash>
@@ -141,7 +142,6 @@ private slots:
     void cancelAnalysis();
     void onAnalysisFinished();
 
-    void saveTags();
     void removeGlobalTag();
 
     void onHeroOmniboxReturnPressed();
@@ -288,7 +288,6 @@ private:
 
     QPushButton *btnAnalyzeFile = nullptr;
     QPushButton *btnCancelAnalysis = nullptr;
-    QPushButton *btnSaveTags = nullptr;
     QComboBox *m_cmbForceCategory = nullptr;
     QPushButton *m_btnAssignForceCategory = nullptr;
     QPushButton *btnAutoMergeTags = nullptr;
@@ -371,6 +370,13 @@ private:
     QSet<QString> m_coldArchiveBypassPaths;
     /// Single-file re-analyze: skip O(1) / hash / summary cache until LLM run starts.
     QSet<QString> m_forceReanalyzePaths;
+    bool m_isAnalysisRunning = false;
+    int m_aiConcurrencyLimit = 2;
+    bool m_o1CacheBypassEnabled = true;
+    bool m_timeScheduleEnabled = false;
+    QTime m_scheduleStartTime = QTime(2, 0);
+    QTime m_scheduleEndTime = QTime(6, 0);
+    QTimer *m_scheduleRetryTimer = nullptr;
 
     void startBatchAnalysis();
     void startBatchAnalysis(const QStringList &explicitPaths);
@@ -393,7 +399,14 @@ private:
     QString formatBatchAnalyzingStatusLine() const;
     void applyCachedAnalysisForHashHit(const QString &fp, const QJsonObject &cached, const QString &contentHashHex);
     void beginBatchAnalysisUi();
+    void lockUI();
+    void unlockUI();
+    void syncFolderNavigationLockState();
     void loadBackgroundAutoAnalyzeSetting();
+    void loadAnalysisPreferencesSettings();
+    void applyAnalysisConcurrencyLimit(int limit);
+    bool isWithinAnalysisSchedule() const;
+    void scheduleBackgroundAnalysisRetry();
 
     void watchDirectoryRecursively(const QString &rootPath);
     void applyFilesystemWatchPolicy();
