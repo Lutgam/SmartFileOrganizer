@@ -7,7 +7,6 @@
 #include <qmath.h>
 #include <QWheelEvent>
 #include <QStyleOptionGraphicsItem>
-#include <QRandomGenerator>
 #include <QFileInfo>
 #include <QLineF>
 #include <QListWidget>
@@ -19,6 +18,9 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <QFrame>
+#include <QSpinBox>
+#include <QSettings>
+#include <QRandomGenerator>
 #include <algorithm>
 
 #include "LanguageManager.h"
@@ -110,10 +112,21 @@ void Edge::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *)
 Node::Node(GraphWidget *graphWidget, NodeType type, const QString &text)
     : graph(graphWidget), m_type(type), m_text(text)
 {
+    updateDimensions();
     setFlag(ItemIsMovable);
     setFlag(ItemSendsGeometryChanges);
     setCacheMode(DeviceCoordinateCache);
     setZValue(1);
+}
+
+void Node::updateDimensions() const
+{
+    QFont font;
+    font.setBold(true);
+    const QFontMetrics fm(font);
+    constexpr int padding = 20;
+    m_width = qreal(fm.horizontalAdvance(m_text)) + padding * 2;
+    m_height = 40.0;
 }
 
 void Node::addEdge(Edge *edge)
@@ -129,52 +142,9 @@ QList<Edge *> Node::edges() const
 
 void Node::calculateForces()
 {
-    if (!scene() || scene()->mouseGrabberItem() == this) {
-        newPos = pos();
-        return;
-    }
-
-    // Sum up all forces
-    qreal xvel = 0;
-    qreal yvel = 0;
-
-    // Repulsion from other nodes
-    for (QGraphicsItem *item : scene()->items()) {
-        Node *node = qgraphicsitem_cast<Node *>(item);
-        if (!node) continue;
-
-        QPointF vec = mapToItem(node, 0, 0);
-        qreal dx = vec.x();
-        qreal dy = vec.y();
-        double l = 2.0 * (dx * dx + dy * dy);
-        if (l > 0) {
-            xvel += (dx * 150.0) / l;
-            yvel += (dy * 150.0) / l;
-        }
-    }
-
-    // Attraction to connected nodes (Edges)
-    double weight = (edgeList.size() + 1) * 10;
-    for (const Edge *edge : edgeList) {
-        QPointF vec;
-        if (edge->sourceNode() == this)
-            vec = mapToItem(edge->destNode(), 0, 0);
-        else
-            vec = mapToItem(edge->sourceNode(), 0, 0);
-        
-        xvel -= vec.x() / weight;
-        yvel -= vec.y() / weight;
-    }
-
-    if (qAbs(xvel) < 0.1 && qAbs(yvel) < 0.1)
-        xvel = yvel = 0;
-
-    QRectF sceneRect = scene()->sceneRect();
-    newPos = pos() + QPointF(xvel, yvel);
-    
-    // Keep within bounds
-    newPos.setX(qMin(qMax(newPos.x(), sceneRect.left() + 10), sceneRect.right() - 10));
-    newPos.setY(qMin(qMax(newPos.y(), sceneRect.top() + 10), sceneRect.bottom() - 10));
+    // Force-directed layout disabled — positions come from spiral placement only.
+    newPos = pos();
+    return;
 }
 
 bool Node::advancePosition()
@@ -188,11 +158,8 @@ bool Node::advancePosition()
 
 QRectF Node::contentRect() const
 {
-    QFont font;
-    font.setBold(true);
-    const QFontMetrics fm(font);
-    const int width = fm.horizontalAdvance(m_text) + 30;
-    return QRectF(-width / 2.0, -15.0, width, 30.0);
+    updateDimensions();
+    return QRectF(-m_width / 2.0, -m_height / 2.0, m_width, m_height);
 }
 
 QRectF Node::boundingRect() const
@@ -211,6 +178,10 @@ QPainterPath Node::shape() const
 
 void Node::paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWidget *)
 {
+    QFont font;
+    font.setBold(true);
+    painter->setFont(font);
+
     const QRectF rect = contentRect();
     const qreal width = rect.width();
 
@@ -227,12 +198,21 @@ void Node::paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWid
         color = QColor(100, 150, 255); // Blue
     }
 
+    const bool glow = m_pressedGlow || (option->state & QStyle::State_Sunken);
+    if (glow) {
+        QPen glowPen(color.lighter(160), 3);
+        glowPen.setCosmetic(true);
+        painter->setPen(glowPen);
+        painter->setBrush(Qt::NoBrush);
+        painter->drawRoundedRect(rect.adjusted(-3, -3, 3, 3), 7, 7);
+    }
+
     QRadialGradient gradient(-3, -3, width / 2.0);
-    if (option->state & QStyle::State_Sunken) {
+    if (glow) {
         gradient.setCenter(3, 3);
         gradient.setFocalPoint(3, 3);
-        gradient.setColorAt(1, color.lighter(120));
-        gradient.setColorAt(0, color.darker(120));
+        gradient.setColorAt(1, color.lighter(140));
+        gradient.setColorAt(0, color.lighter(110));
     } else {
         gradient.setColorAt(0, color.lighter(120));
         gradient.setColorAt(1, color.darker(120));
@@ -264,12 +244,14 @@ QVariant Node::itemChange(GraphicsItemChange change, const QVariant &value)
 
 void Node::mousePressEvent(QGraphicsSceneMouseEvent *event)
 {
+    m_pressedGlow = true;
     update();
     QGraphicsItem::mousePressEvent(event);
 }
 
 void Node::mouseReleaseEvent(QGraphicsSceneMouseEvent *event)
 {
+    m_pressedGlow = false;
     update();
     QGraphicsItem::mouseReleaseEvent(event);
 }
@@ -288,42 +270,58 @@ GraphWidget::GraphWidget(TagManager* tagMgr, QWidget *parent)
     setRenderHint(QPainter::Antialiasing);
     setTransformationAnchor(AnchorUnderMouse);
     setFrameShape(QFrame::NoFrame);
-    scale(0.9, 0.9);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMinimumSize(0, 0);
 
     // Initial build
     // buildGraph(); 
 
+    loadMaxGraphNodesSetting();
     ensureToolbar();
     rebuildTagFilterOptions();
 }
 
+void GraphWidget::loadMaxGraphNodesSetting()
+{
+    QSettings s;
+    m_maxGraphNodes = qBound(kMinMaxGraphNodes,
+                             s.value(QStringLiteral("graph/max_nodes"), kDefaultMaxGraphNodes).toInt(),
+                             kMaxMaxGraphNodes);
+    if (m_maxNodesSpin) {
+        m_maxNodesSpin->blockSignals(true);
+        m_maxNodesSpin->setValue(m_maxGraphNodes);
+        m_maxNodesSpin->blockSignals(false);
+    }
+}
+
+void GraphWidget::saveMaxGraphNodesSetting()
+{
+    QSettings s;
+    s.setValue(QStringLiteral("graph/max_nodes"), m_maxGraphNodes);
+}
+
+int GraphWidget::countGraphNodesInScene() const
+{
+    if (!scene())
+        return 0;
+    int n = 0;
+    for (QGraphicsItem *item : scene()->items()) {
+        if (qgraphicsitem_cast<const Node *>(item))
+            ++n;
+    }
+    return n;
+}
+
 void GraphWidget::itemMoved()
 {
-    if (!timerId)
-        timerId = startTimer(1000 / 25);
+    Q_UNUSED(timerId);
+    // Physics timer disabled — nodes stay at spiral-placed positions.
 }
 
 void GraphWidget::timerEvent(QTimerEvent *event)
 {
-    QList<Node *> nodes;
-    const QList<QGraphicsItem *> items = scene()->items();
-    for (QGraphicsItem *item : items) {
-        if (Node *node = qgraphicsitem_cast<Node *>(item))
-            nodes << node;
-    }
-
-    for (Node *node : nodes)
-        node->calculateForces();
-
-    bool itemsMoved = false;
-    for (Node *node : nodes) {
-        if (node->advancePosition())
-            itemsMoved = true;
-    }
-
-    if (!itemsMoved) {
+    Q_UNUSED(event);
+    if (timerId) {
         killTimer(timerId);
         timerId = 0;
     }
@@ -362,9 +360,11 @@ void GraphWidget::resizeEvent(QResizeEvent *event) {
         const int panelWidth = qMin(240, qMax(180, width() / 4));
         m_filterPanel->setGeometry(margin, margin + 8, panelWidth, height() - margin * 2 - 8);
     }
-    if (!m_toolbar) return;
-    const QSize s = m_toolbar->sizeHint();
-    m_toolbar->setGeometry(width() - s.width() - margin, margin, s.width(), s.height());
+    if (m_toolbar) {
+        const QSize s = m_toolbar->sizeHint();
+        m_toolbar->setGeometry(width() - s.width() - margin, margin, s.width(), s.height());
+    }
+    fitAllNodes();
 }
 
 void GraphWidget::ensureToolbar() {
@@ -388,6 +388,23 @@ void GraphWidget::ensureToolbar() {
     m_tagFilterList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     filterLayout->addWidget(m_tagFilterList, 1);
 
+    {
+        auto *limitRow = new QHBoxLayout();
+        m_maxNodesSpinLabel = new QLabel(QStringLiteral("顯示節點上限"), m_filterPanel);
+        limitRow->addWidget(m_maxNodesSpinLabel);
+        m_maxNodesSpin = new QSpinBox(m_filterPanel);
+        m_maxNodesSpin->setRange(kMinMaxGraphNodes, kMaxMaxGraphNodes);
+        m_maxNodesSpin->setValue(m_maxGraphNodes);
+        limitRow->addWidget(m_maxNodesSpin);
+        filterLayout->addLayout(limitRow);
+
+        connect(m_maxNodesSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+            m_maxGraphNodes = qBound(kMinMaxGraphNodes, value, kMaxMaxGraphNodes);
+            saveMaxGraphNodesSetting();
+            buildGraph();
+        });
+    }
+
     connect(m_tagFilterList, &QListWidget::itemChanged, this, [this](QListWidgetItem *) { buildGraph(); });
 
     m_toolbar = new QWidget(this);
@@ -401,16 +418,17 @@ void GraphWidget::ensureToolbar() {
     row->setContentsMargins(10, 8, 10, 8);
     row->setSpacing(8);
 
-    m_maxNodesHint = new QLabel(QStringLiteral("節點上限：50（固定）"), m_toolbar);
+    m_maxNodesHint = new QLabel(QStringLiteral("滾輪縮放 · +/- 按鈕"), m_toolbar);
     row->addWidget(m_maxNodesHint);
 
     connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() {
         if (m_filterLabel)
             m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
-        if (m_maxNodesHint) {
-            m_maxNodesHint->setText(LanguageManager::instance().language() == LanguageManager::Language::EN_US
-                                        ? QStringLiteral("Max nodes: 50 (fixed)")
-                                        : QStringLiteral("節點上限：50（固定）"));
+        if (m_maxNodesSpinLabel) {
+            m_maxNodesSpinLabel->setText(
+                LanguageManager::instance().language() == LanguageManager::Language::EN_US
+                    ? QStringLiteral("Max nodes shown")
+                    : QStringLiteral("顯示節點上限"));
         }
         rebuildTagFilterOptions();
     });
@@ -514,55 +532,72 @@ void GraphWidget::zoomOut()
     scaleView(1 / 1.2);
 }
 
-namespace {
-QRectF sceneBoundsForNodeAt(const Node *node, const QPointF &scenePos)
+void GraphWidget::placeNodeWithSpiral(Node *newNode, const QPointF &center)
 {
-    const QRectF local = node->boundingRect();
-    return QRectF(scenePos.x() + local.x(), scenePos.y() + local.y(), local.width(), local.height());
+    if (!newNode || !scene())
+        return;
+
+    const qreal nodeW = newNode->boundingRect().width();
+    const qreal nodeH = newNode->boundingRect().height();
+
+    const int placedSoFar = countGraphNodesInScene();
+    const qreal sizeBase = qMax(nodeW, nodeH);
+    qreal radius = 35.0 + sizeBase * 0.45 + placedSoFar * 4.0;
+    qreal angle = QRandomGenerator::global()->bounded(360);
+    bool placed = false;
+
+    const qreal baseAngleStep = 30.0;
+    constexpr qreal margin = 20.0;
+    constexpr int kMaxSteps = 12000;
+
+    qreal x = center.x();
+    qreal y = center.y();
+
+    const qreal radiusStep = 52.0 + sizeBase * 0.55 + placedSoFar * 2.5;
+
+    for (int step = 0; !placed && step < kMaxSteps; ++step) {
+        x = center.x() + radius * qCos(angle * M_PI / 180.0);
+        y = center.y() + radius * qSin(angle * M_PI / 180.0);
+
+        const QRectF proposedRect(x - nodeW / 2.0 - margin,
+                                  y - nodeH / 2.0 - margin,
+                                  nodeW + margin * 2.0,
+                                  nodeH + margin * 2.0);
+
+        if (scene()->items(proposedRect, Qt::IntersectsItemBoundingRect).isEmpty()) {
+            placed = true;
+            break;
+        }
+
+        const qreal jitter = qreal(QRandomGenerator::global()->bounded(11)) - 5.0;
+        angle += baseAngleStep + jitter;
+        if (angle >= 360.0) {
+            angle -= 360.0;
+            radius += radiusStep;
+        }
+    }
+
+    newNode->setPos(x, y);
 }
 
-bool nodePlacementCollides(QGraphicsScene *scene, const QRectF &candidate, const QList<Node *> &placed)
+void GraphWidget::fitAllNodes()
 {
-    for (Node *other : placed) {
-        if (!other)
-            continue;
-        if (other->sceneBoundingRect().intersects(candidate))
-            return true;
-    }
+    if (!scene() || scene()->items().isEmpty())
+        return;
 
-    const QList<QGraphicsItem *> hits = scene->items(candidate, Qt::IntersectsItemBoundingRect);
-    for (QGraphicsItem *item : hits) {
-        if (qgraphicsitem_cast<Node *>(item))
-            return true;
-    }
-    return false;
+    QRectF itemsRect = scene()->itemsBoundingRect();
+    if (!itemsRect.isValid() || itemsRect.isNull())
+        return;
+
+    itemsRect.setLeft(itemsRect.left() - 100.0);
+    scene()->setSceneRect(itemsRect.marginsAdded(QMarginsF(50, 50, 50, 50)));
+
+    resetTransform();
+    fitInView(scene()->sceneRect(), Qt::KeepAspectRatio);
+
+    if (transform().m11() < 0.5)
+        scale(1.2, 1.2);
 }
-
-QPointF findSpiralNodePosition(QGraphicsScene *scene, Node *node, const QList<Node *> &placed, QPointF desired)
-{
-    const auto boundsAt = [&](const QPointF &pos) { return sceneBoundsForNodeAt(node, pos); };
-
-    if (!nodePlacementCollides(scene, boundsAt(desired), placed))
-        return desired;
-
-    for (int step = 1; step < 600; ++step) {
-        const qreal theta = step * 0.45;
-        const qreal radius = 8.0 + step * 3.0;
-        const QPointF pos(desired.x() + radius * qCos(theta), desired.y() + radius * qSin(theta));
-        if (!nodePlacementCollides(scene, boundsAt(pos), placed))
-            return pos;
-    }
-
-    for (int attempt = 0; attempt < 64; ++attempt) {
-        const QPointF pos(QRandomGenerator::global()->bounded(920) - 460,
-                          QRandomGenerator::global()->bounded(920) - 460);
-        if (!nodePlacementCollides(scene, boundsAt(pos), placed))
-            return pos;
-    }
-
-    return desired;
-}
-} // namespace
 
 void GraphWidget::buildGraph() {
     scene()->clear();
@@ -591,11 +626,6 @@ void GraphWidget::buildGraph() {
         return a.localeAwareCompare(b) < 0;
     });
 
-    const int userCap = MAX_NODES_RENDER;
-    if (candidateFiles.size() > userCap) {
-        candidateFiles = candidateFiles.mid(0, userCap);
-    }
-
     QStringList tagList = filterTags;
     std::sort(tagList.begin(), tagList.end(), [](const QString &a, const QString &b) {
         return a.localeAwareCompare(b) < 0;
@@ -605,21 +635,22 @@ void GraphWidget::buildGraph() {
     }
 
     // 1) Create Tag Nodes (Blue)
-    QList<Node *> placedNodes;
     const int tagCount = tagList.size();
     for (int i = 0; i < tagCount; ++i) {
+        if (countGraphNodesInScene() >= m_maxGraphNodes)
+            break;
         const QString &qTag = tagList[i];
         Node *tagNode = new Node(this, Node::Tag, translateVirtualTagForDisplay(qTag));
-        const double angle = 2.0 * M_PI * i / std::max(1, tagCount);
-        const QPointF desired(260 * cos(angle), 260 * sin(angle));
-        tagNode->setPos(findSpiralNodePosition(scene(), tagNode, placedNodes, desired));
+        placeNodeWithSpiral(tagNode);
         scene()->addItem(tagNode);
         tagNodes[qTag] = tagNode;
-        placedNodes.push_back(tagNode);
     }
 
     // 2) Create File Nodes (Green) + colored edges per selected tag
     for (const QString &fp : candidateFiles) {
+        if (countGraphNodesInScene() >= m_maxGraphNodes)
+            break;
+
         const QFileInfo fi(fp);
         if (!fi.exists() || !fi.isFile())
             continue;
@@ -633,14 +664,12 @@ void GraphWidget::buildGraph() {
 
         Node *fileNode = nullptr;
         if (fileNodes.find(fp) == fileNodes.end()) {
+            if (countGraphNodesInScene() >= m_maxGraphNodes)
+                break;
             fileNode = new Node(this, Node::File, fi.fileName());
-            const QPointF desired(
-                QRandomGenerator::global()->bounded(460) - 230,
-                QRandomGenerator::global()->bounded(460) - 230);
-            fileNode->setPos(findSpiralNodePosition(scene(), fileNode, placedNodes, desired));
+            placeNodeWithSpiral(fileNode);
             scene()->addItem(fileNode);
             fileNodes[fp] = fileNode;
-            placedNodes.push_back(fileNode);
         } else {
             fileNode = fileNodes[fp];
         }
@@ -658,4 +687,6 @@ void GraphWidget::buildGraph() {
             scene()->addItem(new Edge(tagNode, fileNode, edgeColorForTag(filterTag, ti)));
         }
     }
+
+    fitAllNodes();
 }

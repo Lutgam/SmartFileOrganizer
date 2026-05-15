@@ -70,12 +70,16 @@ protected:
     void mouseReleaseEvent(QGraphicsSceneMouseEvent *event) override;
 
 private:
+    void updateDimensions() const;
     QRectF contentRect() const;
     QList<Edge *> edgeList;
     QPointF newPos;
     GraphWidget *graph;
     NodeType m_type;
     QString m_text;
+    mutable qreal m_width = 80.0;
+    mutable qreal m_height = 40.0;
+    bool m_pressedGlow = false;
 };
 
 // --- GraphWidget Class ---
@@ -101,12 +105,19 @@ protected:
     void resizeEvent(QResizeEvent *event) override;
 
 private:
-    static constexpr int MAX_NODES_RENDER = 50;
+    static constexpr int kDefaultMaxGraphNodes = 50;
+    static constexpr int kMinMaxGraphNodes = 10;
+    static constexpr int kMaxMaxGraphNodes = 500;
 
     void ensureToolbar();
+    void loadMaxGraphNodesSetting();
+    void saveMaxGraphNodesSetting();
+    int countGraphNodesInScene() const;
     void rebuildTagFilterOptions();
     QStringList selectedFilterTags() const;
     QColor edgeColorForTag(const QString &tag, int paletteIndex) const;
+    void placeNodeWithSpiral(Node *node, const QPointF &center = QPointF(0, 0));
+    void fitAllNodes();
 
     int timerId;
     TagManager* tagManager;
@@ -120,6 +131,9 @@ private:
     QLabel *m_filterLabel = nullptr;
     QListWidget *m_tagFilterList = nullptr;
     QLabel *m_maxNodesHint = nullptr;
+    QLabel *m_maxNodesSpinLabel = nullptr;
+    class QSpinBox *m_maxNodesSpin = nullptr;
+    int m_maxGraphNodes = kDefaultMaxGraphNodes;
 };
 
 #endif // GRAPHWIDGET_H
