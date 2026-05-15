@@ -268,7 +268,12 @@ static QString tagChipDisplayStripLeadingEmoji(QString text)
 
 static QString aiTagLabelForTreeDisplay(const QString &raw)
 {
-    return tagChipDisplayStripLeadingEmoji(tagLibraryLabelStripAiBadge(raw));
+    const QString stripped = tagLibraryLabelStripAiBadge(raw).trimmed();
+    auto &lm = LanguageManager::instance();
+    const QString drawerLocalized = lm.localizedDrawerLabel(stripped);
+    if (drawerLocalized != stripped)
+        return drawerLocalized;
+    return tagChipDisplayStripLeadingEmoji(stripped);
 }
 
 static QStringList sfFixedAiClusterDrawerKeys()

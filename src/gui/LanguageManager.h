@@ -17,6 +17,8 @@ public:
     void setLanguage(Language lang);
 
     QString getText(const QString &key) const;
+    /// Localized label for an AI drawer category key (emoji + zh_TW canonical name).
+    QString localizedDrawerLabel(const QString &drawerKey) const;
 
 signals:
     void languageChanged(Language lang);

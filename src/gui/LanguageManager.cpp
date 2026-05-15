@@ -54,6 +54,10 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("toolbar_settings")) return en ? QStringLiteral("⚙️ Settings") : QStringLiteral("⚙️ 設定 (Settings)");
 
     if (key == QStringLiteral("btn_analyze")) return en ? QStringLiteral("✨ Analyze") : QStringLiteral("✨ 分析");
+    if (key == QStringLiteral("btn_start_ai_analysis"))
+        return en ? QStringLiteral("▶️ Global analysis") : QStringLiteral("▶️ 全域分析");
+    if (key == QStringLiteral("btn_stop_analysis"))
+        return en ? QStringLiteral("⏸️ Stop analysis") : QStringLiteral("⏸️ 停止分析");
     if (key == QStringLiteral("btn_cancel")) return en ? QStringLiteral("⛔ Cancel") : QStringLiteral("⛔ 取消");
     if (key == QStringLiteral("btn_save")) return en ? QStringLiteral("💾 Save") : QStringLiteral("💾 儲存");
     if (key == QStringLiteral("btn_add_tag")) return en ? QStringLiteral("➕ Add Tag") : QStringLiteral("➕ 加入標籤");
@@ -349,6 +353,120 @@ QString LanguageManager::getText(const QString &key) const {
         return en ? QStringLiteral("Filter system files (skip shortcuts & executables to save compute)")
                   : QStringLiteral("啟用系統檔案過濾（略過捷徑與執行檔以節省算力）");
     }
+    if (key == QStringLiteral("settings_language_label"))
+        return en ? QStringLiteral("Language") : QStringLiteral("語言");
+    if (key == QStringLiteral("settings_lang_zh"))
+        return en ? QStringLiteral("Traditional Chinese") : QStringLiteral("繁體中文");
+    if (key == QStringLiteral("settings_lang_en"))
+        return en ? QStringLiteral("English") : QStringLiteral("English");
+    if (key == QStringLiteral("settings_model_label"))
+        return en ? QStringLiteral("AI model (.gguf)") : QStringLiteral("AI 模型 (.gguf)");
+    if (key == QStringLiteral("settings_model_placeholder"))
+        return en ? QStringLiteral("Select a .gguf model file") : QStringLiteral("選擇 .gguf 模型檔");
+    if (key == QStringLiteral("settings_bg_auto_analyze")) {
+        return en ? QStringLiteral("Enable background auto-analysis (debounced folder watch)")
+                  : QStringLiteral("啟用背景自動分析（資料夾變更後延遲觸發）");
+    }
+    if (key == QStringLiteral("settings_cold_archive_prefix"))
+        return en ? QStringLiteral("Ignore & archive files not modified for")
+                  : QStringLiteral("忽略並歸檔超過以下時間未修改的檔案");
+    if (key == QStringLiteral("settings_cold_off"))
+        return en ? QStringLiteral("Off (disabled)") : QStringLiteral("關閉");
+    if (key == QStringLiteral("settings_cold_1y"))
+        return en ? QStringLiteral("1 year") : QStringLiteral("1 年");
+    if (key == QStringLiteral("settings_cold_3y"))
+        return en ? QStringLiteral("3 years") : QStringLiteral("3 年");
+    if (key == QStringLiteral("settings_cold_5y"))
+        return en ? QStringLiteral("5 years") : QStringLiteral("5 年");
+    if (key == QStringLiteral("settings_perf_group")) {
+        return en ? QStringLiteral("Performance & scheduling") : QStringLiteral("系統效能與排程控制");
+    }
+    if (key == QStringLiteral("settings_ai_concurrency"))
+        return en ? QStringLiteral("AI worker threads") : QStringLiteral("AI 併發執行緒數");
+    if (key == QStringLiteral("settings_o1_cache"))
+        return en ? QStringLiteral("Enable O(1) metadata cache") : QStringLiteral("啟用 O(1) 快取機制");
+    if (key == QStringLiteral("settings_o1_cache_tooltip")) {
+        return en ? QStringLiteral("When enabled, reads metadata.json to skip duplicate LLM runs; when disabled, every file is re-analyzed.")
+                  : QStringLiteral("勾選時可讀取 metadata.json 快取以略過重複 LLM 分析；取消勾選則每次強制重新分析。");
+    }
+    if (key == QStringLiteral("settings_time_schedule"))
+        return en ? QStringLiteral("Run analysis only during scheduled hours")
+                  : QStringLiteral("啟用指定時段分析");
+    if (key == QStringLiteral("settings_schedule_start"))
+        return en ? QStringLiteral("Start time") : QStringLiteral("開始時間");
+    if (key == QStringLiteral("settings_schedule_end"))
+        return en ? QStringLiteral("End time") : QStringLiteral("結束時間");
+    if (key == QStringLiteral("settings_data_group"))
+        return en ? QStringLiteral("Data & cache") : QStringLiteral("資料與快取管理");
+    if (key == QStringLiteral("settings_clear_ai"))
+        return en ? QStringLiteral("Clear AI cache (keep paths & hashes)")
+                  : QStringLiteral("清除 AI 分析快取（保留路徑與 Hash）");
+    if (key == QStringLiteral("settings_clear_hash"))
+        return en ? QStringLiteral("Clear hash records (force SHA-256 recompute)")
+                  : QStringLiteral("清除雜湊紀錄（強制重新計算 SHA-256）");
+    if (key == QStringLiteral("settings_factory_reset"))
+        return en ? QStringLiteral("Factory-reset workspace (delete metadata)")
+                  : QStringLiteral("徹底重置工作區（刪除 metadata）");
+    if (key == QStringLiteral("settings_save"))
+        return en ? QStringLiteral("Save settings") : QStringLiteral("儲存設定");
+    if (key == QStringLiteral("settings_dialog_title"))
+        return en ? QStringLiteral("⚙️ Settings") : QStringLiteral("⚙️ 設定");
+
+    if (key == QStringLiteral("btn_assign_force_category"))
+        return en ? QStringLiteral("✅ Assign category") : QStringLiteral("✅ 指定分類");
+    if (key == QStringLiteral("btn_ai_tag_folders")) {
+        return en ? QStringLiteral("🤖 AI tag folders (Generate Tag Folders)")
+                  : QStringLiteral("🤖 AI 智能標籤分類 (Generate Tag Folders)");
+    }
+    if (key == QStringLiteral("archive_keep_ai_default")) {
+        return en ? QStringLiteral("[Keep AI default (metadata tags)]")
+                  : QStringLiteral("[維持 AI 預設分類 (使用 Metadata 標籤)]");
+    }
+    if (key == QStringLiteral("archive_select_folder"))
+        return en ? QStringLiteral("Choose archive destination folder:")
+                  : QStringLiteral("選擇歸檔目標資料夾：");
+
+    // --- 18 AI drawer categories (canonical zh_TW keys) ---
+    if (key == QStringLiteral("🎓 大學學業與通識"))
+        return en ? QStringLiteral("🎓 University & general studies") : key;
+    if (key == QStringLiteral("🔬 STEM與醫學專業"))
+        return en ? QStringLiteral("🔬 STEM & medical sciences") : key;
+    if (key == QStringLiteral("⚖️ 法商與人文社會"))
+        return en ? QStringLiteral("⚖️ Law, business & humanities") : key;
+    if (key == QStringLiteral("🤖 AI與資料科學"))
+        return en ? QStringLiteral("🤖 AI & data science") : key;
+    if (key == QStringLiteral("⚙️ 系統與底層開發"))
+        return en ? QStringLiteral("⚙️ Systems & low-level dev") : key;
+    if (key == QStringLiteral("🌐 網頁與後端開發"))
+        return en ? QStringLiteral("🌐 Web & backend dev") : key;
+    if (key == QStringLiteral("📱 行動與跨平台開發"))
+        return en ? QStringLiteral("📱 Mobile & cross-platform dev") : key;
+    if (key == QStringLiteral("✈️ 語文檢定與留學"))
+        return en ? QStringLiteral("✈️ Language tests & study abroad") : key;
+    if (key == QStringLiteral("🏖️ 旅遊與生活票證"))
+        return en ? QStringLiteral("🏖️ Travel & life documents") : key;
+    if (key == QStringLiteral("💼 商務與職場管理"))
+        return en ? QStringLiteral("💼 Business & workplace") : key;
+    if (key == QStringLiteral("🎨 設計與影音剪輯"))
+        return en ? QStringLiteral("🎨 Design & video editing") : key;
+    if (key == QStringLiteral("📝 一般文件與排版"))
+        return en ? QStringLiteral("📝 General documents & layout") : key;
+    if (key == QStringLiteral("🗄️ 數據工程與資料庫"))
+        return en ? QStringLiteral("🗄️ Data engineering & databases") : key;
+    if (key == QStringLiteral("📊 財務與試算表"))
+        return en ? QStringLiteral("📊 Finance & spreadsheets") : key;
+    if (key == QStringLiteral("🌱 農業環境與食品"))
+        return en ? QStringLiteral("🌱 Agriculture, environment & food") : key;
+    if (key == QStringLiteral("📚 教育師培與教學"))
+        return en ? QStringLiteral("📚 Education & teaching") : key;
+    if (key == QStringLiteral("🛡️ 軍事與國防政策"))
+        return en ? QStringLiteral("🛡️ Military & defense policy") : key;
+    if (key == QStringLiteral("🎮 遊戲與互動開發"))
+        return en ? QStringLiteral("🎮 Games & interactive dev") : key;
+    if (key == QStringLiteral("📥 暫存與系統備份"))
+        return en ? QStringLiteral("📥 Staging & system backups") : key;
+    if (key == QStringLiteral("📦 雜項"))
+        return en ? QStringLiteral("📦 Miscellaneous") : key;
 
     if (key == QStringLiteral("redundancy_delete_none")) {
         return en ? QStringLiteral("No files were deleted. Check permissions or that paths still exist.")
@@ -391,5 +509,14 @@ QString LanguageManager::getText(const QString &key) const {
     }
 
     return key;
+}
+
+QString LanguageManager::localizedDrawerLabel(const QString &drawerKey) const
+{
+    const QString k = drawerKey.trimmed();
+    if (k.isEmpty())
+        return k;
+    const QString localized = getText(k);
+    return localized;
 }
 

@@ -7,6 +7,7 @@
 
 class QComboBox;
 class QCheckBox;
+class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
@@ -21,6 +22,7 @@ public:
 
     void setRootPath(const QString &path);
     void applyAndSave();
+    void applyLocalizedTexts();
 
     bool settingsChanged() const;
     int selectedLanguageIndex() const;
@@ -68,6 +70,15 @@ private:
     QPushButton *m_btnClearHash = nullptr;
     QPushButton *m_btnFactoryReset = nullptr;
     QPushButton *m_btnSave = nullptr;
+
+    QLabel *m_lblLanguage = nullptr;
+    QLabel *m_lblModel = nullptr;
+    QLabel *m_lblColdArchive = nullptr;
+    QGroupBox *m_perfSchedulingGroup = nullptr;
+    QLabel *m_lblAiConcurrency = nullptr;
+    QLabel *m_lblScheduleStart = nullptr;
+    QLabel *m_lblScheduleEnd = nullptr;
+    QGroupBox *m_dataMgmtGroup = nullptr;
 };
 
 class SettingsDialog : public QDialog {

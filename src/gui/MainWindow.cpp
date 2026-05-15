@@ -897,7 +897,32 @@ static QString tagChipDisplayStripLeadingEmoji(QString text)
 
 static QString aiTagLabelForTreeDisplay(const QString &raw)
 {
-    return tagChipDisplayStripLeadingEmoji(tagLibraryLabelStripAiBadge(raw));
+    const QString stripped = tagLibraryLabelStripAiBadge(raw).trimmed();
+    auto &lm = LanguageManager::instance();
+    const QString drawerLocalized = lm.localizedDrawerLabel(stripped);
+    if (drawerLocalized != stripped)
+        return drawerLocalized;
+
+    const QString textOnly = tagChipDisplayStripLeadingEmoji(stripped);
+    if (textOnly != stripped) {
+        const QString translated = lm.getText(textOnly);
+        if (translated != textOnly) {
+            int i = 0;
+            while (i < stripped.size()) {
+                const QChar c = stripped.at(i);
+                if (c.isSpace()) {
+                    ++i;
+                    continue;
+                }
+                if (c.isLetterOrNumber())
+                    break;
+                ++i;
+            }
+            const QString emojiPrefix = stripped.left(i).trimmed();
+            return emojiPrefix.isEmpty() ? translated : QStringLiteral("%1 %2").arg(emojiPrefix, translated);
+        }
+    }
+    return tagChipDisplayStripLeadingEmoji(stripped);
 }
 
 static QString sfDisplayPathStripDrawerEmoji(QString path)
@@ -2481,15 +2506,14 @@ void MainWindow::updateAllTexts() {
     if (btnAnalyzeFile) btnAnalyzeFile->setText(lm.getText(QStringLiteral("btn_analyze")));
     if (btnCancelAnalysis) btnCancelAnalysis->setText(lm.getText(QStringLiteral("btn_cancel")));
     if (btnAutoMergeTags) {
-        const QString normalText = lm.language() == LanguageManager::Language::EN_US
-                                       ? QStringLiteral("🤖 AI tag folders (Generate Tag Folders)")
-                                       : QStringLiteral("🤖 AI 智能標籤分類 (Generate Tag Folders)");
-        const QString busyText = lm.language() == LanguageManager::Language::EN_US
-                                     ? QStringLiteral("🤖 AI organizing…")
-                                     : QStringLiteral("🤖 AI 思考中…");
+        const QString normalText = lm.getText(QStringLiteral("btn_ai_tag_folders"));
+        const QString busyText = lm.getText(QStringLiteral("AI 思考中…"));
         btnAutoMergeTags->setText(m_isConsolidatingTags ? busyText : normalText);
         btnAutoMergeTags->setEnabled(!m_isConsolidatingTags);
     }
+    if (m_btnAssignForceCategory)
+        m_btnAssignForceCategory->setText(lm.getText(QStringLiteral("btn_assign_force_category")));
+    rebuildForceCategoryCombo();
     if (btnPhysicalArchive) btnPhysicalArchive->setText(lm.getText(QStringLiteral("btn_physical_archive")));
     if (btnUndoPhysicalArchive) btnUndoPhysicalArchive->setText(lm.getText(QStringLiteral("btn_undo_archive")));
     if (m_lblPhysicalArchiveWarning) {
@@ -2681,6 +2705,11 @@ void MainWindow::updateAllTexts() {
     if (m_aiSummaryEdit) {
         m_aiSummaryEdit->setPlaceholderText(lm.getText(QStringLiteral("尚未分析")));
     }
+
+    if (m_settingsPanel)
+        m_settingsPanel->applyLocalizedTexts();
+
+    updateStartAnalysisButtonUi();
 }
 
 MainWindow::~MainWindow()
@@ -2765,8 +2794,9 @@ void MainWindow::updateStartAnalysisButtonUi()
         return;
     const bool busy = (initialScanWatcher && initialScanWatcher->isRunning()) || m_isBatchMode
                       || (watcher && watcher->isRunning());
-    m_btnStartAnalysis->setText(busy ? QStringLiteral("⏸️ 停止分析")
-                                   : QStringLiteral("▶️ 開始 AI 智能分析"));
+    auto &lm = LanguageManager::instance();
+    m_btnStartAnalysis->setText(busy ? lm.getText(QStringLiteral("btn_stop_analysis"))
+                                   : lm.getText(QStringLiteral("btn_start_ai_analysis")));
     m_btnStartAnalysis->setEnabled(busy || !rootPath.trimmed().isEmpty());
 }
 
@@ -2913,7 +2943,8 @@ void MainWindow::setupFourColumnLayout() {
     tagsHeader->addWidget(chkRecursive);
     tagsLayout->addLayout(tagsHeader);
 
-    m_btnStartAnalysis = new QPushButton(QStringLiteral("▶️ 開始 AI 智能分析"), this);
+    m_btnStartAnalysis = new QPushButton(
+        LanguageManager::instance().getText(QStringLiteral("btn_start_ai_analysis")), this);
     m_btnStartAnalysis->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(m_btnStartAnalysis, &QPushButton::clicked, this, &MainWindow::onStartAnalysisClicked);
     tagsLayout->addWidget(m_btnStartAnalysis);
@@ -3878,11 +3909,11 @@ public:
         selectRow->addStretch(1);
         mainLayout->addLayout(selectRow);
 
-        mainLayout->addWidget(new QLabel(QStringLiteral("選擇歸檔目標資料夾："), this));
+        auto &lm = LanguageManager::instance();
+        mainLayout->addWidget(new QLabel(lm.getText(QStringLiteral("archive_select_folder")), this));
 
         m_folderCombo = new QComboBox(this);
-        m_folderCombo->addItem(QStringLiteral("[維持 AI 預設分類 (使用 Metadata 標籤)]"),
-                             kArchiveAiDefaultMarker);
+        m_folderCombo->addItem(lm.getText(QStringLiteral("archive_keep_ai_default")), kArchiveAiDefaultMarker);
         const QStringList subDirs =
             QDir(m_workspace).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
         for (const QString &subDir : subDirs) {
@@ -4349,6 +4380,26 @@ void MainWindow::executePhysicalArchive() {
     const QString fp = currentFilePath();
     if (!fp.isEmpty())
         updateTagDisplayForFile(fp);
+
+    syncGraphWidgetFilterContext();
+    if (m_graphWidget)
+        m_graphWidget->buildGraph();
+
+    if (folderModel) {
+        folderModel->setRootPath(QString());
+        folderModel->setRootPath(rootClean);
+        if (proxyModel)
+            proxyModel->setWorkspace(rootClean);
+        if (proxyModel && folderTree) {
+            const QString parentDir = QFileInfo(rootClean).path();
+            folderTree->setRootIndex(proxyModel->mapFromSource(folderModel->index(parentDir)));
+        }
+        const QString treePath = !currentPath.isEmpty() ? QDir::cleanPath(currentPath) : rootClean;
+        if (sfAbsolutePathUnderWorkspaceRoot(treePath, rootClean))
+            setFolderTreeCurrentPath(treePath);
+        else
+            setFolderTreeCurrentPath(rootClean);
+    }
 }
 
 void MainWindow::undoLastPhysicalArchive() {
@@ -5733,10 +5784,11 @@ void MainWindow::rebuildForceCategoryCombo()
     const QString prev = m_cmbForceCategory->currentData().toString();
     m_cmbForceCategory->blockSignals(true);
     m_cmbForceCategory->clear();
+    auto &lm = LanguageManager::instance();
     for (const QString &drawer : m_categoryLut.drawerKeys()) {
         if (drawer == QStringLiteral("📦 雜項"))
             continue;
-        m_cmbForceCategory->addItem(drawer, drawer);
+        m_cmbForceCategory->addItem(lm.localizedDrawerLabel(drawer), drawer);
     }
     const int idx = m_cmbForceCategory->findData(prev);
     m_cmbForceCategory->setCurrentIndex(idx >= 0 ? idx : 0);

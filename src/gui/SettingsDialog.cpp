@@ -57,27 +57,26 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
 
     {
         auto *row = new QHBoxLayout();
-        row->addWidget(new QLabel(tr("Language / 語言"), this));
+        m_lblLanguage = new QLabel(this);
+        row->addWidget(m_lblLanguage);
         m_languageCombo = new QComboBox(this);
-        m_languageCombo->addItem(tr("繁體中文"));
-        m_languageCombo->addItem(tr("English"));
         row->addWidget(m_languageCombo, 1);
         root->addLayout(row);
     }
 
     {
         auto *row = new QHBoxLayout();
-        row->addWidget(new QLabel(tr("AI model (.gguf)"), this));
+        m_lblModel = new QLabel(this);
+        row->addWidget(m_lblModel);
         m_modelPathEdit = new QLineEdit(this);
-        m_modelPathEdit->setPlaceholderText(tr("Select a .gguf model file"));
         row->addWidget(m_modelPathEdit, 1);
-        m_browseBtn = new QPushButton(tr("Browse..."), this);
+        m_browseBtn = new QPushButton(this);
         row->addWidget(m_browseBtn);
         root->addLayout(row);
     }
 
     {
-        m_bgAutoAnalyze = new QCheckBox(tr("Enable background auto-analysis (debounced folder watch)"), this);
+        m_bgAutoAnalyze = new QCheckBox(this);
         root->addWidget(m_bgAutoAnalyze);
     }
 
@@ -90,24 +89,22 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
 
     {
         auto *row = new QHBoxLayout();
-        row->addWidget(new QLabel(tr("Ignore & archive files not modified for"), this));
+        m_lblColdArchive = new QLabel(this);
+        row->addWidget(m_lblColdArchive);
         m_coldArchiveCombo = new QComboBox(this);
-        m_coldArchiveCombo->addItem(tr("Off (disabled)"), 0);
-        m_coldArchiveCombo->addItem(tr("1 year"), 1);
-        m_coldArchiveCombo->addItem(tr("3 years"), 3);
-        m_coldArchiveCombo->addItem(tr("5 years"), 5);
         row->addWidget(m_coldArchiveCombo, 1);
         root->addLayout(row);
     }
 
     {
-        auto *grp = new QGroupBox(QStringLiteral("系統效能與排程控制 (Performance & Scheduling)"), this);
-        auto *gv = new QVBoxLayout(grp);
+        m_perfSchedulingGroup = new QGroupBox(this);
+        auto *gv = new QVBoxLayout(m_perfSchedulingGroup);
 
         {
             auto *row = new QHBoxLayout();
-            row->addWidget(new QLabel(QStringLiteral("AI 併發執行緒數"), grp));
-            m_concurrencySpin = new QSpinBox(grp);
+            m_lblAiConcurrency = new QLabel(m_perfSchedulingGroup);
+            row->addWidget(m_lblAiConcurrency);
+            m_concurrencySpin = new QSpinBox(m_perfSchedulingGroup);
             const int ideal = qMax(1, QThread::idealThreadCount());
             m_concurrencySpin->setRange(1, ideal);
             m_concurrencySpin->setValue(2);
@@ -116,24 +113,24 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
             gv->addLayout(row);
         }
 
-        m_o1CacheBypass = new QCheckBox(QStringLiteral("啟用 O(1) 快取機制"), grp);
+        m_o1CacheBypass = new QCheckBox(m_perfSchedulingGroup);
         m_o1CacheBypass->setChecked(true);
-        m_o1CacheBypass->setToolTip(
-            QStringLiteral("勾選時可讀取 metadata.json 快取以略過重複 LLM 分析；取消勾選則每次強制重新分析。"));
         gv->addWidget(m_o1CacheBypass);
 
-        m_enableTimeSchedule = new QCheckBox(QStringLiteral("啟用指定時段分析"), grp);
+        m_enableTimeSchedule = new QCheckBox(m_perfSchedulingGroup);
         gv->addWidget(m_enableTimeSchedule);
 
         {
             auto *row = new QHBoxLayout();
-            row->addWidget(new QLabel(QStringLiteral("開始時間"), grp));
-            m_scheduleStart = new QTimeEdit(grp);
+            m_lblScheduleStart = new QLabel(m_perfSchedulingGroup);
+            row->addWidget(m_lblScheduleStart);
+            m_scheduleStart = new QTimeEdit(m_perfSchedulingGroup);
             m_scheduleStart->setDisplayFormat(QStringLiteral("HH:mm"));
             m_scheduleStart->setTime(QTime(2, 0));
             row->addWidget(m_scheduleStart);
-            row->addWidget(new QLabel(QStringLiteral("結束時間"), grp));
-            m_scheduleEnd = new QTimeEdit(grp);
+            m_lblScheduleEnd = new QLabel(m_perfSchedulingGroup);
+            row->addWidget(m_lblScheduleEnd);
+            m_scheduleEnd = new QTimeEdit(m_perfSchedulingGroup);
             m_scheduleEnd->setDisplayFormat(QStringLiteral("HH:mm"));
             m_scheduleEnd->setTime(QTime(6, 0));
             row->addWidget(m_scheduleEnd);
@@ -141,7 +138,7 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
             gv->addLayout(row);
         }
 
-        root->addWidget(grp);
+        root->addWidget(m_perfSchedulingGroup);
 
         connect(m_concurrencySpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
             applyConcurrencyToThreadPool(value);
@@ -152,15 +149,15 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
     }
 
     {
-        auto *grp = new QGroupBox(tr("資料與快取管理"), this);
-        auto *gv = new QVBoxLayout(grp);
-        m_btnClearAi = new QPushButton(tr("清除 AI 分析快取（保留路徑與 Hash）"), grp);
-        m_btnClearHash = new QPushButton(tr("清除雜湊紀錄（強制重新計算 SHA-256）"), grp);
-        m_btnFactoryReset = new QPushButton(tr("徹底重置工作區（刪除 metadata）"), grp);
+        m_dataMgmtGroup = new QGroupBox(this);
+        auto *gv = new QVBoxLayout(m_dataMgmtGroup);
+        m_btnClearAi = new QPushButton(m_dataMgmtGroup);
+        m_btnClearHash = new QPushButton(m_dataMgmtGroup);
+        m_btnFactoryReset = new QPushButton(m_dataMgmtGroup);
         gv->addWidget(m_btnClearAi);
         gv->addWidget(m_btnClearHash);
         gv->addWidget(m_btnFactoryReset);
-        root->addWidget(grp);
+        root->addWidget(m_dataMgmtGroup);
 
         connect(m_btnClearAi, &QPushButton::clicked, this, [this]() {
             const int r = QMessageBox::warning(this,
@@ -191,16 +188,86 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
         });
     }
 
-    m_btnSave = new QPushButton(tr("儲存設定"), this);
+    m_btnSave = new QPushButton(this);
     root->addWidget(m_btnSave, 0, Qt::AlignRight);
     root->addStretch(1);
 
     loadFromSettings();
     syncScheduleTimeEditEnabled();
     refreshDataActionButtons();
+    applyLocalizedTexts();
+
+    connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this,
+            [this](LanguageManager::Language) { applyLocalizedTexts(); });
 
     connect(m_browseBtn, &QPushButton::clicked, this, &SettingsPanel::browseModel);
     connect(m_btnSave, &QPushButton::clicked, this, &SettingsPanel::applyAndSave);
+}
+
+void SettingsPanel::applyLocalizedTexts()
+{
+    auto &lm = LanguageManager::instance();
+    if (m_lblLanguage)
+        m_lblLanguage->setText(lm.getText(QStringLiteral("settings_language_label")));
+    if (m_languageCombo) {
+        const int idx = m_languageCombo->currentIndex();
+        m_languageCombo->blockSignals(true);
+        m_languageCombo->clear();
+        m_languageCombo->addItem(lm.getText(QStringLiteral("settings_lang_zh")));
+        m_languageCombo->addItem(lm.getText(QStringLiteral("settings_lang_en")));
+        m_languageCombo->setCurrentIndex(qBound(0, idx, m_languageCombo->count() - 1));
+        m_languageCombo->blockSignals(false);
+    }
+    if (m_lblModel)
+        m_lblModel->setText(lm.getText(QStringLiteral("settings_model_label")));
+    if (m_modelPathEdit)
+        m_modelPathEdit->setPlaceholderText(lm.getText(QStringLiteral("settings_model_placeholder")));
+    if (m_browseBtn)
+        m_browseBtn->setText(lm.getText(QStringLiteral("瀏覽...")));
+    if (m_bgAutoAnalyze)
+        m_bgAutoAnalyze->setText(lm.getText(QStringLiteral("settings_bg_auto_analyze")));
+    if (m_systemFileBypass)
+        m_systemFileBypass->setText(lm.getText(QStringLiteral("settings_system_file_bypass")));
+    if (m_lblColdArchive)
+        m_lblColdArchive->setText(lm.getText(QStringLiteral("settings_cold_archive_prefix")));
+    if (m_coldArchiveCombo) {
+        const int y = m_coldArchiveCombo->currentData().toInt();
+        m_coldArchiveCombo->blockSignals(true);
+        m_coldArchiveCombo->clear();
+        m_coldArchiveCombo->addItem(lm.getText(QStringLiteral("settings_cold_off")), 0);
+        m_coldArchiveCombo->addItem(lm.getText(QStringLiteral("settings_cold_1y")), 1);
+        m_coldArchiveCombo->addItem(lm.getText(QStringLiteral("settings_cold_3y")), 3);
+        m_coldArchiveCombo->addItem(lm.getText(QStringLiteral("settings_cold_5y")), 5);
+        int idx = m_coldArchiveCombo->findData(y);
+        if (idx < 0)
+            idx = 0;
+        m_coldArchiveCombo->setCurrentIndex(idx);
+        m_coldArchiveCombo->blockSignals(false);
+    }
+    if (m_perfSchedulingGroup)
+        m_perfSchedulingGroup->setTitle(lm.getText(QStringLiteral("settings_perf_group")));
+    if (m_lblAiConcurrency)
+        m_lblAiConcurrency->setText(lm.getText(QStringLiteral("settings_ai_concurrency")));
+    if (m_o1CacheBypass) {
+        m_o1CacheBypass->setText(lm.getText(QStringLiteral("settings_o1_cache")));
+        m_o1CacheBypass->setToolTip(lm.getText(QStringLiteral("settings_o1_cache_tooltip")));
+    }
+    if (m_enableTimeSchedule)
+        m_enableTimeSchedule->setText(lm.getText(QStringLiteral("settings_time_schedule")));
+    if (m_lblScheduleStart)
+        m_lblScheduleStart->setText(lm.getText(QStringLiteral("settings_schedule_start")));
+    if (m_lblScheduleEnd)
+        m_lblScheduleEnd->setText(lm.getText(QStringLiteral("settings_schedule_end")));
+    if (m_dataMgmtGroup)
+        m_dataMgmtGroup->setTitle(lm.getText(QStringLiteral("settings_data_group")));
+    if (m_btnClearAi)
+        m_btnClearAi->setText(lm.getText(QStringLiteral("settings_clear_ai")));
+    if (m_btnClearHash)
+        m_btnClearHash->setText(lm.getText(QStringLiteral("settings_clear_hash")));
+    if (m_btnFactoryReset)
+        m_btnFactoryReset->setText(lm.getText(QStringLiteral("settings_factory_reset")));
+    if (m_btnSave)
+        m_btnSave->setText(lm.getText(QStringLiteral("settings_save")));
 }
 
 void SettingsPanel::applyConcurrencyToThreadPool(int limit)
@@ -423,12 +490,17 @@ void SettingsPanel::refreshDataActionButtons()
 
 SettingsDialog::SettingsDialog(const QString &currentRootPath, QWidget *parent)
     : QDialog(parent) {
-    setWindowTitle(tr("⚙️ Settings"));
     resize(640, 420);
 
     auto *root = new QVBoxLayout(this);
     m_panel = new SettingsPanel(currentRootPath, this);
     root->addWidget(m_panel);
+    setWindowTitle(LanguageManager::instance().getText(QStringLiteral("settings_dialog_title")));
+
+    connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this,
+            [this](LanguageManager::Language) {
+                setWindowTitle(LanguageManager::instance().getText(QStringLiteral("settings_dialog_title")));
+            });
 
     connect(m_panel, &SettingsPanel::settingsApplied, this, &SettingsDialog::settingsApplied);
     connect(m_panel, &SettingsPanel::clearAiCacheRequested, this, &SettingsDialog::clearAiCacheRequested);
