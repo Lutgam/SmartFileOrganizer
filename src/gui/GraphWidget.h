@@ -5,8 +5,10 @@
 #include <QGraphicsItem>
 #include <QHash>
 #include <QSet>
+#include <QList>
 #include <QListWidget>
 #include <QTabWidget>
+#include <QTimer>
 #include <vector>
 #include <map>
 
@@ -67,6 +69,9 @@ public:
     QString text() const { return m_text; }
     NodeType nodeType() const { return m_type; }
 
+    void beginAppearPop();
+    void tickAppearPop();
+
 protected:
     QVariant itemChange(GraphicsItemChange change, const QVariant &value) override;
     void mousePressEvent(QGraphicsSceneMouseEvent *event) override;
@@ -83,6 +88,8 @@ private:
     mutable qreal m_width = 80.0;
     mutable qreal m_height = 40.0;
     bool m_pressedGlow = false;
+    qreal m_visualScale = 1.0;
+    int m_appearPopStep = 0;
 };
 
 // --- GraphWidget Class ---
@@ -112,6 +119,9 @@ protected:
     void scaleView(qreal scaleFactor);
     void resizeEvent(QResizeEvent *event) override;
 
+private slots:
+    void onGraphPopTick();
+
 private:
     static constexpr int kDefaultMaxGraphNodes = 50;
     static constexpr int kMinMaxGraphNodes = 10;
@@ -130,6 +140,7 @@ private:
     QColor edgeColorForTag(const QString &tag, int paletteIndex) const;
     void placeNodeWithSpiral(Node *node, const QPointF &center = QPointF(0, 0));
     void fitAllNodes();
+    void runAppearPopAnimation();
     void setFilterPanelExpanded(bool expanded);
     void updateFilterPanelLayout();
 
@@ -160,6 +171,10 @@ private:
     QLabel *m_maxNodesSpinLabel = nullptr;
     class QSpinBox *m_maxNodesSpin = nullptr;
     int m_maxGraphNodes = kDefaultMaxGraphNodes;
+
+    QTimer *m_graphPopTimer = nullptr;
+    QList<Node *> m_graphPopNodes;
+    int m_graphPopStep = 0;
 };
 
 #endif // GRAPHWIDGET_H

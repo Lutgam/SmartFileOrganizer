@@ -47,6 +47,43 @@ QString LanguageManager::getText(const QString &key) const {
 
     if (key == QStringLiteral("tab_workspace")) return en ? QStringLiteral("Workspace") : QStringLiteral("核心工作區");
     if (key == QStringLiteral("tab_duplicates")) return en ? QStringLiteral("Duplicate Cleaner") : QStringLiteral("冗餘檔案清理");
+    if (key == QStringLiteral("tab_system_log"))
+        return en ? QStringLiteral("System Log") : QStringLiteral("系統日誌");
+    if (key == QStringLiteral("tab_correction_logs"))
+        return en ? QStringLiteral("Correction Logs") : QStringLiteral("AI 糾錯紀錄");
+    if (key == QStringLiteral("task_center_subtab_batch"))
+        return en ? QStringLiteral("Redundancy Analysis") : QStringLiteral("冗餘檔案分析");
+    if (key == QStringLiteral("correction_log_col_select"))
+        return en ? QStringLiteral("Select") : QStringLiteral("選取");
+    if (key == QStringLiteral("btn_correction_log_select_all"))
+        return en ? QStringLiteral("Select all") : QStringLiteral("全部選取");
+    if (key == QStringLiteral("btn_correction_log_deselect_all"))
+        return en ? QStringLiteral("Deselect all") : QStringLiteral("取消全選");
+    if (key == QStringLiteral("btn_delete_selected_correction_logs"))
+        return en ? QStringLiteral("🗑️ Delete selected") : QStringLiteral("🗑️ 刪除選取紀錄");
+    if (key == QStringLiteral("delete_selected_correction_logs_none"))
+        return en ? QStringLiteral("Select at least one correction log entry to delete.")
+                  : QStringLiteral("請先勾選要刪除的糾錯紀錄。");
+    if (key == QStringLiteral("delete_selected_correction_logs_confirm_title"))
+        return en ? QStringLiteral("Delete selected logs") : QStringLiteral("刪除選取紀錄");
+    if (key == QStringLiteral("delete_selected_correction_logs_confirm_body")) {
+        return en ? QStringLiteral("Delete %1 selected correction log entry(ies)?")
+                  : QStringLiteral("確定要刪除 %1 筆已勾選的糾錯紀錄嗎？");
+    }
+    if (key == QStringLiteral("correction_log_col_timestamp"))
+        return en ? QStringLiteral("Timestamp") : QStringLiteral("時間");
+    if (key == QStringLiteral("correction_log_col_file"))
+        return en ? QStringLiteral("File") : QStringLiteral("檔案名稱");
+    if (key == QStringLiteral("correction_log_col_tag"))
+        return en ? QStringLiteral("Rejected Tag") : QStringLiteral("誤判標籤");
+    if (key == QStringLiteral("btn_clear_correction_logs"))
+        return en ? QStringLiteral("🗑️ Clear correction logs") : QStringLiteral("🗑️ 清空糾錯紀錄");
+    if (key == QStringLiteral("clear_correction_logs_confirm_title"))
+        return en ? QStringLiteral("Clear correction logs") : QStringLiteral("清空糾錯紀錄");
+    if (key == QStringLiteral("clear_correction_logs_confirm_body")) {
+        return en ? QStringLiteral("Remove all RLHF correction entries from this workspace? This cannot be undone.")
+                  : QStringLiteral("確定要清空此工作區的所有 AI 糾錯紀錄嗎？此操作無法復原。");
+    }
     if (key == QStringLiteral("tab_graph")) return en ? QStringLiteral("Graph Analysis") : QStringLiteral("關聯圖譜分析");
 
     if (key == QStringLiteral("toolbar_open")) return en ? QStringLiteral("Open Folder") : QStringLiteral("開啟資料夾");
@@ -63,6 +100,28 @@ QString LanguageManager::getText(const QString &key) const {
     if (key == QStringLiteral("btn_add_tag")) return en ? QStringLiteral("➕ Add Tag") : QStringLiteral("➕ 加入標籤");
     if (key == QStringLiteral("btn_remove_tag")) return en ? QStringLiteral("➖ Remove Tag") : QStringLiteral("➖ 移除標籤");
     if (key == QStringLiteral("btn_add_existing_tag")) return en ? QStringLiteral("🏷️ Add Existing Tag") : QStringLiteral("🏷️ 加入現有標籤");
+    if (key == QStringLiteral("btn_rlhf_tag_correct"))
+        return en ? QStringLiteral("AI Tag Correction") : QStringLiteral("AI 標籤糾錯");
+    if (key == QStringLiteral("rlhf_tag_dialog_title"))
+        return en ? QStringLiteral("AI Tag Correction") : QStringLiteral("AI 標籤糾錯");
+    if (key == QStringLiteral("rlhf_tag_error_title"))
+        return en ? QStringLiteral("Action Error") : QStringLiteral("操作錯誤");
+    if (key == QStringLiteral("rlhf_tag_select_file_first"))
+        return en ? QStringLiteral("Select a file in the list to correct its tags.")
+                  : QStringLiteral("請先在列表中選擇要糾錯的檔案。");
+    if (key == QStringLiteral("rlhf_tag_info_title"))
+        return en ? QStringLiteral("Notice") : QStringLiteral("提示");
+    if (key == QStringLiteral("rlhf_tag_no_tags_on_file"))
+        return en ? QStringLiteral("This file has no tags to correct.")
+                  : QStringLiteral("此檔案目前沒有任何標籤，無需糾錯。");
+    if (key == QStringLiteral("rlhf_tag_pick_prompt")) {
+        return en ? QStringLiteral("File: %1\nSelect the incorrect tag:")
+                  : QStringLiteral("檔案: %1\n請選擇判斷錯誤的標籤：");
+    }
+    if (key == QStringLiteral("rlhf_tag_log_contextual")) {
+        return en ? QStringLiteral("[RLHF] Tag '%2' on '%1' marked as mislabeled; saved to local weight reference.")
+                  : QStringLiteral("[RLHF] 檔案 '%1' 的標籤 '%2' 已標記為誤判，寫入本地權重參考檔。");
+    }
 
     if (key == QStringLiteral("btn_physical_archive")) return en ? QStringLiteral("Physical Archive (by Tag)") : QStringLiteral("實體歸檔 (依標籤)");
     if (key == QStringLiteral("btn_undo_archive")) return en ? QStringLiteral("Undo Archive") : QStringLiteral("回上一步 (復原歸檔)");

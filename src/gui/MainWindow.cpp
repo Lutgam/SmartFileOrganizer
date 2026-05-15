@@ -30,15 +30,22 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QMimeDatabase>
+#include <QPlainTextEdit>
+#include <QPointer>
 #include <QPixmap>
 #include <QRegularExpression>
+#include <QMessageLogContext>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QHeaderView>
 #include <QScrollBar>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QSet>
 #include <QSettings>
 #include <QSpinBox>
 #include <QVector>
+#include <QTime>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -257,7 +264,29 @@ static QString sfAiTagDedupKey(QString tag)
     return tag.trimmed();
 }
 
-static std::vector<QString> sfFilterAiAnalysisTags(const QStringList &tagsIn, int maxTags = 5, int maxLen = 15)
+static bool sfIsTagOnRejectedList(const QString &tag, const QStringList &rejectedTags)
+{
+    if (rejectedTags.isEmpty()) return false;
+    const QString norm = TagManager::stripAiPrefix(tag).trimmed();
+    if (norm.isEmpty()) return false;
+    const QString key = sfAiTagDedupKey(norm);
+    for (const QString &rejected : rejectedTags) {
+        const QString rejNorm = TagManager::stripAiPrefix(rejected).trimmed();
+        if (rejNorm.isEmpty()) continue;
+        if (norm.compare(rejNorm, Qt::CaseInsensitive) == 0) return true;
+        const QString rejKey = sfAiTagDedupKey(rejNorm);
+        if (!key.isEmpty() && !rejKey.isEmpty()
+            && (key == rejKey || key.contains(rejKey) || rejKey.contains(key))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::vector<QString> sfFilterAiAnalysisTags(const QStringList &tagsIn,
+                                                     const QStringList &rejectedTags = {},
+                                                     int maxTags = 3,
+                                                     int maxLen = 15)
 {
     std::vector<QString> out;
     QSet<QString> seenKeys;
@@ -271,6 +300,8 @@ static std::vector<QString> sfFilterAiAnalysisTags(const QStringList &tagsIn, in
         t.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
         t = t.trimmed();
         if (t.isEmpty() || t.compare(QStringLiteral("ai"), Qt::CaseInsensitive) == 0)
+            continue;
+        if (sfIsTagOnRejectedList(t, rejectedTags))
             continue;
         if (t.size() > maxLen)
             continue;
@@ -615,6 +646,55 @@ private:
     QPixmap m_source;
 };
 
+static QString localSearchHighlightFromWidget(const QWidget *w)
+{
+    return w ? w->property("sfSearchHighlight").toString().trimmed().toLower() : QString();
+}
+
+static void paintSegmentWithHighlight(QPainter *painter,
+                                      QRect &cursor,
+                                      const QString &text,
+                                      const QString &queryLower,
+                                      const QColor &textColor,
+                                      const QFont &font)
+{
+    painter->setFont(font);
+    const QFontMetrics fm(font);
+    if (queryLower.isEmpty() || text.isEmpty()) {
+        painter->setPen(textColor);
+        painter->drawText(cursor, Qt::AlignLeft | Qt::AlignVCenter, text);
+        cursor.setLeft(cursor.left() + fm.horizontalAdvance(text));
+        return;
+    }
+
+    const QString lower = text.toLower();
+    int pos = 0;
+    while (pos < text.size()) {
+        const int hit = lower.indexOf(queryLower, pos);
+        if (hit < 0) {
+            const QString tail = text.mid(pos);
+            painter->setPen(textColor);
+            painter->drawText(cursor, Qt::AlignLeft | Qt::AlignVCenter, tail);
+            cursor.setLeft(cursor.left() + fm.horizontalAdvance(tail));
+            break;
+        }
+        if (hit > pos) {
+            const QString pre = text.mid(pos, hit - pos);
+            painter->setPen(textColor);
+            painter->drawText(cursor, Qt::AlignLeft | Qt::AlignVCenter, pre);
+            cursor.setLeft(cursor.left() + fm.horizontalAdvance(pre));
+        }
+        const QString hl = text.mid(hit, queryLower.size());
+        const int hlW = fm.horizontalAdvance(hl);
+        QRect hlRect(cursor.left(), cursor.top(), hlW, cursor.height());
+        painter->fillRect(hlRect, QColor(255, 235, 59));
+        painter->setPen(Qt::black);
+        painter->drawText(hlRect, Qt::AlignLeft | Qt::AlignVCenter, hl);
+        cursor.setLeft(cursor.left() + hlW);
+        pos = hit + queryLower.size();
+    }
+}
+
 class FileItemDelegate : public QStyledItemDelegate {
 public:
     /// 0 none, 1 hollow (pending), 2 analyzing (arc; phase on list sfProgressPhase), 3 solid (done)
@@ -672,17 +752,20 @@ public:
             painter->setPen(opt.palette.text().color());
 
         const QFontMetrics fmName(nameFont);
+        const QString queryLower = localSearchHighlightFromWidget(w);
         const QString nameElided = fmName.elidedText(name, Qt::ElideRight, textArea.width());
-        painter->drawText(textArea, Qt::AlignLeft | Qt::AlignVCenter, nameElided);
+        QRect nameRect = textArea;
+        const QColor nameColor =
+            (opt.state & QStyle::State_Selected) ? opt.palette.highlightedText().color() : opt.palette.text().color();
+        paintSegmentWithHighlight(painter, nameRect, nameElided, queryLower, nameColor, nameFont);
 
-        const int nameW = fmName.horizontalAdvance(nameElided);
         QRect pathRect = textArea;
-        pathRect.setLeft(textArea.left() + nameW + 10);
+        pathRect.setLeft(qMax(textArea.left(), nameRect.left() + 6));
 
-        painter->setFont(opt.font);
-        if (!(opt.state & QStyle::State_Selected))
-            painter->setPen(Qt::gray);
-        painter->drawText(pathRect, Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("[%1]").arg(path));
+        QFont pathFont = opt.font;
+        painter->setFont(pathFont);
+        const QColor pathColor = (opt.state & QStyle::State_Selected) ? opt.palette.highlightedText().color() : Qt::gray;
+        paintSegmentWithHighlight(painter, pathRect, QStringLiteral("[%1]").arg(path), queryLower, pathColor, pathFont);
 
         painter->restore();
     }
@@ -1955,6 +2038,185 @@ void MainWindow::updateBackgroundStatusLabel()
     updateFloatingQueueMonitor();
 }
 
+namespace {
+QtMessageHandler g_prevQtMsgHandler = nullptr;
+QPointer<MainWindow> g_mainWindowForDemoLog;
+
+void demoQtMessageHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg)
+{
+    const QString line = qFormatLogMessage(type, context, msg);
+    if (g_mainWindowForDemoLog) {
+        const int typeInt = static_cast<int>(type);
+        QMetaObject::invokeMethod(
+            g_mainWindowForDemoLog,
+            [line, typeInt]() {
+                if (g_mainWindowForDemoLog)
+                    g_mainWindowForDemoLog->logToUI(line, typeInt);
+            },
+            Qt::QueuedConnection);
+    }
+    if (g_prevQtMsgHandler)
+        g_prevQtMsgHandler(type, context, msg);
+}
+} // namespace
+
+void MainWindow::logToUI(const QString &msg, int msgType)
+{
+    const QString line =
+        QStringLiteral("[%1] %2").arg(QTime::currentTime().toString(QStringLiteral("HH:mm:ss")), msg.trimmed());
+    if (m_demoConsoleLog) {
+        m_demoConsoleLog->appendPlainText(line);
+        if (QScrollBar *sb = m_demoConsoleLog->verticalScrollBar())
+            sb->setValue(sb->maximum());
+    }
+
+    const auto type = static_cast<QtMsgType>(msgType);
+    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
+        const bool onSystemLog =
+            m_taskCenterInnerTabs && m_systemLogTab && m_taskCenterTab && m_mainTabWidget
+            && m_mainTabWidget->currentWidget() == m_taskCenterTab
+            && m_taskCenterInnerTabs->currentWidget() == m_systemLogTab;
+        if (!onSystemLog) {
+            m_logTabNeedsAttention = true;
+            updateSystemLogTabTitle();
+        }
+    }
+}
+
+void MainWindow::updateSystemLogTabTitle()
+{
+    if (!m_taskCenterInnerTabs || !m_systemLogTab)
+        return;
+    const int idx = m_taskCenterInnerTabs->indexOf(m_systemLogTab);
+    if (idx < 0)
+        return;
+    QString title = LanguageManager::instance().getText(QStringLiteral("tab_system_log"));
+    if (m_logTabNeedsAttention)
+        title = QStringLiteral("* %1").arg(title);
+    m_taskCenterInnerTabs->setTabText(idx, title);
+}
+
+void MainWindow::installDemoConsoleLogHandler()
+{
+    g_mainWindowForDemoLog = this;
+    if (!g_prevQtMsgHandler) {
+        g_prevQtMsgHandler = qInstallMessageHandler(demoQtMessageHandler);
+        logToUI(QStringLiteral("Demo console ready."));
+    }
+}
+
+QString MainWindow::currentLocalSearchHighlightQuery() const
+{
+    const bool heroGlobalSemantic =
+        m_cmbSearchMode && m_cmbSearchMode->currentData().toInt() == HeroSearchScope_GlobalSemantic;
+    if (heroGlobalSemantic || !m_heroOmnibox)
+        return QString();
+    return m_heroOmnibox->text().trimmed();
+}
+
+QString MainWindow::highlightTextAsHtml(const QString &plain, const QString &query) const
+{
+    if (query.trimmed().isEmpty())
+        return plain.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
+
+    const QString q = query.trimmed();
+    const QString lowerPlain = plain.toLower();
+    const QString lowerQ = q.toLower();
+
+    QString out;
+    out.reserve(plain.size() + 32);
+    int i = 0;
+    while (i < plain.size()) {
+        if (lowerPlain.mid(i).startsWith(lowerQ)) {
+            out += QStringLiteral("<span style='background-color:#ffeb3b;color:#000000;'>");
+            out += plain.mid(i, q.size()).toHtmlEscaped();
+            out += QStringLiteral("</span>");
+            i += q.size();
+            continue;
+        }
+        const QChar ch = plain.at(i);
+        if (ch == QLatin1Char('\n'))
+            out += QStringLiteral("<br>");
+        else
+            out += QString(ch).toHtmlEscaped();
+        ++i;
+    }
+    return out;
+}
+
+void MainWindow::stopSummaryTypewriter()
+{
+    if (m_summaryTypewriterTimer)
+        m_summaryTypewriterTimer->stop();
+    m_summaryTypewriterFull.clear();
+    m_summaryTypewriterFilePath.clear();
+    m_summaryTypewriterIndex = 0;
+}
+
+void MainWindow::showAiSummaryForFile(const QString &filePath, const QString &summary, bool typewriter)
+{
+    if (!m_aiSummaryEdit || QDir::cleanPath(currentFilePath()) != QDir::cleanPath(filePath))
+        return;
+
+    if (summary.trimmed().isEmpty()) {
+        stopSummaryTypewriter();
+        m_aiSummaryEdit->clear();
+        return;
+    }
+
+    if (!typewriter) {
+        stopSummaryTypewriter();
+        m_aiSummaryEdit->setHtml(highlightTextAsHtml(summary, currentLocalSearchHighlightQuery()));
+        return;
+    }
+
+    stopSummaryTypewriter();
+    m_summaryTypewriterFull = summary;
+    m_summaryTypewriterFilePath = QDir::cleanPath(filePath);
+    m_summaryTypewriterIndex = 0;
+    m_aiSummaryEdit->clear();
+
+    if (!m_summaryTypewriterTimer) {
+        m_summaryTypewriterTimer = new QTimer(this);
+        m_summaryTypewriterTimer->setInterval(30);
+        connect(m_summaryTypewriterTimer, &QTimer::timeout, this, [this]() {
+            if (!m_aiSummaryEdit || m_summaryTypewriterFull.isEmpty())
+                return;
+            if (QDir::cleanPath(currentFilePath()) != m_summaryTypewriterFilePath) {
+                stopSummaryTypewriter();
+                return;
+            }
+            if (m_summaryTypewriterIndex >= m_summaryTypewriterFull.size()) {
+                stopSummaryTypewriter();
+                m_aiSummaryEdit->setHtml(
+                    highlightTextAsHtml(m_summaryTypewriterFull, currentLocalSearchHighlightQuery()));
+                return;
+            }
+            ++m_summaryTypewriterIndex;
+            const QString partial = m_summaryTypewriterFull.left(m_summaryTypewriterIndex);
+            m_aiSummaryEdit->setHtml(highlightTextAsHtml(partial, currentLocalSearchHighlightQuery()));
+        });
+    }
+    m_summaryTypewriterTimer->start();
+}
+
+void MainWindow::refreshSearchHighlightOnFileList()
+{
+    if (!fileList)
+        return;
+    const QString q = currentLocalSearchHighlightQuery();
+    fileList->setProperty("sfSearchHighlight", q);
+    if (fileList->viewport())
+        fileList->viewport()->update();
+
+    if (m_aiSummaryEdit && (!m_summaryTypewriterTimer || !m_summaryTypewriterTimer->isActive())) {
+        const QString fp = currentFilePath();
+        const QString summary = m_aiSummaryByPath.value(fp).trimmed();
+        if (!summary.isEmpty())
+            m_aiSummaryEdit->setHtml(highlightTextAsHtml(summary, q));
+    }
+}
+
 void MainWindow::appendTaskCenterLog(const QString &text)
 {
     if (!m_backgroundLogEdit) return;
@@ -2066,6 +2328,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setupFourColumnLayout();
     wirePreviewControlSignals();
     workspaceLayout->addWidget(mainSplitter, 1);
+
     m_mainTabWidget->addTab(m_workspaceTab, tr("核心工作區"));
 
     connect(m_heroOmnibox, &QLineEdit::textChanged, this, &MainWindow::onHeroOmniboxTextChanged);
@@ -2088,7 +2351,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *tcLayout = new QVBoxLayout(m_taskCenterTab);
     tcLayout->setContentsMargins(12, 12, 12, 12);
 
-    m_taskCenterSplitter = new QSplitter(Qt::Horizontal, m_taskCenterTab);
+    m_taskCenterInnerTabs = new QTabWidget(m_taskCenterTab);
+    auto *tcTasksPage = new QWidget(m_taskCenterInnerTabs);
+    auto *tcTasksLayout = new QVBoxLayout(tcTasksPage);
+    tcTasksLayout->setContentsMargins(0, 0, 0, 0);
+
+    m_taskCenterSplitter = new QSplitter(Qt::Horizontal, tcTasksPage);
     m_taskCenterSplitter->setChildrenCollapsible(false);
 
     auto *tcLeftPane = new QWidget(m_taskCenterSplitter);
@@ -2153,8 +2421,71 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_taskCenterSplitter->setStretchFactor(0, 22);
     m_taskCenterSplitter->setStretchFactor(1, 78);
 
-    tcLayout->addWidget(m_taskCenterSplitter, 1);
+    tcTasksLayout->addWidget(m_taskCenterSplitter, 1);
+    m_taskCenterInnerTabs->addTab(tcTasksPage, tr("冗餘檔案分析"));
 
+    m_systemLogTab = new QWidget(m_taskCenterInnerTabs);
+    auto *logLayout = new QVBoxLayout(m_systemLogTab);
+    logLayout->setContentsMargins(8, 8, 8, 8);
+    m_demoConsoleLog = new QPlainTextEdit(m_systemLogTab);
+    m_demoConsoleLog->setReadOnly(true);
+    m_demoConsoleLog->setMaximumBlockCount(800);
+    m_demoConsoleLog->setStyleSheet(QStringLiteral(
+        "QPlainTextEdit {"
+        "  background-color: #0a0a0a;"
+        "  color: #ffffff;"
+        "  font-family: Menlo, Monaco, 'Courier New', monospace;"
+        "  font-size: 11px;"
+        "  border: 1px solid rgba(255,255,255,40);"
+        "  border-radius: 6px;"
+        "  padding: 6px;"
+        "}"));
+    logLayout->addWidget(m_demoConsoleLog, 1);
+    m_taskCenterInnerTabs->addTab(m_systemLogTab, tr("系統日誌"));
+
+    m_correctionLogTab = new QWidget(m_taskCenterInnerTabs);
+    auto *correctionLogLayout = new QVBoxLayout(m_correctionLogTab);
+    correctionLogLayout->setContentsMargins(8, 8, 8, 8);
+    correctionLogLayout->setSpacing(8);
+    auto *correctionLogToolbar = new QHBoxLayout();
+    m_btnCorrectionLogSelectAll = new QPushButton(QStringLiteral("全部選取"), m_correctionLogTab);
+    m_btnCorrectionLogDeselectAll = new QPushButton(QStringLiteral("取消全選"), m_correctionLogTab);
+    connect(m_btnCorrectionLogSelectAll, &QPushButton::clicked, this, &MainWindow::onCorrectionLogSelectAllClicked);
+    connect(m_btnCorrectionLogDeselectAll, &QPushButton::clicked, this, &MainWindow::onCorrectionLogDeselectAllClicked);
+    correctionLogToolbar->addWidget(m_btnCorrectionLogSelectAll);
+    correctionLogToolbar->addWidget(m_btnCorrectionLogDeselectAll);
+    correctionLogToolbar->addStretch(1);
+    correctionLogLayout->addLayout(correctionLogToolbar);
+
+    m_correctionLogTable = new QTableWidget(m_correctionLogTab);
+    m_correctionLogTable->setColumnCount(4);
+    m_correctionLogTable->setHorizontalHeaderLabels(
+        {QStringLiteral("選取"), QStringLiteral("時間"), QStringLiteral("檔案名稱"), QStringLiteral("誤判標籤")});
+    m_correctionLogTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_correctionLogTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_correctionLogTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_correctionLogTable->setAlternatingRowColors(true);
+    m_correctionLogTable->verticalHeader()->setVisible(false);
+    m_correctionLogTable->horizontalHeader()->setStretchLastSection(false);
+    m_correctionLogTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_correctionLogTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_correctionLogTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    m_correctionLogTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    correctionLogLayout->addWidget(m_correctionLogTable, 1);
+
+    auto *correctionLogActions = new QHBoxLayout();
+    m_btnDeleteSelectedCorrectionLogs = new QPushButton(QStringLiteral("🗑️ 刪除選取紀錄"), m_correctionLogTab);
+    m_btnClearCorrectionLogs = new QPushButton(QStringLiteral("🗑️ 清空糾錯紀錄"), m_correctionLogTab);
+    connect(m_btnDeleteSelectedCorrectionLogs, &QPushButton::clicked, this,
+            &MainWindow::onDeleteSelectedCorrectionLogsClicked);
+    connect(m_btnClearCorrectionLogs, &QPushButton::clicked, this, &MainWindow::onClearCorrectionLogsClicked);
+    correctionLogActions->addWidget(m_btnDeleteSelectedCorrectionLogs);
+    correctionLogActions->addWidget(m_btnClearCorrectionLogs);
+    correctionLogActions->addStretch(1);
+    correctionLogLayout->addLayout(correctionLogActions);
+    m_taskCenterInnerTabs->addTab(m_correctionLogTab, tr("AI 糾錯紀錄"));
+
+    tcLayout->addWidget(m_taskCenterInnerTabs, 1);
     m_mainTabWidget->addTab(m_taskCenterTab, tr("任務控制中心"));
 
     m_settingsTab = new QWidget(this);
@@ -2177,6 +2508,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         if (m_taskCenterTab && m_mainTabWidget->currentWidget() == m_taskCenterTab) {
             rebuildTaskCenterRedundancyFromMetadata();
         }
+    });
+    connect(m_taskCenterInnerTabs, &QTabWidget::currentChanged, this, [this](int) {
+        if (!m_taskCenterInnerTabs) return;
+        if (m_systemLogTab && m_taskCenterInnerTabs->currentWidget() == m_systemLogTab) {
+            m_logTabNeedsAttention = false;
+            updateSystemLogTabTitle();
+        }
+        if (m_correctionLogTab && m_taskCenterInnerTabs->currentWidget() == m_correctionLogTab)
+            loadCorrectionLogs();
     });
 
     setupContextMenus();
@@ -2293,6 +2633,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() { updateAllTexts(); });
     updateAllTexts();
+    installDemoConsoleLogHandler();
 
     if (btnPhysicalArchive) {
         disconnect(btnPhysicalArchive, nullptr, nullptr, nullptr);
@@ -2467,6 +2808,7 @@ void MainWindow::onWorkspaceFactoryReset()
     if (!rootPath.trimmed().isEmpty()) {
         tagManager.loadTags(rootPath.toStdString());
     }
+    loadCorrectionLogs();
 
     m_aiSummaryByPath.clear();
     m_analysisByContentHash.clear();
@@ -2513,6 +2855,8 @@ void MainWindow::updateAllTexts() {
     }
     if (m_btnAssignForceCategory)
         m_btnAssignForceCategory->setText(lm.getText(QStringLiteral("btn_assign_force_category")));
+    if (m_btnAiTagCorrect)
+        m_btnAiTagCorrect->setText(lm.getText(QStringLiteral("btn_rlhf_tag_correct")));
     rebuildForceCategoryCombo();
     if (btnPhysicalArchive) btnPhysicalArchive->setText(lm.getText(QStringLiteral("btn_physical_archive")));
     if (btnUndoPhysicalArchive) btnUndoPhysicalArchive->setText(lm.getText(QStringLiteral("btn_undo_archive")));
@@ -2543,6 +2887,32 @@ void MainWindow::updateAllTexts() {
         m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_taskCenterTab),
                                     lm.getText(QStringLiteral("tab_task_center")));
     }
+    if (m_taskCenterInnerTabs) {
+        const int tasksIdx = 0;
+        if (m_taskCenterInnerTabs->count() > tasksIdx)
+            m_taskCenterInnerTabs->setTabText(tasksIdx, lm.getText(QStringLiteral("task_center_subtab_batch")));
+        updateSystemLogTabTitle();
+        if (m_correctionLogTab) {
+            const int corrIdx = m_taskCenterInnerTabs->indexOf(m_correctionLogTab);
+            if (corrIdx >= 0)
+                m_taskCenterInnerTabs->setTabText(corrIdx, lm.getText(QStringLiteral("tab_correction_logs")));
+        }
+    }
+    if (m_correctionLogTable) {
+        const QStringList headers = {lm.getText(QStringLiteral("correction_log_col_select")),
+                                     lm.getText(QStringLiteral("correction_log_col_timestamp")),
+                                     lm.getText(QStringLiteral("correction_log_col_file")),
+                                     lm.getText(QStringLiteral("correction_log_col_tag"))};
+        m_correctionLogTable->setHorizontalHeaderLabels(headers);
+    }
+    if (m_btnCorrectionLogSelectAll)
+        m_btnCorrectionLogSelectAll->setText(lm.getText(QStringLiteral("btn_correction_log_select_all")));
+    if (m_btnCorrectionLogDeselectAll)
+        m_btnCorrectionLogDeselectAll->setText(lm.getText(QStringLiteral("btn_correction_log_deselect_all")));
+    if (m_btnDeleteSelectedCorrectionLogs)
+        m_btnDeleteSelectedCorrectionLogs->setText(lm.getText(QStringLiteral("btn_delete_selected_correction_logs")));
+    if (m_btnClearCorrectionLogs)
+        m_btnClearCorrectionLogs->setText(lm.getText(QStringLiteral("btn_clear_correction_logs")));
     if (m_backgroundLogEdit) {
         m_backgroundLogEdit->setPlaceholderText(lm.getText(QStringLiteral("bg_log_placeholder")));
     }
@@ -2714,6 +3084,13 @@ void MainWindow::updateAllTexts() {
 
 MainWindow::~MainWindow()
 {
+    stopSummaryTypewriter();
+    if (g_mainWindowForDemoLog.data() == this)
+        g_mainWindowForDemoLog = nullptr;
+    if (g_prevQtMsgHandler) {
+        qInstallMessageHandler(g_prevQtMsgHandler);
+        g_prevQtMsgHandler = nullptr;
+    }
     delete m_llamaEngine;
     m_llamaEngine = nullptr;
 }
@@ -2825,6 +3202,7 @@ void MainWindow::startWorkspaceAnalysisQueue(const QStringList &paths)
         return;
     }
 
+    logToUI(QStringLiteral("Global analysis started (%1 file(s)).").arg(paths.size()));
     startAnalysisQueue(paths, false);
 }
 
@@ -3343,7 +3721,7 @@ void MainWindow::setupFourColumnLayout() {
     auto *aiSummaryLayout = new QVBoxLayout(m_previewAiSummaryTab);
     aiSummaryLayout->setContentsMargins(6, 6, 6, 6);
     m_aiSummaryEdit = makePreviewInsightTextView(m_previewAiSummaryTab);
-    m_aiSummaryEdit->setAcceptRichText(false);
+    m_aiSummaryEdit->setAcceptRichText(true);
     m_aiSummaryEdit->setPlaceholderText(QStringLiteral("尚未分析"));
     aiSummaryLayout->addWidget(m_aiSummaryEdit);
     m_previewInsightTabWidget->addTab(m_previewAiSummaryTab, QStringLiteral("摘要"));
@@ -3389,6 +3767,12 @@ void MainWindow::setupFourColumnLayout() {
     connect(m_btnAssignForceCategory, &QPushButton::clicked, this, &MainWindow::onAssignForceCategoryClicked);
     forceCategoryRow->addWidget(m_btnAssignForceCategory);
     tagGroupLayout->addLayout(forceCategoryRow);
+
+    m_btnAiTagCorrect = new QPushButton(QStringLiteral("AI 標籤糾錯"), this);
+    m_btnAiTagCorrect->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    connect(m_btnAiTagCorrect, &QPushButton::clicked, this, &MainWindow::onAiTagCorrectionClicked);
+    tagGroupLayout->addWidget(m_btnAiTagCorrect);
+
     rebuildForceCategoryCombo();
 
     btnAutoMergeTags = new QPushButton(QStringLiteral("🤖 AI 智能標籤分類 (Generate Tag Folders)"), this);
@@ -4375,6 +4759,8 @@ void MainWindow::executePhysicalArchive() {
     if (btnUndoPhysicalArchive)
         btnUndoPhysicalArchive->setEnabled(!m_lastMoveHistory.isEmpty());
 
+    logToUI(QStringLiteral("Physical archive: moved %1 file(s).").arg(movedCount));
+
     scanFiles();
     updateTagList();
     const QString fp = currentFilePath();
@@ -4382,8 +4768,10 @@ void MainWindow::executePhysicalArchive() {
         updateTagDisplayForFile(fp);
 
     syncGraphWidgetFilterContext();
-    if (m_graphWidget)
+    if (m_graphWidget) {
+        logToUI(QStringLiteral("Graph: rebuilding after archive…"));
         m_graphWidget->buildGraph();
+    }
 
     if (folderModel) {
         folderModel->setRootPath(QString());
@@ -4548,6 +4936,7 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     setFolderTreeCurrentPath(rootPath);
 
     tagManager.loadTags(rootPath.toStdString());
+    loadCorrectionLogs();
     reloadCategoriesConfigFromWorkspace();
     disableSemanticOverlays();
     if (m_fileListPageStack)
@@ -4718,6 +5107,7 @@ void MainWindow::goHome() {
     setFolderTreeCurrentPath(currentPath);
 
     tagManager.loadTags(rootPath.toStdString());
+    loadCorrectionLogs();
     loadAiUiDrawerAssignments();
     m_analysisByContentHash.clear();
     {
@@ -5675,6 +6065,8 @@ void MainWindow::filterFiles() {
 
         it->setHidden(!match);
     }
+
+    refreshSearchHighlightOnFileList();
 }
 
 void MainWindow::onHeroOmniboxReturnPressed()
@@ -5708,6 +6100,7 @@ void MainWindow::onHeroOmniboxTextChanged(const QString &text)
 
     if (text.trimmed().isEmpty()) {
         clearSemanticSearchFilter();
+        refreshSearchHighlightOnFileList();
         if (!heroGlobalSemantic)
             filterFiles();
         return;
@@ -5820,6 +6213,215 @@ void MainWindow::onAssignForceCategoryClicked()
     updateTagDisplayForFile(fp);
     updateTagList();
     reloadCurrentFileListPanel();
+}
+
+void MainWindow::onAiTagCorrectionClicked()
+{
+    auto &lm = LanguageManager::instance();
+    const QString fp = QDir::cleanPath(currentFilePath());
+    if (fp.isEmpty()) {
+        QMessageBox::warning(this, lm.getText(QStringLiteral("rlhf_tag_error_title")),
+                             lm.getText(QStringLiteral("rlhf_tag_select_file_first")));
+        return;
+    }
+
+    QStringList currentTags;
+    {
+        QMutexLocker locker(&tagMutex);
+        const std::vector<QString> tags = tagManager.getTags(fp);
+        currentTags.reserve(static_cast<int>(tags.size()));
+        for (const QString &t : tags)
+            currentTags.append(t);
+    }
+    currentTags.sort(Qt::CaseInsensitive);
+    if (currentTags.isEmpty()) {
+        QMessageBox::information(this, lm.getText(QStringLiteral("rlhf_tag_info_title")),
+                                 lm.getText(QStringLiteral("rlhf_tag_no_tags_on_file")));
+        return;
+    }
+
+    bool ok = false;
+    const QString wrongTag = QInputDialog::getItem(
+        this, lm.getText(QStringLiteral("rlhf_tag_dialog_title")),
+        lm.getText(QStringLiteral("rlhf_tag_pick_prompt")).arg(QFileInfo(fp).fileName()), currentTags, 0, false, &ok);
+    if (!ok || wrongTag.trimmed().isEmpty())
+        return;
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.addContextualRejectedTag(fp, wrongTag.trimmed(), true);
+    }
+
+    updateTagDisplayForFile(fp);
+    updateTagList();
+    reloadCurrentFileListPanel();
+
+    logToUI(lm.getText(QStringLiteral("rlhf_tag_log_contextual"))
+                .arg(QFileInfo(fp).fileName())
+                .arg(wrongTag.trimmed()));
+    loadCorrectionLogs();
+}
+
+namespace {
+
+QVariantMap correctionLogEntryToVariantMap(const TagRejectedLogEntry &entry)
+{
+    QVariantMap map;
+    map.insert(QStringLiteral("file"), entry.filePath);
+    map.insert(QStringLiteral("tag"), entry.rejectedTag);
+    map.insert(QStringLiteral("timestamp"), entry.timestamp);
+    return map;
+}
+
+TagRejectedLogEntry correctionLogEntryFromVariantMap(const QVariantMap &map)
+{
+    TagRejectedLogEntry entry;
+    entry.filePath = map.value(QStringLiteral("file")).toString();
+    entry.rejectedTag = map.value(QStringLiteral("tag")).toString();
+    entry.timestamp = map.value(QStringLiteral("timestamp")).toString();
+    return entry;
+}
+
+} // namespace
+
+void MainWindow::loadCorrectionLogs()
+{
+    if (!m_correctionLogTable)
+        return;
+
+    std::vector<TagRejectedLogEntry> rows;
+    {
+        QMutexLocker locker(&tagMutex);
+        rows = tagManager.rejectedTagLogEntries();
+    }
+
+    m_correctionLogTable->setRowCount(0);
+    m_correctionLogTable->setRowCount(static_cast<int>(rows.size()));
+    int row = 0;
+    for (const TagRejectedLogEntry &entry : rows) {
+        QString tsDisplay = entry.timestamp;
+        const QDateTime dt = QDateTime::fromString(entry.timestamp, Qt::ISODate);
+        if (dt.isValid())
+            tsDisplay = dt.toString(QStringLiteral("yyyy-MM-dd hh:mm:ss"));
+
+        const QString filePath = entry.filePath.trimmed();
+        const QString fileName =
+            filePath.isEmpty() ? QStringLiteral("—") : QFileInfo(filePath).fileName();
+
+        const QVariantMap rowKey = correctionLogEntryToVariantMap(entry);
+
+        auto *checkItem = new QTableWidgetItem();
+        checkItem->setFlags(Qt::ItemIsUserCheckable | Qt::ItemIsEnabled);
+        checkItem->setCheckState(Qt::Unchecked);
+        checkItem->setData(Qt::UserRole, rowKey);
+        checkItem->setTextAlignment(Qt::AlignCenter);
+
+        auto *tsItem = new QTableWidgetItem(tsDisplay);
+        auto *fileItem = new QTableWidgetItem(fileName);
+        auto *tagItem = new QTableWidgetItem(entry.rejectedTag);
+        tsItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+        fileItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+        tagItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+        if (!filePath.isEmpty())
+            fileItem->setToolTip(filePath);
+        tagItem->setToolTip(entry.rejectedTag);
+
+        m_correctionLogTable->setItem(row, 0, checkItem);
+        m_correctionLogTable->setItem(row, 1, tsItem);
+        m_correctionLogTable->setItem(row, 2, fileItem);
+        m_correctionLogTable->setItem(row, 3, tagItem);
+        ++row;
+    }
+    m_correctionLogTable->resizeColumnsToContents();
+    if (m_correctionLogTable->horizontalHeader()) {
+        m_correctionLogTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        m_correctionLogTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    }
+}
+
+void MainWindow::setAllCorrectionLogRowsChecked(bool checked)
+{
+    if (!m_correctionLogTable) return;
+    const Qt::CheckState state = checked ? Qt::Checked : Qt::Unchecked;
+    for (int row = 0; row < m_correctionLogTable->rowCount(); ++row) {
+        if (QTableWidgetItem *item = m_correctionLogTable->item(row, 0))
+            item->setCheckState(state);
+    }
+}
+
+std::vector<TagRejectedLogEntry> MainWindow::selectedCorrectionLogEntries() const
+{
+    std::vector<TagRejectedLogEntry> selected;
+    if (!m_correctionLogTable) return selected;
+    for (int row = 0; row < m_correctionLogTable->rowCount(); ++row) {
+        const QTableWidgetItem *item = m_correctionLogTable->item(row, 0);
+        if (!item || item->checkState() != Qt::Checked) continue;
+        selected.push_back(correctionLogEntryFromVariantMap(item->data(Qt::UserRole).toMap()));
+    }
+    return selected;
+}
+
+void MainWindow::onCorrectionLogSelectAllClicked()
+{
+    setAllCorrectionLogRowsChecked(true);
+}
+
+void MainWindow::onCorrectionLogDeselectAllClicked()
+{
+    setAllCorrectionLogRowsChecked(false);
+}
+
+void MainWindow::onDeleteSelectedCorrectionLogsClicked()
+{
+    auto &lm = LanguageManager::instance();
+    if (rootPath.trimmed().isEmpty()) {
+        QMessageBox::information(this, lm.getText(QStringLiteral("delete_selected_correction_logs_confirm_title")),
+                                 lm.getText(QStringLiteral("physical_archive_need_workspace")));
+        return;
+    }
+
+    const std::vector<TagRejectedLogEntry> selected = selectedCorrectionLogEntries();
+    if (selected.empty()) {
+        QMessageBox::information(this, lm.getText(QStringLiteral("delete_selected_correction_logs_confirm_title")),
+                                 lm.getText(QStringLiteral("delete_selected_correction_logs_none")));
+        return;
+    }
+
+    const auto reply =
+        QMessageBox::question(this, lm.getText(QStringLiteral("delete_selected_correction_logs_confirm_title")),
+                            lm.getText(QStringLiteral("delete_selected_correction_logs_confirm_body"))
+                                .arg(static_cast<int>(selected.size())),
+                            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (reply != QMessageBox::Yes)
+        return;
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.removeRejectedTagLogEntries(selected);
+    }
+    loadCorrectionLogs();
+}
+
+void MainWindow::onClearCorrectionLogsClicked()
+{
+    auto &lm = LanguageManager::instance();
+    if (rootPath.trimmed().isEmpty()) {
+        QMessageBox::information(this, lm.getText(QStringLiteral("clear_correction_logs_confirm_title")),
+                                 lm.getText(QStringLiteral("physical_archive_need_workspace")));
+        return;
+    }
+
+    const auto reply = QMessageBox::question(this, lm.getText(QStringLiteral("clear_correction_logs_confirm_title")),
+                                             lm.getText(QStringLiteral("clear_correction_logs_confirm_body")),
+                                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (reply != QMessageBox::Yes)
+        return;
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.clearRejectedTagLog();
+    }
+    loadCorrectionLogs();
 }
 
 void MainWindow::loadAiUiDrawerAssignments()
@@ -6151,6 +6753,7 @@ void MainWindow::runHeroSemanticSearchQuery()
     const QString userQuery = t.trimmed();
 
     setHeroSemanticBusy(true);
+    logToUI(QStringLiteral("Semantic search: \"%1\"").arg(userQuery));
     if (lblStatus)
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("語意搜尋進行中…")));
 
@@ -6356,7 +6959,7 @@ void MainWindow::updatePreviewForFile(const QString &absPath) {
         if (!sfSummaryAcceptableForStorage(s) || !sfPathHasAnalyzableTextOrDocSuffix(absPath)) {
             m_aiSummaryEdit->clear();
         } else {
-            m_aiSummaryEdit->setPlainText(s);
+            showAiSummaryForFile(absPath, s, false);
         }
     }
 
@@ -6577,8 +7180,8 @@ void MainWindow::clearAnalysisCacheForReanalysis(const QString &absPath)
 }
 
 void MainWindow::executeSingleAnalysis() {
-    qDebug() << "Analyze Button Triggered";
     const QString fp = QDir::cleanPath(currentFilePath());
+    logToUI(QStringLiteral("Analyze: %1").arg(fp.isEmpty() ? QStringLiteral("(no file)") : QFileInfo(fp).fileName()));
     if (fp.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
         return;
@@ -6875,9 +7478,11 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
     // IMPORTANT: Do NOT feed full historical tags into the prompt.
     // It causes "prompt contamination" where prior institution names get repeated.
     const QString existingTags; // keep empty on purpose
-    const QString rejectedTagsCsv = [this]() {
+    const QString rejectedTagsCsv = [this, fp]() {
+        if (m_isBatchMode && !m_isSingleFileBatchMode)
+            return QString();
         QMutexLocker locker(&tagMutex);
-        return tagManager.getRejectedTags().join(QStringLiteral(", "));
+        return tagManager.getRejectedTagsForFile(fp).join(QStringLiteral(", "));
     }();
 
     const QString suffix = fi.suffix().toLower();
@@ -7207,7 +7812,9 @@ void MainWindow::applyPresetBypassAnalysis(const QString &fp, const QString &sum
         }
         tagManager.saveTags();
     }
-    if (m_aiSummaryEdit && currentFilePath() == fp) m_aiSummaryEdit->setPlainText(summary);
+    if (m_aiSummaryEdit && currentFilePath() == fp)
+        showAiSummaryForFile(fp, summary, true);
+    logToUI(QStringLiteral("Analysis complete: %1").arg(QFileInfo(fp).fileName()));
     updateTagDisplayForFile(fp);
     updateTagList();
     reloadCurrentFileListPanel();
@@ -7256,7 +7863,8 @@ void MainWindow::applyColdArchiveAnalysis(const QString &fp, const QString &summ
         }
         tagManager.saveTags();
     }
-    if (m_aiSummaryEdit && currentFilePath() == fp) m_aiSummaryEdit->setPlainText(summary);
+    if (m_aiSummaryEdit && currentFilePath() == fp)
+        showAiSummaryForFile(fp, summary, true);
     updateTagDisplayForFile(fp);
     updateTagList();
     reloadCurrentFileListPanel();
@@ -7458,7 +8066,8 @@ void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObj
         tagManager.saveTags();
     }
 
-    if (m_aiSummaryEdit && currentFilePath() == fp) m_aiSummaryEdit->setPlainText(summary);
+    if (m_aiSummaryEdit && currentFilePath() == fp)
+        showAiSummaryForFile(fp, summary, true);
     updateTagDisplayForFile(fp);
     updateTagList();
     reloadCurrentFileListPanel();
@@ -7593,7 +8202,7 @@ void MainWindow::onFileAnalysisFinished(const QString &filePath)
         updateTagDisplayForFile(fp);
         const QString summary = m_aiSummaryByPath.value(fp);
         if (m_aiSummaryEdit && !summary.isEmpty())
-            m_aiSummaryEdit->setPlainText(summary);
+            showAiSummaryForFile(fp, summary, false);
     }
     refreshFileAndFolderAnalysisIndicators();
     ensureAnalysisIndicatorTimer();
@@ -7864,6 +8473,11 @@ void MainWindow::onAnalysisFinished() {
     setUiBusy(false);
 
     const QString fp = m_currentAnalyzingFile.isEmpty() ? currentFilePath() : m_currentAnalyzingFile;
+    QStringList rejectedTagsForFile;
+    {
+        QMutexLocker locker(&tagMutex);
+        rejectedTagsForFile = tagManager.getRejectedTagsForFile(fp);
+    }
     const std::string &raw = outcome.raw;
     const QString qRaw = QString::fromStdString(raw);
 
@@ -7958,11 +8572,11 @@ void MainWindow::onAnalysisFinished() {
                 }
             }
 
-            if (sfSummaryAcceptableForStorage(summary) && tagsList.size() >= 5) break;
+            if (sfSummaryAcceptableForStorage(summary) && tagsList.size() >= 3) break;
         }
 
         if (!tagsList.isEmpty())
-            tags = sfFilterAiAnalysisTags(tagsList);
+            tags = sfFilterAiAnalysisTags(tagsList, rejectedTagsForFile);
         } catch (...) {
             qWarning() << "[analyze] JSON parse exception; applying AI parse fallback for" << fp;
             usedAiParseFallback = true;
@@ -7980,14 +8594,14 @@ void MainWindow::onAnalysisFinished() {
             QStringList rawTagList;
             for (const QString &t : sanitizeAiTags(qRaw))
                 rawTagList << t;
-            tags = sfFilterAiAnalysisTags(rawTagList);
+            tags = sfFilterAiAnalysisTags(rawTagList, rejectedTagsForFile);
         }
 
         if (!tags.empty()) {
             QStringList tagList;
             for (const QString &t : tags)
                 tagList << t;
-            tags = sfFilterAiAnalysisTags(tagList);
+            tags = sfFilterAiAnalysisTags(tagList, rejectedTagsForFile);
         }
 
         if (!sfSummaryAcceptableForStorage(summary) || tags.empty()) {
@@ -8077,7 +8691,9 @@ void MainWindow::onAnalysisFinished() {
         }
 
         m_aiSummaryByPath.insert(fp, summary);
-        if (m_aiSummaryEdit) m_aiSummaryEdit->setPlainText(summary);
+        if (m_aiSummaryEdit && currentFilePath() == fp)
+            showAiSummaryForFile(fp, summary, true);
+        logToUI(QStringLiteral("Analysis complete: %1").arg(QFileInfo(fp).fileName()));
 
         updateTagDisplayForFile(fp);
         updateTagList();

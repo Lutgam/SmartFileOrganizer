@@ -1,4 +1,5 @@
 #include "TagManager.h"
+#include <algorithm>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -6,6 +7,8 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QHash>
+#include <QDateTime>
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonParseError>
@@ -72,9 +75,7 @@ void TagManager::repairMalformedTagKeys()
             m_tagToFilePaths[newK].insert(fp);
         }
         m_tagToFilePaths.erase(oldK);
-        if (m_rejectedTags.count(oldK)) {
-            m_rejectedTags.erase(oldK);
-        }
+        purgeRejectedTagEntriesWithTag(oldK);
         changed = true;
     }
     if (changed) saveTags();
@@ -173,6 +174,7 @@ void TagManager::loadTags(const std::string& directory) {
     m_tagToFilePaths.clear();
     m_fileToTags.clear();
     m_rejectedTags.clear();
+    m_rejectedTagLog.clear();
     m_pathToContentHash.clear();
     m_hashAnalysisCache.clear();
     m_tagParents.clear();
@@ -420,10 +422,7 @@ void TagManager::mergeTag(const QString& oldTag, const QString& newTag, bool sav
         m_tagParents = std::move(newParents);
     }
 
-    // Remove from rejected tags if present (optional hygiene)
-    if (m_rejectedTags.count(nOld)) {
-        m_rejectedTags.erase(nOld);
-    }
+    purgeRejectedTagEntriesWithTag(nOld);
 
     if (saveImmediately) saveTags();
 }
@@ -764,6 +763,43 @@ std::string TagManager::getRejectedTagsPath() const {
     return currentDirectory + "/.smartfile/rejected_tags.json";
 }
 
+void TagManager::syncRejectedTagSetFromLog() {
+    m_rejectedTags.clear();
+    for (const auto &entry : m_rejectedTagLog) {
+        if (!entry.is_object()) continue;
+        const QString t = normalizeTag(QString::fromStdString(entry.value("rejected_tag", std::string())));
+        if (!t.isEmpty()) m_rejectedTags.insert(t);
+    }
+}
+
+void TagManager::appendRejectedTagEntry(const QString &filePath, const QString &tag) {
+    const QString t = normalizeTag(tag);
+    if (t.isEmpty()) return;
+
+    nlohmann::json entry;
+    const QString fp = filePath.trimmed().isEmpty() ? QString() : QDir::cleanPath(filePath);
+    entry["file"] = fp.toStdString();
+    entry["rejected_tag"] = t.toStdString();
+    entry["timestamp"] = QDateTime::currentDateTime().toString(Qt::ISODate).toStdString();
+    m_rejectedTagLog.push_back(std::move(entry));
+    m_rejectedTags.insert(t);
+}
+
+void TagManager::purgeRejectedTagEntriesWithTag(const QString &tag) {
+    const QString t = normalizeTag(tag);
+    if (t.isEmpty()) return;
+    m_rejectedTagLog.erase(
+        std::remove_if(m_rejectedTagLog.begin(), m_rejectedTagLog.end(),
+                       [&](const nlohmann::json &e) {
+                           if (!e.is_object()) return false;
+                           const QString rt =
+                               normalizeTag(QString::fromStdString(e.value("rejected_tag", std::string())));
+                           return rt == t;
+                       }),
+        m_rejectedTagLog.end());
+    syncRejectedTagSetFromLog();
+}
+
 void TagManager::loadRejectedTags() {
     if (currentDirectory.empty()) return;
     const std::string path = getRejectedTagsPath();
@@ -773,12 +809,26 @@ void TagManager::loadRejectedTags() {
         nlohmann::json root;
         f >> root;
         if (!root.is_array()) return;
-        for (const auto& v : root) {
-            if (!v.is_string()) continue;
-            const QString t = normalizeTag(QString::fromStdString(v.get<std::string>())); // normalizes + trims
-            if (!t.isEmpty()) m_rejectedTags.insert(t);
+        m_rejectedTagLog.clear();
+        m_rejectedTags.clear();
+        for (const auto &v : root) {
+            if (v.is_string()) {
+                appendRejectedTagEntry(QString(), QString::fromStdString(v.get<std::string>()));
+                continue;
+            }
+            if (!v.is_object()) continue;
+            const QString tag = normalizeTag(QString::fromStdString(v.value("rejected_tag", std::string())));
+            if (tag.isEmpty()) continue;
+            nlohmann::json entry;
+            const QString file = QString::fromStdString(v.value("file", std::string())).trimmed();
+            entry["file"] = file.isEmpty() ? std::string() : QDir::cleanPath(file).toStdString();
+            entry["rejected_tag"] = tag.toStdString();
+            const std::string ts = v.value("timestamp", std::string());
+            entry["timestamp"] = ts.empty() ? QDateTime::currentDateTime().toString(Qt::ISODate).toStdString() : ts;
+            m_rejectedTagLog.push_back(std::move(entry));
         }
-    } catch (const std::exception& e) {
+        syncRejectedTagSetFromLog();
+    } catch (const std::exception &e) {
         qDebug() << "Error loading rejected tags:" << e.what();
     }
 }
@@ -795,22 +845,39 @@ void TagManager::saveRejectedTags() const {
 
     try {
         nlohmann::json arr = nlohmann::json::array();
-        for (const auto& t : m_rejectedTags) {
-            arr.push_back(t.toStdString());
+        for (const auto &entry : m_rejectedTagLog) {
+            arr.push_back(entry);
         }
         std::ofstream f(getRejectedTagsPath());
         f << arr.dump(2);
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         qDebug() << "Error saving rejected tags:" << e.what();
     }
 }
 
-void TagManager::addRejectedTag(const QString& tag) {
+void TagManager::addRejectedTag(const QString &tag) {
     QMutexLocker locker(&m_mutex);
-    const QString t = normalizeTag(tag);
-    if (t.isEmpty()) return;
-    m_rejectedTags.insert(t);
+    appendRejectedTagEntry(QString(), tag);
     saveRejectedTags();
+}
+
+void TagManager::addContextualRejectedTag(const QString &filePath, const QString &tag, bool removeFromFileMetadata) {
+    QMutexLocker locker(&m_mutex);
+    const QString fp = QDir::cleanPath(filePath);
+    appendRejectedTagEntry(fp, tag);
+    const QString nt = normalizeTag(tag);
+    if (removeFromFileMetadata && !fp.isEmpty() && !nt.isEmpty()) {
+        if (m_fileToTags.count(fp)) {
+            m_fileToTags[fp].erase(nt);
+            if (m_fileToTags[fp].empty()) m_fileToTags.erase(fp);
+        }
+        if (m_tagToFilePaths.count(nt)) {
+            m_tagToFilePaths[nt].erase(fp);
+            if (m_tagToFilePaths[nt].empty()) m_tagToFilePaths.erase(nt);
+        }
+    }
+    saveRejectedTags();
+    if (removeFromFileMetadata) saveTags();
 }
 
 QStringList TagManager::getRejectedTags() const {
@@ -819,6 +886,81 @@ QStringList TagManager::getRejectedTags() const {
     for (const auto& t : m_rejectedTags) out << t;
     out.sort(Qt::CaseInsensitive);
     return out;
+}
+
+QStringList TagManager::getRejectedTagsForFile(const QString &filePath) const {
+    QMutexLocker locker(&m_mutex);
+    const QString fp = QDir::cleanPath(filePath);
+    if (fp.isEmpty()) return {};
+
+    QSet<QString> tags;
+    for (const auto &entry : m_rejectedTagLog) {
+        if (!entry.is_object()) continue;
+        const QString entryFile =
+            QDir::cleanPath(QString::fromStdString(entry.value("file", std::string())));
+        if (entryFile != fp) continue;
+        const QString t = normalizeTag(QString::fromStdString(entry.value("rejected_tag", std::string())));
+        if (!t.isEmpty()) tags.insert(t);
+    }
+    QStringList out = tags.values();
+    out.sort(Qt::CaseInsensitive);
+    return out;
+}
+
+std::vector<TagRejectedLogEntry> TagManager::rejectedTagLogEntries() const {
+    QMutexLocker locker(&m_mutex);
+    std::vector<TagRejectedLogEntry> rows;
+    rows.reserve(m_rejectedTagLog.size());
+    for (const auto &entry : m_rejectedTagLog) {
+        if (!entry.is_object()) continue;
+        TagRejectedLogEntry row;
+        row.timestamp = QString::fromStdString(entry.value("timestamp", std::string()));
+        row.filePath = QString::fromStdString(entry.value("file", std::string()));
+        row.rejectedTag = normalizeTag(QString::fromStdString(entry.value("rejected_tag", std::string())));
+        if (row.rejectedTag.isEmpty()) continue;
+        rows.push_back(std::move(row));
+    }
+    std::sort(rows.begin(), rows.end(), [](const TagRejectedLogEntry &a, const TagRejectedLogEntry &b) {
+        const QDateTime ta = QDateTime::fromString(a.timestamp, Qt::ISODate);
+        const QDateTime tb = QDateTime::fromString(b.timestamp, Qt::ISODate);
+        if (ta.isValid() && tb.isValid()) return ta > tb;
+        if (ta.isValid() != tb.isValid()) return ta.isValid();
+        return a.timestamp > b.timestamp;
+    });
+    return rows;
+}
+
+void TagManager::clearRejectedTagLog() {
+    QMutexLocker locker(&m_mutex);
+    m_rejectedTagLog.clear();
+    m_rejectedTags.clear();
+    saveRejectedTags();
+}
+
+void TagManager::removeRejectedTagLogEntries(const std::vector<TagRejectedLogEntry> &entries) {
+    if (entries.empty()) return;
+    QMutexLocker locker(&m_mutex);
+
+    auto entryMatches = [this](const nlohmann::json &e, const TagRejectedLogEntry &want) -> bool {
+        if (!e.is_object()) return false;
+        const QString file = QString::fromStdString(e.value("file", std::string())).trimmed();
+        const QString wantFile = want.filePath.trimmed();
+        const QString f = file.isEmpty() ? QString() : QDir::cleanPath(file);
+        const QString wf = wantFile.isEmpty() ? QString() : QDir::cleanPath(wantFile);
+        if (f != wf) return false;
+        const QString t = normalizeTag(QString::fromStdString(e.value("rejected_tag", std::string())));
+        const QString wt = normalizeTag(want.rejectedTag);
+        if (t != wt) return false;
+        return QString::fromStdString(e.value("timestamp", std::string())) == want.timestamp;
+    };
+
+    for (const TagRejectedLogEntry &want : entries) {
+        m_rejectedTagLog.erase(std::remove_if(m_rejectedTagLog.begin(), m_rejectedTagLog.end(),
+                                              [&](const nlohmann::json &e) { return entryMatches(e, want); }),
+                               m_rejectedTagLog.end());
+    }
+    syncRejectedTagSetFromLog();
+    saveRejectedTags();
 }
 
 void TagManager::clearAiTagsAndSummaries(bool save)
@@ -882,6 +1024,7 @@ void TagManager::factoryResetWorkspaceData()
         m_pathToContentHash.clear();
         m_hashAnalysisCache.clear();
         m_rejectedTags.clear();
+        m_rejectedTagLog.clear();
         m_tagParents.clear();
     }
     try {

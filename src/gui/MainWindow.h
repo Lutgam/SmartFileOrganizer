@@ -26,6 +26,7 @@
 #include <QDir>
 #include <QFileSystemWatcher>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QStringList>
 #include <QSet>
 #include <QMutex>
@@ -112,12 +113,18 @@ class SettingsPanel;
 class BusyChip;
 class AiTagDropTreeWidget;
 
+class QPlainTextEdit;
+class QTimer;
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
+
+    void logToUI(const QString &msg, int msgType = 0);
+    void updateSystemLogTabTitle();
 
 private slots:
     void openFolder();
@@ -163,6 +170,11 @@ private slots:
     void onHeroOmniboxTextChanged(const QString &text);
     void onSemanticSearchFinished();
     void onAssignForceCategoryClicked();
+    void onAiTagCorrectionClicked();
+    void onClearCorrectionLogsClicked();
+    void onCorrectionLogSelectAllClicked();
+    void onCorrectionLogDeselectAllClicked();
+    void onDeleteSelectedCorrectionLogsClicked();
     void onSettingsPanelApplied();
     void onFileAnalysisFinished(const QString &filePath);
 
@@ -181,6 +193,13 @@ private:
     SettingsPanel *m_settingsPanel = nullptr;
     QWidget *m_graphTab = nullptr;
     QWidget *m_taskCenterTab = nullptr;
+    QWidget *m_systemLogTab = nullptr;
+    QWidget *m_correctionLogTab = nullptr;
+    QTableWidget *m_correctionLogTable = nullptr;
+    QPushButton *m_btnCorrectionLogSelectAll = nullptr;
+    QPushButton *m_btnCorrectionLogDeselectAll = nullptr;
+    QPushButton *m_btnDeleteSelectedCorrectionLogs = nullptr;
+    QPushButton *m_btnClearCorrectionLogs = nullptr;
     GraphWidget *m_graphWidget = nullptr;
 
     QWidget *m_workspaceTopBar = nullptr;
@@ -274,10 +293,17 @@ private:
     QWidget *m_previewTagTab = nullptr;
     QWidget *m_previewOpsTab = nullptr;
 
+    QTabWidget *m_taskCenterInnerTabs = nullptr;
     QSplitter *m_taskCenterSplitter = nullptr;
     QLabel *m_taskCenterStatusLabel = nullptr;
     QProgressBar *m_taskCenterBatchProgress = nullptr;
     QTextEdit *m_backgroundLogEdit = nullptr;
+    QPlainTextEdit *m_demoConsoleLog = nullptr;
+    bool m_logTabNeedsAttention = false;
+    QTimer *m_summaryTypewriterTimer = nullptr;
+    QString m_summaryTypewriterFull;
+    QString m_summaryTypewriterFilePath;
+    int m_summaryTypewriterIndex = 0;
     QTreeWidget *m_taskCenterRedundancyTree = nullptr;
     QPushButton *m_taskCenterCleanBtn = nullptr;
 
@@ -291,6 +317,7 @@ private:
     QPushButton *btnCancelAnalysis = nullptr;
     QComboBox *m_cmbForceCategory = nullptr;
     QPushButton *m_btnAssignForceCategory = nullptr;
+    QPushButton *m_btnAiTagCorrect = nullptr;
     QPushButton *btnAutoMergeTags = nullptr;
     QPushButton *btnPhysicalArchive = nullptr;
     QPushButton *btnUndoPhysicalArchive = nullptr;
@@ -421,6 +448,15 @@ private:
     void noteSameNameDifferentHashConflicts(const QString &filePath, const QString &hashHex);
     void updateBackgroundStatusLabel();
     void appendTaskCenterLog(const QString &text);
+    void installDemoConsoleLogHandler();
+    void loadCorrectionLogs();
+    void setAllCorrectionLogRowsChecked(bool checked);
+    std::vector<TagRejectedLogEntry> selectedCorrectionLogEntries() const;
+    void showAiSummaryForFile(const QString &filePath, const QString &summary, bool typewriter = true);
+    void stopSummaryTypewriter();
+    void refreshSearchHighlightOnFileList();
+    QString currentLocalSearchHighlightQuery() const;
+    QString highlightTextAsHtml(const QString &plain, const QString &query) const;
     void mergeTaskCenterRedundancyBatch(int batchFilesAnalyzed,
                                         int batchNewTagAdds,
                                         const QMap<QString, QSet<QString>> &hashGroups,

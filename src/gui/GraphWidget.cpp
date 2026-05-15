@@ -421,6 +421,25 @@ QPainterPath Node::shape() const
     return path;
 }
 
+void Node::beginAppearPop()
+{
+    m_appearPopStep = 0;
+    m_visualScale = 0.28;
+    update();
+}
+
+void Node::tickAppearPop()
+{
+    if (m_appearPopStep >= 11) {
+        m_visualScale = 1.0;
+        return;
+    }
+    ++m_appearPopStep;
+    const qreal t = qreal(m_appearPopStep) / 11.0;
+    m_visualScale = 0.28 + (0.72 * t);
+    update();
+}
+
 void Node::paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWidget *)
 {
     QFont font;
@@ -428,6 +447,11 @@ void Node::paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWid
     painter->setFont(font);
 
     const QRectF rect = contentRect();
+    if (!qFuzzyCompare(m_visualScale, 1.0)) {
+        painter->translate(rect.center());
+        painter->scale(m_visualScale, m_visualScale);
+        painter->translate(-rect.center());
+    }
     const qreal width = rect.width();
 
     // Shadow
@@ -1331,4 +1355,42 @@ void GraphWidget::buildGraph() {
     }
 
     fitAllNodes();
+    runAppearPopAnimation();
+}
+
+void GraphWidget::runAppearPopAnimation()
+{
+    m_graphPopNodes.clear();
+    if (!scene())
+        return;
+
+    for (QGraphicsItem *item : scene()->items()) {
+        if (Node *node = qgraphicsitem_cast<Node *>(item))
+            m_graphPopNodes.append(node);
+    }
+    if (m_graphPopNodes.isEmpty())
+        return;
+
+    for (Node *node : std::as_const(m_graphPopNodes))
+        node->beginAppearPop();
+
+    m_graphPopStep = 0;
+    if (!m_graphPopTimer) {
+        m_graphPopTimer = new QTimer(this);
+        connect(m_graphPopTimer, &QTimer::timeout, this, &GraphWidget::onGraphPopTick);
+    }
+    m_graphPopTimer->start(30);
+}
+
+void GraphWidget::onGraphPopTick()
+{
+    for (Node *node : std::as_const(m_graphPopNodes))
+        node->tickAppearPop();
+
+    ++m_graphPopStep;
+    if (m_graphPopStep >= 11) {
+        if (m_graphPopTimer)
+            m_graphPopTimer->stop();
+        m_graphPopNodes.clear();
+    }
 }

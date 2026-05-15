@@ -1,4 +1,5 @@
 #include "LlamaEngine.h"
+#include "../core/TagManager.h"
 #include <QByteArray>
 #include <QDebug>
 #include <QtGlobal>
@@ -374,7 +375,37 @@ QString aiTagDedupKey(QString tag)
   return tag.trimmed();
 }
 
-QJsonArray sanitizeTagsArray(const QJsonArray &arr, int maxTags = 5, int maxLen = 15)
+QStringList parseRejectedTagsCsv(const std::string &rejectedTagsCsv)
+{
+  QStringList out;
+  for (QString part : QString::fromStdString(rejectedTagsCsv).split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+    part = TagManager::stripAiPrefix(part.trimmed());
+    if (!part.isEmpty()) out << part;
+  }
+  return out;
+}
+
+bool isTagOnRejectedList(const QString &tag, const QStringList &rejectedTags)
+{
+  if (rejectedTags.isEmpty()) return false;
+  const QString norm = TagManager::stripAiPrefix(tag).trimmed();
+  if (norm.isEmpty()) return false;
+  const QString key = aiTagDedupKey(norm);
+  for (const QString &rejected : rejectedTags) {
+    const QString rejNorm = TagManager::stripAiPrefix(rejected).trimmed();
+    if (rejNorm.isEmpty()) continue;
+    if (norm.compare(rejNorm, Qt::CaseInsensitive) == 0) return true;
+    const QString rejKey = aiTagDedupKey(rejNorm);
+    if (!key.isEmpty() && !rejKey.isEmpty()
+        && (key == rejKey || key.contains(rejKey) || rejKey.contains(key))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+QJsonArray sanitizeTagsArray(const QJsonArray &arr, const QStringList &rejectedTags = {},
+                             int maxTags = 3, int maxLen = 15)
 {
   QJsonArray out;
   QSet<QString> seenKeys;
@@ -383,6 +414,8 @@ QJsonArray sanitizeTagsArray(const QJsonArray &arr, int maxTags = 5, int maxLen 
 
     QString t = v.toString().trimmed();
     if (t.isEmpty() || t.compare(QStringLiteral("ai"), Qt::CaseInsensitive) == 0)
+      continue;
+    if (isTagOnRejectedList(t, rejectedTags))
       continue;
     if (t.size() > maxLen)
       continue;
@@ -434,14 +467,14 @@ QString coerceSummaryText(QString summary)
   return summary;
 }
 
-QJsonObject sanitizeSuggestTagsObject(const QJsonObject &obj)
+QJsonObject sanitizeSuggestTagsObject(const QJsonObject &obj, const QStringList &rejectedTags)
 {
   QJsonObject out;
   QString summary = coerceSummaryText(obj.value(QStringLiteral("summary")).toString());
   if (summary.isEmpty())
     summary = QStringLiteral("檔案內容過於複雜，AI 無法產生有效文本。");
   out.insert(QStringLiteral("summary"), summary);
-  out.insert(QStringLiteral("tags"), sanitizeTagsArray(obj.value(QStringLiteral("tags")).toArray()));
+  out.insert(QStringLiteral("tags"), sanitizeTagsArray(obj.value(QStringLiteral("tags")).toArray(), rejectedTags));
   return out;
 }
 
@@ -470,8 +503,9 @@ std::string wrapRawLlmOutputAsSuggestTagsJson(const QString &rawResponse)
   return jsonFromUnblockedRawOutput(rawResponse);
 }
 
-std::string ensureSuggestTagsJson(const std::string &raw)
+std::string ensureSuggestTagsJson(const std::string &raw, const std::string &rejectedTagsCsv)
 {
+  const QStringList rejectedTags = parseRejectedTagsCsv(rejectedTagsCsv);
   const QString llmOutputString = QString::fromStdString(raw).trimmed();
   if (llmOutputString.isEmpty())
     return suggestTagsFailsafeJson();
@@ -489,7 +523,7 @@ std::string ensureSuggestTagsJson(const std::string &raw)
 
   if (parseError.error == QJsonParseError::NoError && doc.isObject()
       && doc.object().contains(QStringLiteral("summary"))) {
-    return QJsonDocument(sanitizeSuggestTagsObject(doc.object()))
+    return QJsonDocument(sanitizeSuggestTagsObject(doc.object(), rejectedTags))
         .toJson(QJsonDocument::Compact)
         .toStdString();
   }
@@ -508,7 +542,7 @@ std::string ensureSuggestTagsJson(const std::string &raw)
       continue;
     if (!blockDoc.object().contains(QStringLiteral("summary")))
       continue;
-    return QJsonDocument(sanitizeSuggestTagsObject(blockDoc.object()))
+    return QJsonDocument(sanitizeSuggestTagsObject(blockDoc.object(), rejectedTags))
         .toJson(QJsonDocument::Compact)
         .toStdString();
   }
@@ -525,8 +559,9 @@ std::string LlamaEngine::suggestTags(const std::string &filename,
                                      const std::string &fileExt,
                                      bool pdfMetadataOnly)
 {
-  return ensureSuggestTagsJson(suggestTagsImpl(filename, content, rejectedTagsCsv, existingTags, contentReadable,
-                                               fileExt, pdfMetadataOnly));
+  return ensureSuggestTagsJson(
+      suggestTagsImpl(filename, content, rejectedTagsCsv, existingTags, contentReadable, fileExt, pdfMetadataOnly),
+      rejectedTagsCsv);
 }
 
 std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
@@ -591,7 +626,7 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
           "要求：\n"
           "1) \"summary\" 欄位必須完全等於：「" +
           fixedSummaryZh + "」。\n"
-          "2) \"tags\" 欄位必須給出 2 到 3 個描述檔案類型或主題的標籤（只能依據檔名與副檔名推測）。\n"
+          "2) \"tags\" 欄位必須給出 1 到 3 個標籤（最多 3 個；只能依據檔名與副檔名推測）。\n"
           "3) 標籤必須是名詞或專有名詞，不能是長句。\n"
           "4) 嚴禁使用「檔案、文件、資料、內容」等無意義通用詞。\n"
           "\n只能輸出 JSON 物件本體。\n";
@@ -621,7 +656,7 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
           "1) The \"summary\" field MUST equal EXACTLY:\n"
           "\"" +
           fixedSummaryEn + "\"\n"
-          "2) The \"tags\" field MUST contain 2 to 3 tags describing the file type/topic inferred ONLY from filename and extension.\n"
+          "2) The \"tags\" field MUST contain 1 to 3 tags (max 3) describing the file type/topic inferred ONLY from filename and extension.\n"
           "3) Tags must be concrete nouns or proper nouns. No long sentences.\n"
           "4) NEVER use generic words such as file, document, data, or content.\n"
           "\nONLY output the JSON object.\n";
@@ -638,7 +673,7 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
           "要求：\n"
           "1) \"summary\" 欄位必須完全等於：「" +
           fixedSummaryZh + "」。\n"
-          "2) \"tags\" 欄位必須給出 2 到 3 個描述檔案類型或主題的標籤（只能依據檔名與副檔名推測）。\n"
+          "2) \"tags\" 欄位必須給出 1 到 3 個標籤（最多 3 個；只能依據檔名與副檔名推測）。\n"
           "3) 標籤必須是名詞或專有名詞，不能是長句。\n"
           "4) 嚴禁使用「檔案、文件、資料、內容」等無意義通用詞。\n"
           "\n只能輸出 JSON 物件本體。\n";
@@ -662,7 +697,7 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
         "- Prefer a topic statement like: \"SQL scripts for a university database (departments, instructors, students).\"\n"
         "\n"
         "TAG RULES:\n"
-        "- Output 3 to 5 tags (never fewer than 3 when the file topic is clear).\n"
+        "- Output limit: generate exactly 1 to 3 tags (max 3).\n"
         "- Each tag MUST combine topic/subject AND document-type signal (e.g., year, project name, technology keyword, document nature).\n"
         "- Prefer concrete signals: years (e.g., 2024), project names, technologies (Python, SQL), and document kinds (report, invoice, notes, exam paper).\n"
         "- Each tag MUST be a short concrete noun or proper noun (no long sentences).\n"
@@ -673,7 +708,7 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
         "- Tags MUST be in English.\n";
   } else {
     instruction =
-        "你是一個精準的檔案分類代理。請閱讀檔案摘要，嚴格提取 3-5 個具有實質業務意義的關鍵字標籤。\n"
+        "你是一個精準的檔案分類代理。請閱讀檔案摘要，嚴格提取 1 到 3 個具有實質業務意義的關鍵字標籤（最多 3 個）。\n"
         "你必須只輸出一個有效的 JSON 物件。不要 markdown、不要反引號、不要任何解釋文字。\n"
         "輸出格式：{\"summary\":\"...\",\"tags\":[\"...\",\"...\",\"...\"]}\n"
         "\n"
@@ -723,8 +758,12 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
   }
 
   if (!rejectedTagsCsv.empty()) {
-    prompt += en ? "\nSTRICT: Do NOT use the following tags: " + rejectedTagsCsv + "\n"
-                 : "\n【嚴格限制】：請絕對不要使用以下標籤進行分類：" + rejectedTagsCsv + "\n";
+    prompt += en ? "\nOutput limit: Generate exactly 1 to 3 tags (max 3). Must exclude the following tags: "
+                       + rejectedTagsCsv + "\n"
+                 : "\n輸出限制：請產生 1 到 3 個標籤（最多 3 個）。請排除以下標籤：" + rejectedTagsCsv + "\n";
+  } else {
+    prompt += en ? "\nOutput limit: Generate exactly 1 to 3 tags (max 3).\n"
+                 : "\n輸出限制：請產生 1 到 3 個標籤（最多 3 個）。\n";
   }
 
   if (!existingTags.empty()) {

@@ -13,6 +13,12 @@
 #include <QHash>
 #include <nlohmann/json.hpp>
 
+struct TagRejectedLogEntry {
+    QString timestamp;
+    QString filePath;
+    QString rejectedTag;
+};
+
 class TagManager {
 public:
     TagManager();
@@ -79,7 +85,14 @@ public:
     void stripAiTagParentsForSyntheticFolders(const QStringList &syntheticParentTags, bool save);
 
     void addRejectedTag(const QString& tag);
+    /// Records file + tag + timestamp in rejected_tags.json; optionally removes tag from file metadata.
+    void addContextualRejectedTag(const QString& filePath, const QString& tag, bool removeFromFileMetadata = true);
     QStringList getRejectedTags() const;
+    /// Tags rejected for a specific file path only (contextual RLHF; no global entries).
+    QStringList getRejectedTagsForFile(const QString &filePath) const;
+    std::vector<TagRejectedLogEntry> rejectedTagLogEntries() const;
+    void clearRejectedTagLog();
+    void removeRejectedTagLogEntries(const std::vector<TagRejectedLogEntry> &entries);
 
     /// Clear all tags + hash-analysis JSON cache; keep per-file paths and content_sha256 map.
     void clearAiTagsAndSummaries(bool save = true);
@@ -96,6 +109,7 @@ private:
     std::map<QString, std::set<QString>> m_fileToTags;
 
     std::set<QString> m_rejectedTags;
+    std::vector<nlohmann::json> m_rejectedTagLog;
     std::map<QString, QString> m_pathToContentHash;
     std::map<QString, nlohmann::json> m_hashAnalysisCache;
     /// Child tag (canonical) → parent tag (canonical). Only meaningful edges are stored.
@@ -108,6 +122,9 @@ private:
     std::string getRejectedTagsPath() const;
     void loadRejectedTags();
     void saveRejectedTags() const;
+    void appendRejectedTagEntry(const QString& filePath, const QString& tag);
+    void syncRejectedTagSetFromLog();
+    void purgeRejectedTagEntriesWithTag(const QString& tag);
 };
 
 #endif // TAGMANAGER_H
