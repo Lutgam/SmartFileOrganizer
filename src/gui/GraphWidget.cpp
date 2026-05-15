@@ -1,5 +1,6 @@
 #include "GraphWidget.h"
 #include "../core/TagManager.h"
+#include "../core/DrawerCategoryLut.h"
 #include <QGraphicsScene>
 #include <QPainter>
 #include <QTimer>
@@ -7,13 +8,19 @@
 #include <qmath.h>
 #include <QWheelEvent>
 #include <QStyleOptionGraphicsItem>
+#include <QDir>
 #include <QFileInfo>
 #include <QLineF>
 #include <QListWidget>
+#include <QTreeWidget>
+#include <QHeaderView>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMouseEvent>
+#include <QPushButton>
 #include <QResizeEvent>
+#include <QScrollBar>
 #include <QSet>
 #include <QFont>
 #include <QFontMetrics>
@@ -21,6 +28,8 @@
 #include <QSpinBox>
 #include <QSettings>
 #include <QRandomGenerator>
+#include <QTransform>
+#include <functional>
 #include <algorithm>
 
 #include "LanguageManager.h"
@@ -55,6 +64,237 @@ static QString translateVirtualTagForDisplay(const QString &tag) {
 
     return lm.getText(t);
 }
+
+namespace {
+
+static const QString kTagImage = QStringLiteral("🖼️ 圖片");
+static const QString kTagVideo = QStringLiteral("🎬 影片");
+static const QString kTagDoc = QStringLiteral("📄 文件");
+static const QString kTagAudio = QStringLiteral("🎵 音檔");
+static const QString kTagDb = QStringLiteral("🗃️ 資料庫");
+
+static bool sfAbsolutePathUnderWorkspaceRoot(const QString &absPathRaw, const QString &workspaceRootRaw)
+{
+    const QString ws = QDir::cleanPath(workspaceRootRaw);
+    const QString p = QDir::cleanPath(absPathRaw);
+    if (ws.isEmpty() || p.isEmpty())
+        return false;
+    if (p == ws)
+        return true;
+    return p.startsWith(ws + QLatin1Char('/'));
+}
+
+static QString normalizeDisplayTag(const QString &t)
+{
+    const QString s = t.trimmed();
+    if (s == QStringLiteral("圖片"))
+        return kTagImage;
+    if (s == QStringLiteral("影片"))
+        return kTagVideo;
+    if (s == QStringLiteral("文件"))
+        return kTagDoc;
+    if (s == QStringLiteral("音檔") || s == QStringLiteral("音訊"))
+        return kTagAudio;
+    if (s == QStringLiteral("資料庫"))
+        return kTagDb;
+    if (s == QStringLiteral("🖼️圖片") || s == kTagImage)
+        return kTagImage;
+    if (s == QStringLiteral("🎬影片") || s == kTagVideo)
+        return kTagVideo;
+    if (s == QStringLiteral("📄文件") || s == kTagDoc)
+        return kTagDoc;
+    if (s == QStringLiteral("🎧音訊") || s == QStringLiteral("🎵音檔") || s == kTagAudio)
+        return kTagAudio;
+    if (s == QStringLiteral("🗃️資料庫") || s == QStringLiteral("🗄️資料庫") || s == kTagDb)
+        return kTagDb;
+    return s;
+}
+
+static QStringList orderedSystemTagWhitelistCanons()
+{
+    return {kTagImage,
+            kTagVideo,
+            kTagAudio,
+            kTagDoc,
+            kTagDb,
+            QStringLiteral("📦壓縮檔"),
+            QStringLiteral("🧩設定"),
+            QStringLiteral("🧩 程式碼"),
+            QStringLiteral("💻安裝檔"),
+            QStringLiteral("💻應用程式"),
+            QStringLiteral("📦備份檔"),
+            QStringLiteral("🗓️會議"),
+            QStringLiteral("🧑‍💼履歷"),
+            QStringLiteral("🎒學校作業"),
+            QStringLiteral("💰財務"),
+            QStringLiteral("🎨設計")};
+}
+
+static QString mapLooseSystemTagToWhitelistCanon(const QString &rawIn)
+{
+    const QString n0 = normalizeDisplayTag(rawIn.trimmed());
+    if (TagManager::hasAiPrefix(n0))
+        return QString();
+
+    for (const QString &w : orderedSystemTagWhitelistCanons()) {
+        if (QString::compare(n0, w, Qt::CaseInsensitive) == 0)
+            return w;
+    }
+
+    const QString low = n0.toLower();
+    if (low.contains(QStringLiteral("system shortcut")) || low.contains(QStringLiteral("系統捷徑")))
+        return QStringLiteral("🧩設定");
+    if (n0.contains(QStringLiteral("安裝檔")))
+        return QStringLiteral("💻安裝檔");
+    if (low == QStringLiteral("application") || low == QStringLiteral("applications")
+        || low.contains(QStringLiteral("[應用程式]")) || n0.contains(QStringLiteral("應用程式")))
+        return QStringLiteral("💻應用程式");
+    if (low.contains(QStringLiteral("source code")) || low == QStringLiteral("code") || low == QStringLiteral("script")
+        || n0.contains(QStringLiteral("程式碼")))
+        return QStringLiteral("🧩 程式碼");
+    if (n0.contains(QStringLiteral("壓縮檔")))
+        return QStringLiteral("📦壓縮檔");
+    if (n0.contains(QStringLiteral("備份檔")))
+        return QStringLiteral("📦備份檔");
+    if (n0.contains(QStringLiteral("會議")))
+        return QStringLiteral("🗓️會議");
+    if (n0.contains(QStringLiteral("履歷")))
+        return QStringLiteral("🧑‍💼履歷");
+    if (n0.contains(QStringLiteral("學校作業")))
+        return QStringLiteral("🎒學校作業");
+    if (n0.contains(QStringLiteral("財務")))
+        return QStringLiteral("💰財務");
+    if (n0.contains(QStringLiteral("設計")))
+        return QStringLiteral("🎨設計");
+    if (n0.contains(QStringLiteral("設定")))
+        return QStringLiteral("🧩設定");
+    return QString();
+}
+
+static QString systemTagBaseZh(const QString &canon)
+{
+    if (canon == kTagImage)
+        return QStringLiteral("圖片");
+    if (canon == kTagVideo)
+        return QStringLiteral("影片");
+    if (canon == kTagDoc)
+        return QStringLiteral("文件");
+    if (canon == kTagAudio)
+        return QStringLiteral("音檔");
+    if (canon == kTagDb)
+        return QStringLiteral("資料庫");
+    if (canon.contains(QStringLiteral("壓縮檔")))
+        return QStringLiteral("壓縮檔");
+    if (canon.contains(QStringLiteral("程式碼")))
+        return QStringLiteral("程式碼");
+    if (canon.contains(QStringLiteral("安裝檔")))
+        return QStringLiteral("安裝檔");
+    if (canon.contains(QStringLiteral("備份檔")))
+        return QStringLiteral("備份檔");
+    if (canon.contains(QStringLiteral("設定")))
+        return QStringLiteral("設定");
+    if (canon.contains(QStringLiteral("設計")))
+        return QStringLiteral("設計");
+    if (canon.contains(QStringLiteral("資料庫")))
+        return QStringLiteral("資料庫");
+    if (canon.contains(QStringLiteral("學校作業")))
+        return QStringLiteral("學校作業");
+    if (canon.contains(QStringLiteral("應用程式")))
+        return QStringLiteral("應用程式");
+    if (canon.contains(QStringLiteral("履歷")))
+        return QStringLiteral("履歷");
+    return QString();
+}
+
+static QString systemTagEmojiPrefix(const QString &canon)
+{
+    QString out;
+    for (int i = 0; i < canon.size(); ++i) {
+        const QChar c = canon.at(i);
+        if (c.isSpace()) {
+            if (!out.isEmpty())
+                break;
+            continue;
+        }
+        const ushort u = c.unicode();
+        const bool isCjk = (u >= 0x4E00 && u <= 0x9FFF);
+        if (c.isLetterOrNumber() || isCjk)
+            break;
+        out.append(c);
+        if (out.size() >= 6)
+            break;
+    }
+    return out.trimmed();
+}
+
+static QString tagLibraryLabelStripAiBadge(const QString &displayName)
+{
+    QString d = displayName.trimmed();
+    d = TagManager::stripAiPrefix(d).trimmed();
+    return d.trimmed();
+}
+
+static QString tagChipDisplayStripLeadingEmoji(QString text)
+{
+    text = text.trimmed();
+    if (text.isEmpty())
+        return text;
+
+    bool hadAi = false;
+    if (text.startsWith(QStringLiteral("[AI]"), Qt::CaseInsensitive)) {
+        hadAi = true;
+        text = text.mid(4).trimmed();
+    }
+
+    int i = 0;
+    while (i < text.size()) {
+        const QChar c = text.at(i);
+        if (c.isSpace()) {
+            ++i;
+            continue;
+        }
+        if (c.isLetterOrNumber())
+            break;
+        ++i;
+    }
+    while (i < text.size() && text.at(i).isSpace())
+        ++i;
+
+    QString rest = text.mid(i).trimmed();
+    if (hadAi)
+        return QStringLiteral("[AI] %1").arg(rest);
+    return rest;
+}
+
+static QString aiTagLabelForTreeDisplay(const QString &raw)
+{
+    return tagChipDisplayStripLeadingEmoji(tagLibraryLabelStripAiBadge(raw));
+}
+
+static QStringList sfFixedAiClusterDrawerKeys()
+{
+    return sfActiveDrawerCategoryLut().drawerKeys();
+}
+
+static QString sfNormalizePersistedDrawerValue(const QString &vIn)
+{
+    return sfActiveDrawerCategoryLut().normalizeDrawerKey(vIn);
+}
+
+static bool sfIsSyntheticAiDrawerFolderTag(const QString &t)
+{
+    return sfActiveDrawerCategoryLut().isSyntheticDrawerFolderTag(t);
+}
+
+static QString sfHeuristicDrawerKeyForAiTag(const QString &rawAiTag)
+{
+    const QString core = TagManager::stripAiPrefix(rawAiTag).trimmed();
+    if (core.isEmpty())
+        return QStringLiteral("📦 雜項");
+    return sfActiveDrawerCategoryLut().matchText(core);
+}
+
+} // namespace
 
 // --- Edge Implementation ---
 Edge::Edge(Node *sourceNode, Node *destNode, const QColor &lineColor)
@@ -262,13 +502,19 @@ GraphWidget::GraphWidget(TagManager* tagMgr, QWidget *parent)
 {
     QGraphicsScene *scene = new QGraphicsScene(this);
     scene->setItemIndexMethod(QGraphicsScene::NoIndex);
-    scene->setSceneRect(-400, -400, 800, 800);
+    scene->setSceneRect(-kGraphSceneHalfExtent,
+                        -kGraphSceneHalfExtent,
+                        kGraphSceneHalfExtent * 2.0,
+                        kGraphSceneHalfExtent * 2.0);
     setScene(scene);
     
     setCacheMode(CacheBackground);
     setViewportUpdateMode(BoundingRectViewportUpdate);
     setRenderHint(QPainter::Antialiasing);
     setTransformationAnchor(AnchorUnderMouse);
+    setDragMode(QGraphicsView::NoDrag);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     setFrameShape(QFrame::NoFrame);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMinimumSize(0, 0);
@@ -329,7 +575,68 @@ void GraphWidget::timerEvent(QTimerEvent *event)
 
 void GraphWidget::wheelEvent(QWheelEvent *event)
 {
-    scaleView(pow(2., -event->angleDelta().y() / 240.0));
+    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    constexpr double scaleFactor = 1.15;
+    if (event->angleDelta().y() > 0)
+        scale(scaleFactor, scaleFactor);
+    else
+        scale(1.0 / scaleFactor, 1.0 / scaleFactor);
+    event->accept();
+}
+
+namespace {
+
+bool graphItemBlocksCanvasPan(QGraphicsItem *item)
+{
+    if (!item)
+        return false;
+    if (qgraphicsitem_cast<Node *>(item) || qgraphicsitem_cast<Edge *>(item))
+        return true;
+    if (QGraphicsItem *parent = item->parentItem()) {
+        if (qgraphicsitem_cast<Node *>(parent) || qgraphicsitem_cast<Edge *>(parent))
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+void GraphWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && !graphItemBlocksCanvasPan(itemAt(event->pos()))) {
+        m_canvasPanActive = true;
+        m_canvasPanLastPos = event->pos();
+        setCursor(Qt::ClosedHandCursor);
+        event->accept();
+        return;
+    }
+    QGraphicsView::mousePressEvent(event);
+}
+
+void GraphWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    if (m_canvasPanActive) {
+        const QPoint delta = event->pos() - m_canvasPanLastPos;
+        m_canvasPanLastPos = event->pos();
+        if (QScrollBar *h = horizontalScrollBar())
+            h->setValue(h->value() - delta.x());
+        if (QScrollBar *v = verticalScrollBar())
+            v->setValue(v->value() - delta.y());
+        event->accept();
+        return;
+    }
+    QGraphicsView::mouseMoveEvent(event);
+}
+
+void GraphWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (m_canvasPanActive && event->button() == Qt::LeftButton) {
+        m_canvasPanActive = false;
+        unsetCursor();
+        event->accept();
+        return;
+    }
+    QGraphicsView::mouseReleaseEvent(event);
 }
 
 void GraphWidget::drawBackground(QPainter *painter, const QRectF &rect)
@@ -353,40 +660,97 @@ void GraphWidget::scaleView(qreal scaleFactor)
     scale(scaleFactor, scaleFactor);
 }
 
-void GraphWidget::resizeEvent(QResizeEvent *event) {
-    QGraphicsView::resizeEvent(event);
+void GraphWidget::setFilterPanelExpanded(bool expanded)
+{
+    m_filterPanelExpanded = expanded;
+    if (m_filterPanel)
+        m_filterPanel->setVisible(expanded);
+    if (m_filterExpandBtn)
+        m_filterExpandBtn->setVisible(!expanded);
+    updateFilterPanelLayout();
+}
+
+void GraphWidget::updateFilterPanelLayout()
+{
     const int margin = 10;
-    if (m_filterPanel) {
-        const int panelWidth = qMin(240, qMax(180, width() / 4));
+    if (m_filterExpandBtn && !m_filterPanelExpanded) {
+        m_filterExpandBtn->setGeometry(margin, margin + 8, 76, 36);
+        m_filterExpandBtn->raise();
+    }
+    if (m_filterPanel && m_filterPanelExpanded) {
+        const int panelWidth = qMin(280, qMax(200, width() / 4));
         m_filterPanel->setGeometry(margin, margin + 8, panelWidth, height() - margin * 2 - 8);
+        m_filterPanel->raise();
     }
     if (m_toolbar) {
         const QSize s = m_toolbar->sizeHint();
         m_toolbar->setGeometry(width() - s.width() - margin, margin, s.width(), s.height());
+        m_toolbar->raise();
     }
+}
+
+void GraphWidget::resizeEvent(QResizeEvent *event) {
+    QGraphicsView::resizeEvent(event);
+    updateFilterPanelLayout();
     fitAllNodes();
 }
 
 void GraphWidget::ensureToolbar() {
     if (m_toolbar) return;
 
+    m_filterExpandBtn = new QPushButton(QStringLiteral("展開設定"), this);
+    m_filterExpandBtn->setObjectName(QStringLiteral("graphFilterExpandTab"));
+    m_filterExpandBtn->setCursor(Qt::PointingHandCursor);
+    m_filterExpandBtn->setStyleSheet(QStringLiteral(
+        "QPushButton#graphFilterExpandTab {"
+        "  background: rgba(20,20,20,230);"
+        "  color: #e2e8f0;"
+        "  border: 1px solid rgba(255,255,255,40);"
+        "  border-radius: 8px;"
+        "  padding: 6px 8px;"
+        "  font-weight: bold;"
+        "}"
+        "QPushButton#graphFilterExpandTab:hover { background: rgba(45,55,72,240); }"));
+    m_filterExpandBtn->hide();
+    connect(m_filterExpandBtn, &QPushButton::clicked, this, [this]() { setFilterPanelExpanded(true); });
+
     m_filterPanel = new QWidget(this);
     m_filterPanel->setObjectName(QStringLiteral("graphFilterPanel"));
     m_filterPanel->setStyleSheet(QStringLiteral(
         "QWidget#graphFilterPanel { background: rgba(20,20,20,220); border: 1px solid rgba(255,255,255,35); border-radius: 8px; }"
         "QLabel { color: white; }"
-        "QListWidget { background: rgba(0,0,0,40); color: #e2e8f0; border: none; }"
-        "QListWidget::item { padding: 4px 2px; }"));
+        "QTabWidget::pane { border: none; background: transparent; }"
+        "QTabBar::tab { color: #cbd5e1; padding: 4px 8px; }"
+        "QTabBar::tab:selected { color: white; font-weight: bold; }"
+        "QListWidget, QTreeWidget { background: rgba(0,0,0,40); color: #e2e8f0; border: none; }"
+        "QListWidget::item, QTreeWidget::item { padding: 4px 2px; }"));
     auto *filterLayout = new QVBoxLayout(m_filterPanel);
     filterLayout->setContentsMargins(8, 8, 8, 8);
     filterLayout->setSpacing(6);
 
-    m_filterLabel = new QLabel(QStringLiteral("標籤過濾"), m_filterPanel);
-    filterLayout->addWidget(m_filterLabel);
+    {
+        auto *headerRow = new QHBoxLayout();
+        m_filterLabel = new QLabel(QStringLiteral("標籤過濾"), m_filterPanel);
+        headerRow->addWidget(m_filterLabel, 1);
+        m_btnCollapseFilter = new QPushButton(QStringLiteral("收起"), m_filterPanel);
+        m_btnCollapseFilter->setCursor(Qt::PointingHandCursor);
+        m_btnCollapseFilter->setFlat(true);
+        m_btnCollapseFilter->setStyleSheet(QStringLiteral("QPushButton { color: #94a3b8; }"
+                                                         "QPushButton:hover { color: white; }"));
+        connect(m_btnCollapseFilter, &QPushButton::clicked, this, [this]() { setFilterPanelExpanded(false); });
+        headerRow->addWidget(m_btnCollapseFilter);
+        filterLayout->addLayout(headerRow);
+    }
 
-    m_tagFilterList = new QListWidget(m_filterPanel);
-    m_tagFilterList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    filterLayout->addWidget(m_tagFilterList, 1);
+    m_tagFilterTabWidget = new QTabWidget(m_filterPanel);
+    m_systemFilterList = new QListWidget(m_filterPanel);
+    m_systemFilterList->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_aiFilterList = new QListWidget(m_filterPanel);
+    m_aiFilterList->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    auto &lm = LanguageManager::instance();
+    m_tagFilterTabWidget->addTab(m_systemFilterList, lm.getText(QStringLiteral("副檔名分類")));
+    m_tagFilterTabWidget->addTab(m_aiFilterList, lm.getText(QStringLiteral("預設標籤分類 (18大類)")));
+    filterLayout->addWidget(m_tagFilterTabWidget, 1);
 
     {
         auto *limitRow = new QHBoxLayout();
@@ -405,52 +769,144 @@ void GraphWidget::ensureToolbar() {
         });
     }
 
-    connect(m_tagFilterList, &QListWidget::itemChanged, this, [this](QListWidgetItem *) { buildGraph(); });
+    auto scheduleBuildGraph = [this]() {
+        QTimer::singleShot(0, this, [this]() { buildGraph(); });
+    };
+    connect(m_systemFilterList, &QListWidget::itemChanged, this, [scheduleBuildGraph](QListWidgetItem *) {
+        scheduleBuildGraph();
+    });
+    connect(m_aiFilterList, &QListWidget::itemChanged, this, [scheduleBuildGraph](QListWidgetItem *) {
+        scheduleBuildGraph();
+    });
 
     m_toolbar = new QWidget(this);
     m_toolbar->setObjectName(QStringLiteral("graphToolbar"));
     m_toolbar->setStyleSheet(QStringLiteral(
         "QWidget#graphToolbar { background: rgba(30,30,30,200); border: 1px solid rgba(255,255,255,40); border-radius: 8px; }"
         "QLabel { color: white; }"
-        "QComboBox { padding: 2px 6px; }"));
+        "QComboBox { padding: 2px 6px; }"
+        "QPushButton { color: white; padding: 4px 10px; }"));
 
     auto *row = new QHBoxLayout(m_toolbar);
     row->setContentsMargins(10, 8, 10, 8);
     row->setSpacing(8);
 
-    m_maxNodesHint = new QLabel(QStringLiteral("滾輪縮放 · +/- 按鈕"), m_toolbar);
+    m_btnResetView = new QPushButton(QStringLiteral("重置視圖"), m_toolbar);
+    m_btnZoomOut = new QPushButton(QStringLiteral("−"), m_toolbar);
+    m_btnZoomIn = new QPushButton(QStringLiteral("+"), m_toolbar);
+    m_btnZoomOut->setFixedWidth(36);
+    m_btnZoomIn->setFixedWidth(36);
+    connect(m_btnResetView, &QPushButton::clicked, this, &GraphWidget::resetView);
+    connect(m_btnZoomIn, &QPushButton::clicked, this, &GraphWidget::zoomIn);
+    connect(m_btnZoomOut, &QPushButton::clicked, this, &GraphWidget::zoomOut);
+    row->addWidget(m_btnResetView);
+    row->addWidget(m_btnZoomOut);
+    row->addWidget(m_btnZoomIn);
+
+    m_maxNodesHint = new QLabel(QStringLiteral("滾輪縮放 · 拖曳畫布平移"), m_toolbar);
     row->addWidget(m_maxNodesHint);
 
     connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() {
+        auto &lm = LanguageManager::instance();
         if (m_filterLabel)
-            m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
+            m_filterLabel->setText(lm.getText(QStringLiteral("標籤過濾")));
+        if (m_tagFilterTabWidget && m_systemFilterList && m_aiFilterList) {
+            m_tagFilterTabWidget->setTabText(m_tagFilterTabWidget->indexOf(m_systemFilterList),
+                                             lm.getText(QStringLiteral("副檔名分類")));
+            m_tagFilterTabWidget->setTabText(m_tagFilterTabWidget->indexOf(m_aiFilterList),
+                                             lm.getText(QStringLiteral("預設標籤分類 (18大類)")));
+        }
         if (m_maxNodesSpinLabel) {
             m_maxNodesSpinLabel->setText(
-                LanguageManager::instance().language() == LanguageManager::Language::EN_US
-                    ? QStringLiteral("Max nodes shown")
-                    : QStringLiteral("顯示節點上限"));
+                lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("Max nodes shown")
+                                                                : QStringLiteral("顯示節點上限"));
+        }
+        if (m_btnResetView) {
+            m_btnResetView->setText(lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("Reset view")
+                                                                                      : QStringLiteral("重置視圖"));
+        }
+        if (m_filterExpandBtn) {
+            m_filterExpandBtn->setText(lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("Expand")
+                                                                                         : QStringLiteral("展開設定"));
+        }
+        if (m_btnCollapseFilter) {
+            m_btnCollapseFilter->setText(lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("Collapse")
+                                                                                           : QStringLiteral("收起"));
+        }
+        if (m_maxNodesHint) {
+            m_maxNodesHint->setText(lm.language() == LanguageManager::Language::EN_US
+                                        ? QStringLiteral("Wheel zoom · drag canvas to pan")
+                                        : QStringLiteral("滾輪縮放 · 拖曳畫布平移"));
         }
         rebuildTagFilterOptions();
     });
 
     m_toolbar->show();
     m_filterPanel->show();
+    m_filterExpandBtn->show();
+    setFilterPanelExpanded(m_filterPanelExpanded);
+}
+
+void GraphWidget::setFilterContext(const QString &workspaceRoot, const QHash<QString, QString> &aiTagToDrawerKey)
+{
+    m_workspaceRoot = QDir::cleanPath(workspaceRoot);
+    m_aiTagToDrawerKey = aiTagToDrawerKey;
+    rebuildTagFilterOptions();
 }
 
 QStringList GraphWidget::selectedFilterTags() const
 {
     QStringList out;
-    if (!m_tagFilterList)
+    if (m_systemFilterList) {
+        for (int i = 0; i < m_systemFilterList->count(); ++i) {
+            QListWidgetItem *item = m_systemFilterList->item(i);
+            if (!item || item->checkState() != Qt::Checked)
+                continue;
+            const QString tag = item->data(Qt::UserRole).toString().trimmed();
+            if (!tag.isEmpty())
+                out << tag;
+        }
+    }
+
+    for (const QString &dk : selectedAiDrawerKeys())
+        out << drawerTagNodeKey(dk);
+
+    out.removeDuplicates();
+    return out;
+}
+
+QSet<QString> GraphWidget::selectedAiDrawerKeys() const
+{
+    QSet<QString> out;
+    if (!m_aiFilterList)
         return out;
-    for (int i = 0; i < m_tagFilterList->count(); ++i) {
-        QListWidgetItem *item = m_tagFilterList->item(i);
+
+    for (int i = 0; i < m_aiFilterList->count(); ++i) {
+        QListWidgetItem *item = m_aiFilterList->item(i);
         if (!item || item->checkState() != Qt::Checked)
             continue;
-        const QString tag = item->data(Qt::UserRole).toString().trimmed();
-        if (!tag.isEmpty())
-            out << tag;
+        const QString role = item->data(Qt::UserRole).toString().trimmed();
+        if (!role.startsWith(QStringLiteral("SF_DRAWER:")))
+            continue;
+        const QString dk = role.mid(QStringLiteral("SF_DRAWER:").size());
+        if (!dk.isEmpty())
+            out.insert(dk);
     }
     return out;
+}
+
+QString GraphWidget::aiDrawerKeyForLeaf(const QString &leafTag) const
+{
+    QString dk = sfNormalizePersistedDrawerValue(m_aiTagToDrawerKey.value(leafTag.trimmed()));
+    static const QString kFallbackDrawer = QStringLiteral("📦 雜項");
+    if (dk.isEmpty() || !sfFixedAiClusterDrawerKeys().contains(dk))
+        dk = kFallbackDrawer;
+    return dk;
+}
+
+QString GraphWidget::drawerTagNodeKey(const QString &drawerKey)
+{
+    return QStringLiteral("SF_DRAWER:%1").arg(drawerKey);
 }
 
 QColor GraphWidget::edgeColorForTag(const QString &tag, int paletteIndex) const
@@ -471,65 +927,172 @@ QColor GraphWidget::edgeColorForTag(const QString &tag, int paletteIndex) const
 
 void GraphWidget::rebuildTagFilterOptions() {
     ensureToolbar();
-    if (!m_tagFilterList) return;
+    if (!m_systemFilterList || !m_aiFilterList || !tagManager)
+        return;
 
-    if (m_filterLabel) m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
+    if (m_filterLabel)
+        m_filterLabel->setText(LanguageManager::instance().getText(QStringLiteral("標籤過濾")));
 
     const QStringList prevChecked = selectedFilterTags();
+    const QSet<QString> prevAiDrawers = selectedAiDrawerKeys();
+    const QString workspaceRoot = QDir::cleanPath(m_workspaceRoot);
+    int defaultChecksLeft = prevChecked.isEmpty() ? 3 : 0;
 
-    m_tagFilterList->blockSignals(true);
-    m_tagFilterList->clear();
-    if (tagManager) {
-        struct TagRank {
-            QString tag;
-            int count = 0;
-        };
-        std::vector<TagRank> ranked;
-        ranked.reserve(64);
+    m_systemFilterList->blockSignals(true);
+    m_aiFilterList->blockSignals(true);
+    m_systemFilterList->clear();
+    m_aiFilterList->clear();
 
-        for (const QString &t : tagManager->getAllTags()) {
-            const QString tag = t.trimmed();
-            if (tag.isEmpty())
+    std::vector<QString> rawTags = tagManager->getAllTags();
+
+    QMap<QString, QSet<QString>> normToFiles;
+    for (const QString &t : rawTags) {
+        const QString canon = normalizeDisplayTag(t);
+        for (const QString &fp : tagManager->getFilesByTag(t)) {
+            if (!workspaceRoot.isEmpty() && !sfAbsolutePathUnderWorkspaceRoot(fp, workspaceRoot))
                 continue;
-
-            int count = 0;
-            for (const QString &p : tagManager->getFilesByTag(tag)) {
-                const QFileInfo fi(p);
-                if (fi.exists() && fi.isFile())
-                    ++count;
-            }
-            if (count <= 0)
-                continue;
-            ranked.push_back(TagRank{tag, count});
-        }
-
-        std::sort(ranked.begin(), ranked.end(), [](const TagRank &a, const TagRank &b) {
-            if (a.count != b.count)
-                return a.count > b.count;
-            return a.tag.localeAwareCompare(b.tag) < 0;
-        });
-
-        int added = 0;
-        for (const TagRank &entry : ranked) {
-            auto *item = new QListWidgetItem(translateVirtualTagForDisplay(entry.tag), m_tagFilterList);
-            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-            item->setData(Qt::UserRole, entry.tag);
-            const bool checked = prevChecked.contains(entry.tag) || (prevChecked.isEmpty() && added < 3);
-            item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
-            ++added;
+            normToFiles[canon].insert(QDir::cleanPath(fp));
         }
     }
-    m_tagFilterList->blockSignals(false);
+
+    QMap<QString, QSet<QString>> systemWhitelistToFiles;
+    for (const QString &t : rawTags) {
+        const QString canon = normalizeDisplayTag(t);
+        if (TagManager::hasAiPrefix(canon))
+            continue;
+        const QString sysCanon = mapLooseSystemTagToWhitelistCanon(canon);
+        if (sysCanon.isEmpty())
+            continue;
+        for (const QString &fp : tagManager->getFilesByTag(t)) {
+            if (!workspaceRoot.isEmpty() && !sfAbsolutePathUnderWorkspaceRoot(fp, workspaceRoot))
+                continue;
+            systemWhitelistToFiles[sysCanon].insert(QDir::cleanPath(fp));
+        }
+    }
+
+    auto shouldCheck = [&](const QString &tagKey) {
+        if (prevChecked.contains(tagKey))
+            return true;
+        if (defaultChecksLeft > 0) {
+            --defaultChecksLeft;
+            return true;
+        }
+        return false;
+    };
+
+    auto drawerShouldCheck = [&](const QString &drawerKey) {
+        if (prevAiDrawers.contains(drawerKey))
+            return true;
+        const QString drawerRole = drawerTagNodeKey(drawerKey);
+        if (prevChecked.contains(drawerRole))
+            return true;
+        for (const QString &tag : prevChecked) {
+            if (TagManager::hasAiPrefix(tag) && aiDrawerKeyForLeaf(tag) == drawerKey)
+                return true;
+        }
+        if (defaultChecksLeft > 0) {
+            --defaultChecksLeft;
+            return true;
+        }
+        return false;
+    };
+
+    for (const QString &sysCanon : orderedSystemTagWhitelistCanons()) {
+        const int n = static_cast<int>(systemWhitelistToFiles.value(sysCanon).size());
+        if (n <= 0)
+            continue;
+        const QString baseZh = systemTagBaseZh(sysCanon);
+        const QString emoji = systemTagEmojiPrefix(sysCanon);
+        const QString displayName = baseZh.isEmpty()
+                                        ? sysCanon
+                                        : QStringLiteral("%1 %2").arg(emoji, LanguageManager::instance().getText(baseZh));
+        auto *item = new QListWidgetItem(QStringLiteral("%1 (%2)").arg(displayName.trimmed()).arg(n),
+                                         m_systemFilterList);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setData(Qt::UserRole, sysCanon);
+        item->setCheckState(shouldCheck(sysCanon) ? Qt::Checked : Qt::Unchecked);
+    }
+
+    auto countFor = [&](const QString &c) -> int {
+        if (normToFiles.contains(c))
+            return static_cast<int>(normToFiles.value(c).size());
+        int n = 0;
+        for (const QString &fp : tagManager->getFilesByTag(c)) {
+            if (workspaceRoot.isEmpty() || sfAbsolutePathUnderWorkspaceRoot(fp, workspaceRoot))
+                ++n;
+        }
+        return n;
+    };
+
+    QSet<QString> aiLeaves;
+    for (const QString &t : rawTags) {
+        const QString tt = t.trimmed();
+        if (!TagManager::hasAiPrefix(tt))
+            continue;
+        if (sfIsSyntheticAiDrawerFolderTag(tt))
+            continue;
+        aiLeaves.insert(tt);
+    }
+
+    QHash<QString, QVector<QString>> drawerToLeaves;
+    for (const QString &dk : sfFixedAiClusterDrawerKeys())
+        drawerToLeaves.insert(dk, {});
+
+    for (const QString &leaf : std::as_const(aiLeaves)) {
+        QString dk = sfNormalizePersistedDrawerValue(m_aiTagToDrawerKey.value(leaf));
+        static const QString kFallbackDrawer = QStringLiteral("📦 雜項");
+        if (dk.isEmpty() || !drawerToLeaves.contains(dk))
+            dk = kFallbackDrawer;
+        drawerToLeaves[dk].append(leaf);
+    }
+
+    auto sortLeaves = [&](QVector<QString> &vec) {
+        std::sort(vec.begin(), vec.end(), [&](const QString &a, const QString &b) {
+            const int na = countFor(a);
+            const int nb = countFor(b);
+            if (na != nb)
+                return na > nb;
+            return a.localeAwareCompare(b) < 0;
+        });
+    };
+
+    for (auto it = drawerToLeaves.begin(); it != drawerToLeaves.end(); ++it)
+        sortLeaves(it.value());
+
+    for (const QString &drawerKey : sfFixedAiClusterDrawerKeys()) {
+        const QVector<QString> leaves = drawerToLeaves.value(drawerKey);
+        int sumFiles = 0;
+        for (const QString &lf : leaves)
+            sumFiles += countFor(lf);
+
+        auto *item = new QListWidgetItem(QStringLiteral("(%1) %2")
+                                             .arg(sumFiles)
+                                             .arg(aiTagLabelForTreeDisplay(drawerKey)),
+                                         m_aiFilterList);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setData(Qt::UserRole, drawerTagNodeKey(drawerKey));
+        item->setCheckState(drawerShouldCheck(drawerKey) ? Qt::Checked : Qt::Unchecked);
+    }
+
+    m_systemFilterList->blockSignals(false);
+    m_aiFilterList->blockSignals(false);
 }
 
 void GraphWidget::zoomIn()
 {
-    scaleView(1.2);
+    setTransformationAnchor(QGraphicsView::AnchorViewCenter);
+    scaleView(1.15);
 }
 
 void GraphWidget::zoomOut()
 {
-    scaleView(1 / 1.2);
+    setTransformationAnchor(QGraphicsView::AnchorViewCenter);
+    scaleView(1.0 / 1.15);
+}
+
+void GraphWidget::resetView()
+{
+    fitAllNodes();
 }
 
 void GraphWidget::placeNodeWithSpiral(Node *newNode, const QPointF &center)
@@ -553,7 +1116,7 @@ void GraphWidget::placeNodeWithSpiral(Node *newNode, const QPointF &center)
     qreal x = center.x();
     qreal y = center.y();
 
-    const qreal radiusStep = 52.0 + sizeBase * 0.55 + placedSoFar * 2.5;
+    const qreal radiusStep = qMax(90.0, 80.0 + sizeBase * 0.35 + placedSoFar * 2.0);
 
     for (int step = 0; !placed && step < kMaxSteps; ++step) {
         x = center.x() + radius * qCos(angle * M_PI / 180.0);
@@ -589,35 +1152,64 @@ void GraphWidget::fitAllNodes()
     if (!itemsRect.isValid() || itemsRect.isNull())
         return;
 
-    itemsRect.setLeft(itemsRect.left() - 100.0);
-    scene()->setSceneRect(itemsRect.marginsAdded(QMarginsF(50, 50, 50, 50)));
+    scene()->setSceneRect(itemsRect.marginsAdded(QMarginsF(480, 480, 480, 480)));
 
     resetTransform();
     fitInView(scene()->sceneRect(), Qt::KeepAspectRatio);
 
-    if (transform().m11() < 0.5)
-        scale(1.2, 1.2);
+    if (transform().m11() > 1.0)
+        setTransform(QTransform::fromScale(1.0, 1.0));
 }
 
 void GraphWidget::buildGraph() {
     scene()->clear();
+    scene()->setSceneRect(-kGraphSceneHalfExtent,
+                          -kGraphSceneHalfExtent,
+                          kGraphSceneHalfExtent * 2.0,
+                          kGraphSceneHalfExtent * 2.0);
     fileNodes.clear();
     tagNodes.clear();
 
     if (!tagManager) return;
 
-    rebuildTagFilterOptions();
-
     const QStringList filterTags = selectedFilterTags();
-    if (filterTags.isEmpty()) {
+    const QSet<QString> selectedDrawers = selectedAiDrawerKeys();
+    if (filterTags.isEmpty() && selectedDrawers.isEmpty()) {
         return;
     }
 
+    QStringList systemFilters;
+    for (const QString &tag : filterTags) {
+        if (!tag.startsWith(QStringLiteral("SF_DRAWER:")))
+            systemFilters << tag;
+    }
+
+    QSet<QString> selectedAiLeaves;
+    if (!selectedDrawers.isEmpty()) {
+        for (const QString &t : tagManager->getAllTags()) {
+            const QString tt = t.trimmed();
+            if (!TagManager::hasAiPrefix(tt) || sfIsSyntheticAiDrawerFolderTag(tt))
+                continue;
+            if (selectedDrawers.contains(aiDrawerKeyForLeaf(tt)))
+                selectedAiLeaves.insert(tt);
+        }
+    }
+
     QSet<QString> candidateSet;
-    for (const QString &filterTag : filterTags) {
-        const std::vector<QString> files = tagManager->getFilesByTag(filterTag);
-        for (const auto &p : files)
-            candidateSet.insert(p);
+    const QString workspaceRoot = QDir::cleanPath(m_workspaceRoot);
+    for (const QString &filterTag : systemFilters) {
+        for (const QString &p : tagManager->getFilesByTag(filterTag)) {
+            if (!workspaceRoot.isEmpty() && !sfAbsolutePathUnderWorkspaceRoot(p, workspaceRoot))
+                continue;
+            candidateSet.insert(QDir::cleanPath(p));
+        }
+    }
+    for (const QString &leaf : std::as_const(selectedAiLeaves)) {
+        for (const QString &p : tagManager->getFilesByTag(leaf)) {
+            if (!workspaceRoot.isEmpty() && !sfAbsolutePathUnderWorkspaceRoot(p, workspaceRoot))
+                continue;
+            candidateSet.insert(QDir::cleanPath(p));
+        }
     }
 
     QStringList candidateFiles = candidateSet.values();
@@ -626,27 +1218,59 @@ void GraphWidget::buildGraph() {
         return a.localeAwareCompare(b) < 0;
     });
 
-    QStringList tagList = filterTags;
-    std::sort(tagList.begin(), tagList.end(), [](const QString &a, const QString &b) {
-        return a.localeAwareCompare(b) < 0;
-    });
-    if (tagList.isEmpty() || candidateFiles.isEmpty()) {
+    if (candidateFiles.isEmpty()) {
         return;
     }
 
-    // 1) Create Tag Nodes (Blue)
-    const int tagCount = tagList.size();
-    for (int i = 0; i < tagCount; ++i) {
+    // 1) Tag nodes: extension categories + 18 AI drawer categories (not individual AI leaf tags).
+    QSet<QString> activeDrawerKeys;
+    for (const QString &leaf : std::as_const(selectedAiLeaves))
+        activeDrawerKeys.insert(aiDrawerKeyForLeaf(leaf));
+
+    std::sort(systemFilters.begin(), systemFilters.end(), [](const QString &a, const QString &b) {
+        return a.localeAwareCompare(b) < 0;
+    });
+
+    for (const QString &sysCanon : systemFilters) {
         if (countGraphNodesInScene() >= m_maxGraphNodes)
             break;
-        const QString &qTag = tagList[i];
-        Node *tagNode = new Node(this, Node::Tag, translateVirtualTagForDisplay(qTag));
+        const QString display = translateVirtualTagForDisplay(sysCanon);
+        Node *tagNode = new Node(this, Node::Tag, display);
         placeNodeWithSpiral(tagNode);
         scene()->addItem(tagNode);
-        tagNodes[qTag] = tagNode;
+        tagNodes[sysCanon] = tagNode;
     }
 
-    // 2) Create File Nodes (Green) + colored edges per selected tag
+    QStringList drawerOrder = sfFixedAiClusterDrawerKeys();
+    for (const QString &dk : std::as_const(drawerOrder)) {
+        if (!activeDrawerKeys.contains(dk))
+            continue;
+        if (countGraphNodesInScene() >= m_maxGraphNodes)
+            break;
+
+        int linkedFiles = 0;
+        for (const QString &fp : std::as_const(candidateFiles)) {
+            const auto tags = tagManager->getTags(fp);
+            for (const QString &t : tags) {
+                if (!selectedAiLeaves.contains(t))
+                    continue;
+                if (aiDrawerKeyForLeaf(t) == dk) {
+                    ++linkedFiles;
+                    break;
+                }
+            }
+        }
+
+        const QString mapKey = drawerTagNodeKey(dk);
+        const QString label =
+            QStringLiteral("(%1) %2").arg(linkedFiles).arg(aiTagLabelForTreeDisplay(dk));
+        Node *tagNode = new Node(this, Node::Tag, label);
+        placeNodeWithSpiral(tagNode);
+        scene()->addItem(tagNode);
+        tagNodes[mapKey] = tagNode;
+    }
+
+    // 2) File nodes + edges to extension tags or AI drawer hub nodes.
     for (const QString &fp : candidateFiles) {
         if (countGraphNodesInScene() >= m_maxGraphNodes)
             break;
@@ -657,7 +1281,7 @@ void GraphWidget::buildGraph() {
 
         const auto tags = tagManager->getTags(fp);
         QSet<QString> fileTags;
-        for (const auto &t : tags) {
+        for (const QString &t : tags) {
             if (!t.trimmed().isEmpty())
                 fileTags.insert(t);
         }
@@ -674,17 +1298,30 @@ void GraphWidget::buildGraph() {
             fileNode = fileNodes[fp];
         }
 
-        for (int ti = 0; ti < filterTags.size(); ++ti) {
-            const QString &filterTag = filterTags[ti];
-            if (!fileTags.contains(filterTag))
+        for (int si = 0; si < systemFilters.size(); ++si) {
+            const QString &sysCanon = systemFilters[si];
+            if (!fileTags.contains(sysCanon))
                 continue;
-            Node *tagNode = nullptr;
-            const auto tagIt = tagNodes.find(filterTag);
-            if (tagIt != tagNodes.end())
-                tagNode = tagIt->second;
-            if (!tagNode)
+            const auto tagIt = tagNodes.find(sysCanon);
+            if (tagIt == tagNodes.end())
                 continue;
-            scene()->addItem(new Edge(tagNode, fileNode, edgeColorForTag(filterTag, ti)));
+            scene()->addItem(new Edge(tagIt->second, fileNode, edgeColorForTag(sysCanon, si)));
+        }
+
+        QSet<QString> drawersLinkedForFile;
+        for (const QString &leaf : std::as_const(selectedAiLeaves)) {
+            if (!fileTags.contains(leaf))
+                continue;
+            const QString dk = aiDrawerKeyForLeaf(leaf);
+            if (drawersLinkedForFile.contains(dk))
+                continue;
+            drawersLinkedForFile.insert(dk);
+            const auto tagIt = tagNodes.find(drawerTagNodeKey(dk));
+            if (tagIt == tagNodes.end())
+                continue;
+            const QStringList drawerKeys = sfFixedAiClusterDrawerKeys();
+            const int paletteIdx = qMax(0, drawerKeys.indexOf(dk));
+            scene()->addItem(new Edge(tagIt->second, fileNode, edgeColorForTag(dk, paletteIdx)));
         }
     }
 

@@ -2146,6 +2146,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     connect(m_mainTabWidget, &QTabWidget::currentChanged, this, [this](int) {
         if (!m_mainTabWidget) return;
         if (m_graphWidget && m_graphTab && m_mainTabWidget->currentWidget() == m_graphTab) {
+            syncGraphWidgetFilterContext();
             m_graphWidget->buildGraph();
         }
         if (m_taskCenterTab && m_mainTabWidget->currentWidget() == m_taskCenterTab) {
@@ -2246,6 +2247,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         updateTagDisplayForFile(restoredSelection);
         updatePreviewForFile(restoredSelection);
     }
+    syncGraphWidgetFilterContext();
     if (m_graphWidget)
         m_graphWidget->buildGraph();
 
@@ -2457,7 +2459,9 @@ void MainWindow::onWorkspaceFactoryReset()
     updateTagList();
     scanFiles();
     if (m_mainTabWidget && m_workspaceTab) m_mainTabWidget->setCurrentWidget(m_workspaceTab);
-    if (m_graphWidget) m_graphWidget->buildGraph();
+    syncGraphWidgetFilterContext();
+    if (m_graphWidget)
+        m_graphWidget->buildGraph();
     lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("workspace_factory_done")));
 }
 
@@ -4515,6 +4519,14 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     if (m_settingsPanel)
         m_settingsPanel->setRootPath(rootPath);
     sfPersistLastWorkspacePath(rootPath);
+    syncGraphWidgetFilterContext();
+}
+
+void MainWindow::syncGraphWidgetFilterContext()
+{
+    if (!m_graphWidget)
+        return;
+    m_graphWidget->setFilterContext(rootPath, m_aiTagToDrawerKey);
 }
 
 void MainWindow::refreshWorkspacePickerTitle()
@@ -4951,6 +4963,7 @@ void MainWindow::scanFiles() {
     }
 
     if (m_mainTabWidget && m_graphWidget && m_graphTab && m_mainTabWidget->currentWidget() == m_graphTab) {
+        syncGraphWidgetFilterContext();
         m_graphWidget->buildGraph();
     }
 }
@@ -5437,6 +5450,7 @@ void MainWindow::updateTagList() {
     }
 
     syncTagFilterFromTagList();
+    syncGraphWidgetFilterContext();
 }
 
 void MainWindow::syncTagFilterFromTagList() {

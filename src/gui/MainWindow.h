@@ -207,6 +207,7 @@ private:
     QString aiUiDrawerStorePath() const;
     QString categoriesConfigPath() const;
     void reloadCategoriesConfigFromWorkspace();
+    void syncGraphWidgetFilterContext();
     void rebuildForceCategoryCombo();
     void setHeroSemanticBusy(bool busy);
 
