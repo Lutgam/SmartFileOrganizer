@@ -442,6 +442,8 @@ QString LanguageManager::getText(const QString &key) const {
     }
     if (key == QStringLiteral("settings_ai_concurrency"))
         return en ? QStringLiteral("AI worker threads") : QStringLiteral("AI 併發執行緒數");
+    if (key == QStringLiteral("settings_llama_cpu_threads"))
+        return en ? QStringLiteral("LLM CPU threads (llama.cpp)") : QStringLiteral("LLM CPU 執行緒數 (llama.cpp)");
     if (key == QStringLiteral("settings_o1_cache"))
         return en ? QStringLiteral("Enable O(1) metadata cache") : QStringLiteral("啟用 O(1) 快取機制");
     if (key == QStringLiteral("settings_o1_cache_tooltip")) {

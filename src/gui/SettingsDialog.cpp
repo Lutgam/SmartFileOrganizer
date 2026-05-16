@@ -29,6 +29,7 @@ static constexpr const char *kSettingsBgAutoAnalyze = "workspace/background_auto
 static constexpr const char *kSettingsSystemFileBypass = "workspace/system_file_bypass_filter";
 static constexpr const char *kSettingsColdArchiveYears = "workspace/cold_archive_years";
 static constexpr const char *kSettingsAiConcurrency = "ai/concurrency_limit";
+static constexpr const char *kSettingsCpuThreads = "performance/cpu_threads";
 static constexpr const char *kSettingsO1CacheBypass = "analysis/enable_o1_cache_bypass";
 static constexpr const char *kSettingsTimeSchedule = "analysis/enable_time_schedule";
 static constexpr const char *kSettingsScheduleStart = "analysis/schedule_start_time";
@@ -113,6 +114,20 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
             gv->addLayout(row);
         }
 
+        {
+            auto *row = new QHBoxLayout();
+            m_lblLlamaCpuThreads = new QLabel(m_perfSchedulingGroup);
+            row->addWidget(m_lblLlamaCpuThreads);
+            m_llamaCpuThreadsSpin = new QSpinBox(m_perfSchedulingGroup);
+            const int ideal = qMax(1, QThread::idealThreadCount());
+            m_llamaCpuThreadsSpin->setRange(1, ideal);
+            const int defaultThreads = qMax(1, ideal / 2);
+            m_llamaCpuThreadsSpin->setValue(defaultThreads);
+            row->addWidget(m_llamaCpuThreadsSpin);
+            row->addStretch(1);
+            gv->addLayout(row);
+        }
+
         m_o1CacheBypass = new QCheckBox(m_perfSchedulingGroup);
         m_o1CacheBypass->setChecked(true);
         gv->addWidget(m_o1CacheBypass);
@@ -144,6 +159,11 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
             applyConcurrencyToThreadPool(value);
             QSettings s;
             s.setValue(QString::fromLatin1(kSettingsAiConcurrency), value);
+        });
+        connect(m_llamaCpuThreadsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+            QSettings s;
+            const int ideal = qMax(1, QThread::idealThreadCount());
+            s.setValue(QString::fromLatin1(kSettingsCpuThreads), qBound(1, value, ideal));
         });
         connect(m_enableTimeSchedule, &QCheckBox::toggled, this, &SettingsPanel::syncScheduleTimeEditEnabled);
     }
@@ -248,6 +268,8 @@ void SettingsPanel::applyLocalizedTexts()
         m_perfSchedulingGroup->setTitle(lm.getText(QStringLiteral("settings_perf_group")));
     if (m_lblAiConcurrency)
         m_lblAiConcurrency->setText(lm.getText(QStringLiteral("settings_ai_concurrency")));
+    if (m_lblLlamaCpuThreads)
+        m_lblLlamaCpuThreads->setText(lm.getText(QStringLiteral("settings_llama_cpu_threads")));
     if (m_o1CacheBypass) {
         m_o1CacheBypass->setText(lm.getText(QStringLiteral("settings_o1_cache")));
         m_o1CacheBypass->setToolTip(lm.getText(QStringLiteral("settings_o1_cache_tooltip")));
@@ -380,6 +402,15 @@ void SettingsPanel::loadFromSettings() {
         m_concurrencySpin->blockSignals(false);
         applyConcurrencyToThreadPool(c);
     }
+    if (m_llamaCpuThreadsSpin) {
+        const int ideal = qMax(1, QThread::idealThreadCount());
+        const int defaultThreads = qMax(1, ideal / 2);
+        const int t =
+            qBound(1, s.value(QString::fromLatin1(kSettingsCpuThreads), defaultThreads).toInt(), ideal);
+        m_llamaCpuThreadsSpin->blockSignals(true);
+        m_llamaCpuThreadsSpin->setValue(t);
+        m_llamaCpuThreadsSpin->blockSignals(false);
+    }
     if (m_o1CacheBypass) {
         m_o1CacheBypass->setChecked(s.value(QString::fromLatin1(kSettingsO1CacheBypass), true).toBool());
     }
@@ -436,6 +467,16 @@ void SettingsPanel::saveToSettings() {
     if (prevConcurrency != newConcurrency) {
         s.setValue(QString::fromLatin1(kSettingsAiConcurrency), newConcurrency);
         applyConcurrencyToThreadPool(newConcurrency);
+        m_changed = true;
+    }
+
+    const int ideal = qMax(1, QThread::idealThreadCount());
+    const int defaultThreads = qMax(1, ideal / 2);
+    const int prevCpu = qBound(1, s.value(QString::fromLatin1(kSettingsCpuThreads), defaultThreads).toInt(), ideal);
+    const int newCpu =
+        m_llamaCpuThreadsSpin ? qBound(1, m_llamaCpuThreadsSpin->value(), ideal) : defaultThreads;
+    if (prevCpu != newCpu) {
+        s.setValue(QString::fromLatin1(kSettingsCpuThreads), newCpu);
         m_changed = true;
     }
 

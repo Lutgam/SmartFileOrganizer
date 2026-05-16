@@ -61,6 +61,7 @@ private:
     QComboBox *m_coldArchiveCombo = nullptr;
 
     QSpinBox *m_concurrencySpin = nullptr;
+    QSpinBox *m_llamaCpuThreadsSpin = nullptr;
     QCheckBox *m_o1CacheBypass = nullptr;
     QCheckBox *m_enableTimeSchedule = nullptr;
     QTimeEdit *m_scheduleStart = nullptr;
@@ -76,6 +77,7 @@ private:
     QLabel *m_lblColdArchive = nullptr;
     QGroupBox *m_perfSchedulingGroup = nullptr;
     QLabel *m_lblAiConcurrency = nullptr;
+    QLabel *m_lblLlamaCpuThreads = nullptr;
     QLabel *m_lblScheduleStart = nullptr;
     QLabel *m_lblScheduleEnd = nullptr;
     QGroupBox *m_dataMgmtGroup = nullptr;

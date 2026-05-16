@@ -2,6 +2,8 @@
 #include "../core/TagManager.h"
 #include <QByteArray>
 #include <QDebug>
+#include <QSettings>
+#include <QThread>
 #include <QtGlobal>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -9,7 +11,6 @@
 #include <QJsonObject>
 #include <QMetaObject>
 #include <QMutexLocker>
-#include <QThread>
 #include <QRegularExpression>
 #include <QSet>
 #include <QString>
@@ -21,6 +22,18 @@
 #include <set>
 #include <sstream>
 #include <vector>
+
+namespace {
+/// QSettings key shared with SettingsPanel (`performance/cpu_threads`).
+int readLlamaCpuThreadsFromSettings()
+{
+    QSettings settings;
+    const int ideal = qMax(1, QThread::idealThreadCount());
+    const int defaultThreads = qMax(1, ideal / 2);
+    int targetThreads = settings.value(QStringLiteral("performance/cpu_threads"), defaultThreads).toInt();
+    return qBound(1, targetThreads, ideal);
+}
+} // namespace
 
 // Helper to add token to batch
 static void batch_add(llama_batch &batch, llama_token id, llama_pos pos,
@@ -150,6 +163,11 @@ bool LlamaEngine::ensureModelLoaded() {
   llama_context_params ctx_params = llama_context_default_params();
   ctx_params.n_ctx = 8192;
   ctx_params.n_batch = 2048;
+  {
+      const int nThreads = readLlamaCpuThreadsFromSettings();
+      ctx_params.n_threads = nThreads;
+      ctx_params.n_threads_batch = nThreads;
+  }
   ctx = llama_init_from_model(model, ctx_params);
 
   if (!ctx) {
@@ -212,6 +230,11 @@ std::string LlamaEngine::generateResponseImpl(const std::string &prompt, int max
   if (!ensureModelLoaded()) return "Error: Model not loaded";
   if (m_cancelFlag && m_cancelFlag->load(std::memory_order_acquire)) {
     return "Error: Cancelled";
+  }
+
+  {
+      const int nThreads = readLlamaCpuThreadsFromSettings();
+      llama_set_n_threads(ctx, nThreads, nThreads);
   }
 
   struct LlamaKvCacheFinalClear {
