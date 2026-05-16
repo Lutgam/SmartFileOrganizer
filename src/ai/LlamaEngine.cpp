@@ -1,5 +1,6 @@
 #include "LlamaEngine.h"
 #include "../core/TagManager.h"
+#include "../gui/LanguageManager.h"
 #include <QByteArray>
 #include <QDebug>
 #include <QSettings>
@@ -346,8 +347,28 @@ std::string LlamaEngine::generateResponseImpl(const std::string &prompt, int max
 }
 
 namespace {
+constexpr const char kJsonOnlyStrictEn[] =
+    "You MUST output ONLY a valid JSON object. DO NOT output any other text, no explanations, "
+    "no markdown formatting. Start your response with '{' and end with '}'.\n";
+
 constexpr const char kSuggestTagsFallbackJson[] =
     R"({"summary":"[系統提示：檔案內容過於複雜或包含特殊編碼，已切換至安全模式讀取檔名進行智能分類。]","tags":["通用文件"]})";
+
+QString analysisNonstandardFormatFallbackJson()
+{
+  auto &lm = LanguageManager::instance();
+  QJsonObject o;
+  o.insert(QStringLiteral("summary"), lm.getText(QStringLiteral("analysis_nonstandard_format_summary")));
+  QJsonArray ta;
+  ta.append(lm.getText(QStringLiteral("analysis_manual_classify_tag")));
+  o.insert(QStringLiteral("tags"), ta);
+  return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
+QString analysisParsedNoSummaryText()
+{
+  return LanguageManager::instance().getText(QStringLiteral("analysis_parsed_no_summary"));
+}
 
 std::string suggestTagsFailsafeJson()
 {
@@ -377,14 +398,20 @@ bool suggestTagsJsonObjectValid(const QJsonObject &obj)
   return false;
 }
 
-QString extractOutermostJsonObject(QString text)
+/// Brutal slice: first `{` through last `}`; if none, return compact fallback JSON for Qt to parse.
+QString brutalExtractJsonFromLlmResponse(QString text)
 {
-  text = stripMarkdownJsonFences(text);
+  text = stripMarkdownJsonFences(text.trimmed());
   const int startIndex = text.indexOf(QLatin1Char('{'));
   const int endIndex = text.lastIndexOf(QLatin1Char('}'));
-  if (startIndex != -1 && endIndex != -1 && endIndex > startIndex)
+  if (startIndex != -1 && endIndex != -1 && endIndex >= startIndex)
     return text.mid(startIndex, endIndex - startIndex + 1);
-  return text;
+  return analysisNonstandardFormatFallbackJson();
+}
+
+QString extractOutermostJsonObject(QString text)
+{
+  return brutalExtractJsonFromLlmResponse(text);
 }
 
 QString aiTagDedupKey(QString tag)
@@ -465,15 +492,15 @@ QJsonArray sanitizeTagsArray(const QJsonArray &arr, const QStringList &rejectedT
   }
 
   if (out.isEmpty())
-    out.append(QStringLiteral("通用文件"));
+    out.append(LanguageManager::instance().getText(QStringLiteral("analysis_manual_classify_tag")));
   return out;
 }
 
 QString coerceSummaryText(QString summary)
 {
   summary = summary.trimmed();
-  if (summary.isEmpty())
-    return summary;
+  if (summary.isEmpty() || summary == QStringLiteral("..."))
+    return analysisParsedNoSummaryText();
 
   if (summary.startsWith(QLatin1Char('{')) || summary.contains(QStringLiteral("\"summary\""))) {
     QJsonParseError err{};
@@ -487,6 +514,8 @@ QString coerceSummaryText(QString summary)
 
   if (summary.size() > 500)
     summary = summary.left(500).trimmed();
+  if (summary.isEmpty() || summary == QStringLiteral("..."))
+    summary = analysisParsedNoSummaryText();
   return summary;
 }
 
@@ -494,8 +523,8 @@ QJsonObject sanitizeSuggestTagsObject(const QJsonObject &obj, const QStringList 
 {
   QJsonObject out;
   QString summary = coerceSummaryText(obj.value(QStringLiteral("summary")).toString());
-  if (summary.isEmpty())
-    summary = QStringLiteral("檔案內容過於複雜，AI 無法產生有效文本。");
+  if (summary.isEmpty() || summary == QStringLiteral("..."))
+    summary = analysisParsedNoSummaryText();
   out.insert(QStringLiteral("summary"), summary);
   out.insert(QStringLiteral("tags"), sanitizeTagsArray(obj.value(QStringLiteral("tags")).toArray(), rejectedTags));
   return out;
@@ -538,8 +567,7 @@ std::string ensureSuggestTagsJson(const std::string &raw, const std::string &rej
     return suggestTagsFailsafeJson();
   }
 
-  const QString stripped = stripMarkdownJsonFences(llmOutputString);
-  QString rawResponse = extractOutermostJsonObject(stripped);
+  QString rawResponse = brutalExtractJsonFromLlmResponse(llmOutputString);
 
   QJsonParseError parseError{};
   QJsonDocument doc = QJsonDocument::fromJson(rawResponse.toUtf8(), &parseError);
@@ -554,6 +582,7 @@ std::string ensureSuggestTagsJson(const std::string &raw, const std::string &rej
   static const QRegularExpression re(QStringLiteral("\\{.*?\\}"));
   QRegularExpression jsonBlockRe(re);
   jsonBlockRe.setPatternOptions(QRegularExpression::DotMatchesEverythingOption);
+  const QString stripped = stripMarkdownJsonFences(llmOutputString);
   auto it = jsonBlockRe.globalMatch(stripped);
   while (it.hasNext()) {
     const QString block = extractOutermostJsonObject(it.next().captured(0).trimmed());
@@ -621,7 +650,8 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
     if (en) {
       prompt =
           "You are an expert file analyzer.\n"
-          "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n"
+          "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n" +
+          std::string(kJsonOnlyStrictEn) +
           "Output format: {\"summary\":\"...\",\"tags\":[\"...\",\"...\"]}\n"
           "\n"
           "This file has no reliable extractable text. Use filename and attributes only.\n"
@@ -668,7 +698,8 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
     if (en) {
       prompt =
           "You are an expert file analyzer.\n"
-          "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n"
+          "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n" +
+          std::string(kJsonOnlyStrictEn) +
           "Output format: {\"summary\":\"...\",\"tags\":[\"...\",\"...\"]}\n"
           "\n"
           "The file content is NOT readable (binary).\n"
@@ -709,7 +740,8 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
   if (en) {
     instruction =
         "You are an expert file analyzer.\n"
-        "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n"
+        "You MUST output ONLY a valid JSON object. NO markdown. NO backticks. NO explanations.\n" +
+        std::string(kJsonOnlyStrictEn) +
         "Output format: {\"summary\":\"...\",\"tags\":[\"...\",\"...\",\"...\"]}\n"
         "\n"
         "SUMMARY RULES:\n"
@@ -795,8 +827,10 @@ std::string LlamaEngine::suggestTagsImpl(const std::string &filename,
   }
 
   // Final hard reminder: JSON only.
+  prompt += kJsonOnlyStrictEn;
   prompt += en ? "\nONLY output the JSON object. NO markdown. NO backticks. NO extra text.\n"
-              : "\n只能輸出 JSON 物件本體，不要 markdown，不要反引號，不要任何額外文字。\n";
+              : "\n只能輸出 JSON 物件本體，不要 markdown，不要反引號，不要任何額外文字。\n"
+                "回應必須以 '{' 開頭、以 '}' 結尾。\n";
 
   // Return raw model output (JSON expected). C++ side will sanitize/parse with fallback.
   return generateResponseImpl(prompt, kMaxNewTokensSuggestTagsJson);

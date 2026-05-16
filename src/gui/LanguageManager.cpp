@@ -444,6 +444,18 @@ QString LanguageManager::getText(const QString &key) const {
         return en ? QStringLiteral("AI worker threads") : QStringLiteral("AI 併發執行緒數");
     if (key == QStringLiteral("settings_llama_cpu_threads"))
         return en ? QStringLiteral("LLM CPU threads (llama.cpp)") : QStringLiteral("LLM CPU 執行緒數 (llama.cpp)");
+    if (key == QStringLiteral("analysis_nonstandard_format_summary")) {
+        return en ? QStringLiteral("AI did not return a standard format")
+                  : QStringLiteral("AI 未回傳標準格式");
+    }
+    if (key == QStringLiteral("analysis_parsed_no_summary")) {
+        return en ? QStringLiteral("Parsed successfully but no summary was produced")
+                  : QStringLiteral("解析完成但無摘要");
+    }
+    if (key == QStringLiteral("analysis_manual_classify_tag")) {
+        return en ? QStringLiteral("Needs manual classification")
+                  : QStringLiteral("需手動分類");
+    }
     if (key == QStringLiteral("settings_o1_cache"))
         return en ? QStringLiteral("Enable O(1) metadata cache") : QStringLiteral("啟用 O(1) 快取機制");
     if (key == QStringLiteral("settings_o1_cache_tooltip")) {

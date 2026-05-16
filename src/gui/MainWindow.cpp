@@ -235,8 +235,8 @@ static bool sfSummaryAcceptableForStorage(const QString &s)
 static QString sfCoerceStorageSummary(QString summary)
 {
     summary = summary.trimmed();
-    if (summary.isEmpty())
-        return summary;
+    if (summary.isEmpty() || summary == QStringLiteral("..."))
+        return LanguageManager::instance().getText(QStringLiteral("analysis_parsed_no_summary"));
 
     if (summary.startsWith(QLatin1Char('{')) || summary.contains(QStringLiteral("\"summary\""))) {
         QJsonParseError err{};
@@ -250,6 +250,8 @@ static QString sfCoerceStorageSummary(QString summary)
 
     if (summary.size() > 500)
         summary = summary.left(500).trimmed();
+    if (summary.isEmpty() || summary == QStringLiteral("..."))
+        return LanguageManager::instance().getText(QStringLiteral("analysis_parsed_no_summary"));
     return summary;
 }
 
@@ -326,17 +328,16 @@ static std::vector<QString> sfFilterAiAnalysisTags(const QStringList &tagsIn,
         seenKeys.insert(key);
         out.push_back(t);
     }
+    if (out.empty())
+        out.push_back(LanguageManager::instance().getText(QStringLiteral("analysis_manual_classify_tag")));
     return out;
 }
 
-static const QString kAiParseFallbackSummary =
-    QStringLiteral("[系統提示：檔案內容過於複雜或包含特殊編碼，已切換至安全模式讀取檔名進行智能分類。]");
-static const QString kAiParseFallbackTag = QStringLiteral("通用文件");
-
 static void sfApplyAiParseFallback(QString &summary, std::vector<QString> &tags)
 {
-    summary = kAiParseFallbackSummary;
-    tags = {kAiParseFallbackTag};
+    auto &lm = LanguageManager::instance();
+    summary = lm.getText(QStringLiteral("analysis_nonstandard_format_summary"));
+    tags = {lm.getText(QStringLiteral("analysis_manual_classify_tag"))};
 }
 
 /// When JSON parsing fails, recover a one-line summary from prose ("摘要：…" / `summary:`).
@@ -2158,7 +2159,10 @@ void MainWindow::showAiSummaryForFile(const QString &filePath, const QString &su
     if (!m_aiSummaryEdit || QDir::cleanPath(currentFilePath()) != QDir::cleanPath(filePath))
         return;
 
-    if (summary.trimmed().isEmpty()) {
+    QString displaySummary = summary.trimmed();
+    if (displaySummary.isEmpty() || displaySummary == QStringLiteral("..."))
+        displaySummary = LanguageManager::instance().getText(QStringLiteral("analysis_parsed_no_summary"));
+    if (displaySummary.isEmpty()) {
         stopSummaryTypewriter();
         m_aiSummaryEdit->clear();
         return;
@@ -2166,12 +2170,12 @@ void MainWindow::showAiSummaryForFile(const QString &filePath, const QString &su
 
     if (!typewriter) {
         stopSummaryTypewriter();
-        m_aiSummaryEdit->setHtml(highlightTextAsHtml(summary, currentLocalSearchHighlightQuery()));
+        m_aiSummaryEdit->setHtml(highlightTextAsHtml(displaySummary, currentLocalSearchHighlightQuery()));
         return;
     }
 
     stopSummaryTypewriter();
-    m_summaryTypewriterFull = summary;
+    m_summaryTypewriterFull = displaySummary;
     m_summaryTypewriterFilePath = QDir::cleanPath(filePath);
     m_summaryTypewriterIndex = 0;
     m_aiSummaryEdit->clear();
@@ -4154,6 +4158,7 @@ void MainWindow::showFileContextMenu(const QPoint &pos) {
     // 4. 建立並配置右鍵選單
     QMenu menu(this);
     auto &lm = LanguageManager::instance();
+    QAction *actAnalyze = menu.addAction(lm.getText(QStringLiteral("btn_analyze")));
     QAction *actRename = menu.addAction(lm.getText(QStringLiteral("重新命名")));
     QAction *actDelete = menu.addAction(lm.getText(QStringLiteral("刪除")));
     menu.addSeparator();
@@ -4167,6 +4172,11 @@ void MainWindow::showFileContextMenu(const QPoint &pos) {
     }
 
     // 6. 處理對應的 Action 邏輯
+    if (chosen == actAnalyze) {
+        clearAnalysisCacheForReanalysis(filePath);
+        runSingleFileAnalysisForPath(filePath);
+        return;
+    }
     if (chosen == actRename) {
         const QFileInfo oldInfo(filePath);
         const QString oldName = oldInfo.fileName();
@@ -7179,8 +7189,9 @@ void MainWindow::clearAnalysisCacheForReanalysis(const QString &absPath)
         m_aiSummaryEdit->clear();
 }
 
-void MainWindow::executeSingleAnalysis() {
-    const QString fp = QDir::cleanPath(currentFilePath());
+void MainWindow::runSingleFileAnalysisForPath(const QString &absPath)
+{
+    const QString fp = QDir::cleanPath(absPath);
     logToUI(QStringLiteral("Analyze: %1").arg(fp.isEmpty() ? QStringLiteral("(no file)") : QFileInfo(fp).fileName()));
     if (fp.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("請先選擇檔案"));
@@ -7201,6 +7212,10 @@ void MainWindow::executeSingleAnalysis() {
     }
 
     startBatchAnalysis(QStringList{fp});
+}
+
+void MainWindow::executeSingleAnalysis() {
+    runSingleFileAnalysisForPath(currentFilePath());
 }
 
 void MainWindow::startAnalysisQueue(const QStringList &pathsIn, bool backgroundAuto, bool singleFileMode)
@@ -8108,25 +8123,45 @@ void MainWindow::persistAnalysisResultForFile(const QString &filePath,
         return;
     }
 
-    const QString summary = obj.value(QStringLiteral("summary")).toString().trimmed();
+    QString summary = obj.value(QStringLiteral("summary")).toString().trimmed();
+    if (summary.isEmpty() || summary == QStringLiteral("..."))
+        summary = LanguageManager::instance().getText(QStringLiteral("analysis_parsed_no_summary"));
+    summary = sfCoerceStorageSummary(summary);
     if (!sfSummaryAcceptableForStorage(summary))
         return;
+
+    QJsonObject persistObj = obj;
+    persistObj.insert(QStringLiteral("summary"), summary);
+    QJsonArray tagsForPersist = persistObj.value(QStringLiteral("tags")).toArray();
+    bool hasNonemptyTag = false;
+    for (const QJsonValue &v : tagsForPersist) {
+        if (!v.toString().trimmed().isEmpty()) {
+            hasNonemptyTag = true;
+            break;
+        }
+    }
+    if (!hasNonemptyTag) {
+        tagsForPersist = QJsonArray();
+        tagsForPersist.append(
+            LanguageManager::instance().getText(QStringLiteral("analysis_manual_classify_tag")));
+        persistObj.insert(QStringLiteral("tags"), tagsForPersist);
+    }
 
     int tagAddCount = 0;
     QString persistedHash = contentHashHex;
     {
         QMutexLocker locker(&tagMutex);
-        if (!obj.value(QStringLiteral("skip_content_hash")).toBool()) {
+        if (!persistObj.value(QStringLiteral("skip_content_hash")).toBool()) {
             if (persistedHash.isEmpty())
                 persistedHash = sha256HexOfFile(fp);
             if (!persistedHash.isEmpty()) {
-                tagManager.recordHashAnalysis(persistedHash, obj, false);
+                tagManager.recordHashAnalysis(persistedHash, persistObj, false);
                 tagManager.setFileContentHash(fp, persistedHash, false);
             }
         }
 
-        const bool manualTags = obj.value(QStringLiteral("tags_are_manual")).toBool(false);
-        const QJsonValue tagsV = obj.value(QStringLiteral("tags"));
+        const bool manualTags = persistObj.value(QStringLiteral("tags_are_manual")).toBool(false);
+        const QJsonValue tagsV = persistObj.value(QStringLiteral("tags"));
         if (tagsV.isArray()) {
             QSet<QString> seenLower;
             const QJsonArray arr = tagsV.toArray();
@@ -8148,8 +8183,8 @@ void MainWindow::persistAnalysisResultForFile(const QString &filePath,
     m_aiSummaryByPath.insert(fp, summary);
     m_folderReportAiTagAdds += tagAddCount;
 
-    if (!obj.value(QStringLiteral("skip_content_hash")).toBool() && !persistedHash.isEmpty()) {
-        m_analysisByContentHash.insert(persistedHash, obj);
+    if (!persistObj.value(QStringLiteral("skip_content_hash")).toBool() && !persistedHash.isEmpty()) {
+        m_analysisByContentHash.insert(persistedHash, persistObj);
         if (m_isBatchMode) {
             recordBatchPathForContentHash(persistedHash, fp);
             noteSameNameDifferentHashConflicts(fp, persistedHash);
@@ -8527,9 +8562,16 @@ void MainWindow::onAnalysisFinished() {
         // Model sometimes outputs multiple JSON objects back-to-back.
         // Extract all minimal "{...}" blocks and let the parser decide.
         const QString t = stripMarkdownFences(s);
+        QStringList out;
+        const int startIndex = t.indexOf(QLatin1Char('{'));
+        const int endIndex = t.lastIndexOf(QLatin1Char('}'));
+        if (startIndex != -1 && endIndex != -1 && endIndex >= startIndex) {
+            const QString outer = t.mid(startIndex, endIndex - startIndex + 1);
+            if (!outer.isEmpty())
+                out << outer;
+        }
         QRegularExpression re(QStringLiteral("\\{.*?\\}"));
         re.setPatternOptions(QRegularExpression::DotMatchesEverythingOption);
-        QStringList out;
         auto it = re.globalMatch(t);
         while (it.hasNext()) {
             const auto m = it.next();
@@ -8614,6 +8656,8 @@ void MainWindow::onAnalysisFinished() {
     }
 
     summary = sfCoerceStorageSummary(summary);
+    if (tags.empty())
+        tags.push_back(LanguageManager::instance().getText(QStringLiteral("analysis_manual_classify_tag")));
 
     if (fp.isEmpty()) {
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("分析完成（無選取檔案）")));

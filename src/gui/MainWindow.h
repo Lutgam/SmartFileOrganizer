@@ -146,6 +146,7 @@ private slots:
     void onSortChanged(int index);
 
     void executeSingleAnalysis();
+    void runSingleFileAnalysisForPath(const QString &absPath);
     void cancelAnalysis();
     void onAnalysisFinished();
 
