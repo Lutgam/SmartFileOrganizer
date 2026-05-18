@@ -1009,7 +1009,7 @@ static QString aiTagLabelForTreeDisplay(const QString &raw)
     return tagChipDisplayStripLeadingEmoji(stripped);
 }
 
-static QString sfDisplayPathStripDrawerEmoji(QString path)
+QString sfDisplayPathStripDrawerEmoji(QString path)
 {
     path = path.trimmed();
     if (path.isEmpty())
@@ -3316,7 +3316,7 @@ void MainWindow::setupFourColumnLayout() {
     tagsHeader->addStretch(1);
     chkRecursive = new QCheckBox(QStringLiteral("包含子資料夾"), this);
     chkRecursive->setChecked(false);
-    connect(chkRecursive, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState) {
+    connect(chkRecursive, &QCheckBox::stateChanged, this, [this](int) {
         if (fileListMode == FileListMode::PhysicalFolder) {
             scanFiles();
             sortFileList();
