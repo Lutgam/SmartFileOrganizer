@@ -1,0 +1,232 @@
+name: Build
+
+on:
+  workflow_dispatch: # allows manual triggering
+
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "V[0-9]+.[0-9]+"
+      - "V[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+env:
+  QT_VERSION: "6.10.1"
+  DIRECTORY: "SmartFileOrganizer"
+
+jobs:
+  dist:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [linux_x64, macos_arm64]
+        include:
+          - build: linux_x64
+            os: ubuntu-latest
+            arch: x86_64
+          - build: macos_arm64
+            os: macos-latest
+            arch: aarch64
+          - build: windows_x64
+            os: windows-latest
+            arch: x86_64
+
+    steps:
+      - if: ${{ matrix.os == 'windows-latest' }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{env.QT_VERSION}}
+          arch: win64_mingw
+
+      - name: Install Build Dependencies
+        shell: bash
+        run: |
+          if [[ ${{ matrix.build }} == "macos_arm64" ]]; then
+            brew upgrade
+            brew install qt vulkan-headers dylibbundler
+            # it's /opt/homebrew/opt/qt/
+            QT_PATH=$(brew --prefix qt@6)
+            echo QT_PATH=$QT_PATH >> $GITHUB_ENV
+            # build macdeployqt
+            # cd ~
+            # git clone https://github.com/GDATASoftwareAG/macdeployqt
+            # mkdir -p macdeployqt/build && cd macdeployqt/build
+            # cmake -GNinja -S .. -DCMAKE_BUILD_TYPE=Release
+            # cmake --build .
+            # cp macdeployqt /usr/local/bin/macdeployqt
+            # cp macdeployqt /usr/local/bin/macdeployqt6
+          elif [[ ${{ matrix.build }} == "windows_x64" ]]; then
+            choco install zip tree 7zip wget
+          elif [[ ${{ matrix.build }} == "linux_x64" ]]; then
+            sudo apt update -y
+            sudo apt install -y ninja-build cmake wget qt6-base-dev qt6-wayland libfuse2 \
+              build-essential mesa-vulkan-drivers glslang-tools glslc libvulkan-dev libssl-dev \
+              libwayland-client0 libwayland-egl1 libwayland-cursor0 libxkbcommon-dev
+          fi
+
+      - if: ${{ matrix.os == 'ubuntu-latest' }}
+        name: Install AppImage tools
+        run: |
+          wget https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${{ matrix.arch }}.AppImage
+          sudo mv linuxdeploy-${{ matrix.arch }}.AppImage /usr/local/bin/linuxdeploy
+          sudo chmod +x /usr/local/bin/linuxdeploy
+          wget https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-${{ matrix.arch }}.AppImage 
+          sudo mv linuxdeploy-plugin-qt-${{ matrix.arch }}.AppImage /usr/local/bin/linuxdeploy-plugin-qt
+          sudo chmod +x /usr/local/bin/linuxdeploy-plugin-qt
+          wget https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${{ matrix.arch }}.AppImage
+          sudo mv appimagetool-${{ matrix.arch }}.AppImage /usr/local/bin/appimagetool
+          sudo chmod +x /usr/local/bin/appimagetool
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build release package
+        shell: bash
+        run: |
+          mkdir -p build dist/${{ matrix.build }}
+          if [[ ${{ matrix.build }} == "windows_x64" ]]; then
+            cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+            ninja -C build
+            mkdir -p build/bin
+            cp build/${{ env.DIRECTORY }}.exe build/bin/${{ env.DIRECTORY }}.exe
+            windeployqt.exe build/bin/${{ env.DIRECTORY }}.exe
+
+            # Dirty way to get libgomp-1.dll
+            mkdir -p temp
+            pushd temp
+            wget -O mingw.7z https://github.com/niXman/mingw-builds-binaries/releases/download/13.1.0-rt_v11-rev1/x86_64-13.1.0-release-posix-seh-msvcrt-rt_v11-rev1.7z
+            7z e mingw.7z -y
+            popd
+            cp temp/libgomp-1.dll build/bin
+
+            pushd build/bin
+            zip -r ../../dist/${{ matrix.build }}/${{ env.DIRECTORY }}-${{ matrix.build }}.zip .
+            popd
+          elif [[ ${{ matrix.build }} == "macos_arm64" ]]; then
+            cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+            ninja -C build
+            APP_DIR="${{ env.DIRECTORY }}.app"
+            MACOS_DIR="$APP_DIR/Contents/MacOS"
+            RESOURCES_DIR="$APP_DIR/Contents/Resources"
+            FRAMEWORKS_DIR="$APP_DIR/Contents/Frameworks"
+            mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
+            
+            # Move binaries
+            mv build/${{ env.DIRECTORY }} "$MACOS_DIR"
+            mv build/bin/ggml-* "$RESOURCES_DIR"
+            ls -al build/bin
+            mv build/bin/* "$FRAMEWORKS_DIR"
+            cp assets/MacOS/Info.plist "$APP_DIR/Contents/Info.plist"
+            
+            # Add rpath to executable
+            # usage: install_name_tool -add_rpath /path/to/lib your_executable
+            install_name_tool -add_rpath @executable_path/../Frameworks "$MACOS_DIR/${{ env.DIRECTORY }}"
+
+            # check rpath
+            ${{ env.QT_PATH }}/bin/macdeployqt "$APP_DIR" -libpath=${{ env.QT_PATH }}/lib
+            otool -l "$MACOS_DIR/${{ env.DIRECTORY }}"
+
+            sips -s format icns "assets/icon/icon.png" --out "$RESOURCES_DIR/icon.icns"
+            zip -r dist/${{ matrix.build }}/${{ env.DIRECTORY }}-${{ matrix.build }}.zip "$APP_DIR"
+            hdiutil create -volname "${{ env.DIRECTORY }}" -srcfolder "$APP_DIR" -ov -format UDZO "dist/${{ matrix.build }}/${{ env.DIRECTORY }}-${{ matrix.build }}.dmg"
+          elif [[ ${{ matrix.build }} == "linux_x64" ]]; then
+            cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+              -DGGML_VULKAN=OFF \
+              -DCMAKE_C_FLAGS="$CFLAGS -march=x86-64-v3 -O3" -DCMAKE_CXX_FLAGS="$CXXFLAGS -march=x86-64-v3 -O3"
+            ninja -C build
+            mkdir -p ${{ env.DIRECTORY }} AppDir/usr/bin AppDir/usr/lib64 AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/512x512/apps
+            cp -r build/bin/* ${{ env.DIRECTORY }}/
+            cp build/${{ env.DIRECTORY }} ${{ env.DIRECTORY }}/
+            tar -czvf ${{ env.DIRECTORY }}-${{ matrix.build }}.tar.gz ${{ env.DIRECTORY }}
+            cp ${{ env.DIRECTORY }}-${{ matrix.build }}.tar.gz dist/${{ matrix.build }}
+
+            cp -r build/bin/* AppDir/usr/lib64
+            cp build/${{ env.DIRECTORY }} AppDir/usr/bin
+            cp assets/linux/${{ env.DIRECTORY }}.desktop AppDir/usr/share/applications
+            cp assets/icon/icon.png AppDir/usr/share/icons/hicolor/512x512/apps/icon.png
+
+            export EXTRA_PLATFORM_PLUGINS="libqwayland-generic.so;libqwayland-egl.so"
+            export EXTRA_QT_MODULES="waylandcompositor"
+            linuxdeploy --plugin=qt --appdir AppDir
+
+            if [ "${{ matrix.arch }}" == "x86_64" ]; then
+              ARCH=x86_64 appimagetool AppDir ${{ env.DIRECTORY }}-${{ matrix.build }}.AppImage
+            else
+              ARCH=arm_aarch64 appimagetool AppDir ${{ env.DIRECTORY }}-${{ matrix.build }}.AppImage
+            fi
+            mv ${{ env.DIRECTORY }}-${{ matrix.build }}.AppImage dist/${{ matrix.build }}
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifact-${{ matrix.build }}
+          path: |
+            dist/${{ matrix.build }}
+
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs: [dist]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+
+      - name: Calculate tag name
+        run: |
+          name=dev
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            name=${GITHUB_REF:10}
+          fi
+          echo val=$name >> $GITHUB_OUTPUT
+          echo TAG=$name >> $GITHUB_ENV
+        id: tagname
+
+      - name: Build archive
+        run: |
+          set -ex
+
+          rm -rf tmp
+          mkdir tmp
+          mkdir dist
+
+          for dir in artifact*; do
+            platform=${dir#"artifact-"}
+            unset exe
+            if [[ $platform =~ "windows" ]]; then
+              # zip -r dist/${{ env.DIRECTORY }}-${platform}.zip $dir
+              cp $dir/${{ env.DIRECTORY }}-${platform}.zip dist
+            elif [[ $platform =~ "macos" ]]; then
+              cp $dir/${{ env.DIRECTORY }}-${platform}.dmg dist
+              cp $dir/${{ env.DIRECTORY }}-${platform}.zip dist
+            elif [[ $platform =~ "linux" ]]; then
+              cp $dir/${{ env.DIRECTORY }}-${platform}.AppImage dist
+              cp $dir/${{ env.DIRECTORY }}-${platform}.tar.gz dist
+            fi
+          done
+
+      - name: Upload as artifact
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/*
+
+      - name: Upload binaries to release
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/*
+          file_glob: true
+          tag: ${{ steps.tagname.outputs.val }}
+          overwrite: true
+
+      - name: Extract version
+        id: extract-version
+        run: |
+          printf "%s=%s\n" >> $GITHUB_OUTPUT tag-name "${GITHUB_REF#refs/tags/}"
