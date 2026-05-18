@@ -118,7 +118,7 @@ jobs:
             
             # Move binaries
             mv build/${{ env.DIRECTORY }} "$MACOS_DIR"
-            mv build/bin/ggml-* "$RESOURCES_DIR"
+            mv build/bin/ggml-* "$RESOURCES_DIR" || true
             ls -al build/bin
             mv build/bin/* "$FRAMEWORKS_DIR"
             cp assets/MacOS/Info.plist "$APP_DIR/Contents/Info.plist"
