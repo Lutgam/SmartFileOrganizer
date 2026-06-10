@@ -85,6 +85,12 @@
 
 #include <QtGlobal>
 
+#ifdef Q_OS_WIN
+#  include <windows.h>
+#elif defined(Q_OS_DARWIN)
+#  include <sys/sysctl.h>
+#endif
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -1851,6 +1857,172 @@ void MainWindow::clearAnalysisWorkFlagsAndSyncUi()
     syncFolderNavigationLockState();
 }
 
+void MainWindow::onFileSelectionChanged()
+{
+    if (!fileList || !m_batchSelectionBar) return;
+    const QList<QListWidgetItem *> sel = fileList->selectedItems();
+    const int n = sel.size();
+    const bool show = n >= 2;
+    m_batchSelectionBar->setVisible(show);
+    if (show) {
+        if (m_batchSelectionLabel)
+            m_batchSelectionLabel->setText(QStringLiteral("已選取 %1 個檔案").arg(n));
+        // Enable archive button only if at least one selected file has tags
+        if (m_btnBatchArchiveSelected) {
+            bool anyTagged = false;
+            for (QListWidgetItem *it : sel) {
+                const QString fp = QDir::cleanPath(it->data(Qt::UserRole).toString());
+                QMutexLocker locker(&tagMutex);
+                if (!tagManager.getTags(fp).empty()) { anyTagged = true; break; }
+            }
+            m_btnBatchArchiveSelected->setEnabled(anyTagged);
+            m_btnBatchArchiveSelected->setToolTip(anyTagged
+                ? QStringLiteral("將已標記的檔案依 AI 標籤歸檔")
+                : QStringLiteral("選取的檔案尚未分析，請先執行 AI 分析"));
+        }
+    }
+    if (n == 1)
+        onFileSelected(sel.first());
+}
+
+// executeBatchArchiveForSelectedFiles is defined after ArchiveDialog (see below)
+
+void MainWindow::showEmptyStatePage()
+{
+    if (m_fileListPageStack && m_emptyStatePage)
+        m_fileListPageStack->setCurrentWidget(m_emptyStatePage);
+}
+
+void MainWindow::hideEmptyStatePage()
+{
+    if (m_fileListPageStack && m_fileListPageStack->currentWidget() == m_emptyStatePage)
+        m_fileListPageStack->setCurrentIndex(0);
+}
+
+void MainWindow::updateNextStepHint()
+{
+    if (!m_nextStepHint) return;
+    const bool hasWorkspace = !rootPath.isEmpty();
+    const bool hasFiles = fileList && fileList->count() > 0;
+    const bool hasAnalysis = hasFiles && !m_analysisByContentHash.isEmpty();
+    const bool modelReady = m_llamaEngine && m_llamaEngine->isModelLoaded();
+
+    QString hint;
+    if (!hasWorkspace)
+        hint = QStringLiteral("💡 點「選擇工作區」或「📂 開啟資料夾」開始");
+    else if (!hasFiles)
+        hint = QStringLiteral("💡 目前資料夾沒有可分析的檔案，試試「包含子資料夾」");
+    else if (!modelReady)
+        hint = QStringLiteral("⏳ AI 模型載入中，完成後可按「開始分析」");
+    else if (!hasAnalysis)
+        hint = QStringLiteral("💡 檔案已載入！按「⚡ 開始分析」讓 AI 幫每個檔案貼標籤");
+    else
+        hint = QStringLiteral("✅ 分析完成！輸入關鍵字搜尋，或按「實體歸檔」整理到資料夾");
+
+    m_nextStepHint->setText(hint);
+    m_nextStepHint->setVisible(true);
+}
+
+void MainWindow::showFirstRunCard()
+{
+    if (m_firstRunCard) return;
+    if (QSettings().value(QStringLiteral("ui/first_run_done"), false).toBool()) return;
+
+    m_firstRunCard = new QWidget(this);
+    m_firstRunCard->setObjectName(QStringLiteral("firstRunCard"));
+    m_firstRunCard->setStyleSheet(QStringLiteral(
+        "#firstRunCard { background: #0f172a; border: 1.5px solid #3b82f6;"
+        "  border-radius: 14px; }"));
+    m_firstRunCard->setFixedWidth(360);
+    auto *cardLay = new QVBoxLayout(m_firstRunCard);
+    cardLay->setContentsMargins(20, 18, 20, 18);
+    cardLay->setSpacing(10);
+
+    auto *cardTitle = new QLabel(QStringLiteral("👋  歡迎使用 Smart File Organizer"), m_firstRunCard);
+    cardTitle->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: #f1f5f9; background: transparent;"));
+    cardTitle->setWordWrap(true);
+    cardLay->addWidget(cardTitle);
+
+    const QStringList tips = {
+        QStringLiteral("① 按右上角 <b>💡 簡易模式</b> 降低複雜度"),
+        QStringLiteral("② 選好資料夾後按 <b>⚡ 開始分析</b>，AI 自動貼標籤"),
+        QStringLiteral("③ 在搜尋框輸入 <b>自然語言</b>，例如「去年的合約」"),
+    };
+    for (const QString &tip : tips) {
+        auto *lbl = new QLabel(tip, m_firstRunCard);
+        lbl->setWordWrap(true);
+        lbl->setTextFormat(Qt::RichText);
+        lbl->setStyleSheet(QStringLiteral("font-size: 12px; color: #94a3b8; background: transparent; padding: 2px 0;"));
+        cardLay->addWidget(lbl);
+    }
+
+    auto *dismissBtn = new QPushButton(QStringLiteral("我知道了  👍"), m_firstRunCard);
+    dismissBtn->setCursor(Qt::PointingHandCursor);
+    dismissBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #1d4ed8; color: white; border: none; border-radius: 6px;"
+        "  padding: 7px 0; font-size: 13px; font-weight: 600; }"
+        "QPushButton:hover { background: #2563eb; }"));
+    connect(dismissBtn, &QPushButton::clicked, this, [this]() {
+        QSettings().setValue(QStringLiteral("ui/first_run_done"), true);
+        if (m_firstRunCard) { m_firstRunCard->hide(); m_firstRunCard->deleteLater(); m_firstRunCard = nullptr; }
+    });
+    cardLay->addWidget(dismissBtn);
+
+    // Position in bottom-right of the main window
+    m_firstRunCard->adjustSize();
+    const QSize winSz = size();
+    m_firstRunCard->move(winSz.width() - m_firstRunCard->width() - 24,
+                         winSz.height() - m_firstRunCard->height() - 60);
+    m_firstRunCard->raise();
+    m_firstRunCard->show();
+}
+
+void MainWindow::loadSimpleModeFromSettings()
+{
+    const bool simple = QSettings().value(QStringLiteral("ui/simple_mode"), false).toBool();
+    if (m_btnModeToggle) m_btnModeToggle->setChecked(simple);
+    m_simpleModeEnabled = simple;
+    applySimpleMode(simple);
+}
+
+void MainWindow::applySimpleMode(bool enable)
+{
+    // Toggle panel visibility
+    if (tagsPanel) tagsPanel->setVisible(!enable);
+    if (foldersPanel) foldersPanel->setVisible(!enable);
+    if (m_simpleModeBar) m_simpleModeBar->setVisible(enable);
+
+    // Hide advanced search mode dropdown in simple mode
+    if (m_cmbSearchMode) m_cmbSearchMode->setVisible(!enable);
+
+    // Hide/show tabs
+    if (m_mainTabWidget) {
+        const int graphIdx = m_mainTabWidget->indexOf(m_graphTab);
+        const int taskIdx  = m_mainTabWidget->indexOf(m_taskCenterTab);
+        if (graphIdx >= 0) m_mainTabWidget->setTabVisible(graphIdx, !enable);
+        if (taskIdx  >= 0) m_mainTabWidget->setTabVisible(taskIdx,  !enable);
+        // Switch back to workspace tab if current tab is now hidden
+        if (enable) {
+            const int wsIdx = m_mainTabWidget->indexOf(m_workspaceTab);
+            if (wsIdx >= 0) m_mainTabWidget->setCurrentIndex(wsIdx);
+        }
+    }
+
+    // Update toggle button label
+    if (m_btnModeToggle)
+        m_btnModeToggle->setText(enable ? QStringLiteral("🔬 專業模式") : QStringLiteral("💡 簡易模式"));
+
+    // Update omnibox placeholder
+    if (m_heroOmnibox)
+        m_heroOmnibox->setPlaceholderText(enable
+            ? QStringLiteral("輸入關鍵字或問句搜尋檔案…")
+            : QStringLiteral("搜尋 / 語意查詢"));
+
+    // Enable simple mode analyze button when workspace is loaded
+    if (m_btnSimpleAnalyze)
+        m_btnSimpleAnalyze->setEnabled(enable && !rootPath.isEmpty());
+}
+
 void MainWindow::lockUI()
 {
     if (m_isAnalysisRunning)
@@ -2290,6 +2462,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_cmbSearchMode = new QComboBox(m_workspaceTopBar);
     m_cmbSearchMode->setFixedHeight(40);
     m_cmbSearchMode->setMinimumWidth(220);
+    m_cmbSearchMode->setToolTip(QStringLiteral(
+        "關鍵字：依檔名搜尋，速度快\n"
+        "AI 語意：輸入自然語言（如「去年的合約」），AI 理解意圖後搜尋，需先完成分析"));
     m_cmbSearchMode->addItem(QStringLiteral("索引: 當前資料夾（關鍵字）"), HeroSearchScope_LocalFolder);
     m_cmbSearchMode->addItem(QStringLiteral("索引: 全域知識庫（AI 語意）"), HeroSearchScope_GlobalSemantic);
     m_cmbSearchMode->setCurrentIndex(0);
@@ -2327,7 +2502,36 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     heroLay->addStretch(1);
     heroLay->addWidget(heroField, 0, Qt::AlignHCenter);
     heroLay->addStretch(1);
+
+    // Simple mode action bar (shown only in simple mode, above the splitter)
+    m_simpleModeBar = new QWidget(m_workspaceTab);
+    m_simpleModeBar->setVisible(false);
+    m_simpleModeBar->setStyleSheet(QStringLiteral(
+        "QWidget#simpleModeBar { background: #0f172a; border-bottom: 1px solid #1e3a5f; }"
+        "QPushButton { background: #1d4ed8; color: white; border: none; border-radius: 8px;"
+        "  padding: 10px 24px; font-size: 14px; font-weight: 600; }"
+        "QPushButton:hover { background: #2563eb; }"
+        "QPushButton#simpleAnalyzeBtn { background: #059669; }"
+        "QPushButton#simpleAnalyzeBtn:hover { background: #10b981; }"
+        "QPushButton#simpleAnalyzeBtn:disabled { background: rgba(5,150,105,0.35); }"));
+    m_simpleModeBar->setObjectName(QStringLiteral("simpleModeBar"));
+    auto *simpleBarLay = new QHBoxLayout(m_simpleModeBar);
+    simpleBarLay->setContentsMargins(20, 10, 20, 10);
+    simpleBarLay->setSpacing(12);
+    m_simpleModeHint = new QLabel(QStringLiteral("📁 選擇資料夾，AI 自動幫你整理和搜尋所有檔案"), m_simpleModeBar);
+    m_simpleModeHint->setStyleSheet(QStringLiteral("QLabel { color: #94a3b8; font-size: 13px; background: transparent; }"));
+    m_btnSimpleFolderPicker = new QPushButton(QStringLiteral("📂 開啟資料夾"), m_simpleModeBar);
+    m_btnSimpleAnalyze = new QPushButton(QStringLiteral("⚡ 一鍵分析"), m_simpleModeBar);
+    m_btnSimpleAnalyze->setObjectName(QStringLiteral("simpleAnalyzeBtn"));
+    m_btnSimpleAnalyze->setEnabled(false);
+    connect(m_btnSimpleFolderPicker, &QPushButton::clicked, this, &MainWindow::openFolder);
+    connect(m_btnSimpleAnalyze, &QPushButton::clicked, this, &MainWindow::onStartAnalysisClicked);
+    simpleBarLay->addWidget(m_simpleModeHint, 1);
+    simpleBarLay->addWidget(m_btnSimpleFolderPicker);
+    simpleBarLay->addWidget(m_btnSimpleAnalyze);
+
     workspaceLayout->addWidget(m_workspaceTopBar);
+    workspaceLayout->addWidget(m_simpleModeBar);
 
     setupFourColumnLayout();
     wirePreviewControlSignals();
@@ -2525,6 +2729,26 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     setupContextMenus();
 
+    // Mode toggle button in the top-right corner of the main tab widget
+    m_btnModeToggle = new QPushButton(QStringLiteral("💡 簡易模式"), this);
+    m_btnModeToggle->setFlat(true);
+    m_btnModeToggle->setCursor(Qt::PointingHandCursor);
+    m_btnModeToggle->setToolTip(QStringLiteral("切換簡易 / 專業模式"));
+    m_btnModeToggle->setStyleSheet(QStringLiteral(
+        "QPushButton { color: #94a3b8; font-size: 12px; background: transparent;"
+        "  border: 1px solid #334155; border-radius: 12px; padding: 2px 10px; }"
+        "QPushButton:hover { color: #e2e8f0; border-color: #64748b; }"
+        "QPushButton:checked { color: #fbbf24; border-color: #fbbf24; background: rgba(251,191,36,0.1); }"));
+    m_btnModeToggle->setCheckable(true);
+    m_mainTabWidget->setCornerWidget(m_btnModeToggle, Qt::TopRightCorner);
+    connect(m_btnModeToggle, &QPushButton::toggled, this, [this](bool checked) {
+        m_simpleModeEnabled = checked;
+        applySimpleMode(checked);
+        QSettings().setValue(QStringLiteral("ui/simple_mode"), checked);
+    });
+
+    loadSimpleModeFromSettings();
+
     m_dirWatcher = new QFileSystemWatcher(this);
     connect(m_dirWatcher, &QFileSystemWatcher::directoryChanged, this, &MainWindow::onDirectoryChanged);
     m_dirDebounceTimer = new QTimer(this);
@@ -2620,6 +2844,29 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     if (m_graphWidget)
         m_graphWidget->buildGraph();
 
+    // Hardware RAM check
+    {
+        qint64 ramMb = 0;
+#if defined(Q_OS_WIN)
+        MEMORYSTATUSEX mem;
+        mem.dwLength = sizeof(mem);
+        if (GlobalMemoryStatusEx(&mem))
+            ramMb = static_cast<qint64>(mem.ullTotalPhys >> 20);
+#elif defined(Q_OS_DARWIN)
+        int64_t memBytes = 0;
+        size_t sz = sizeof(memBytes);
+        sysctlbyname("hw.memsize", &memBytes, &sz, nullptr, 0);
+        ramMb = memBytes >> 20;
+#endif
+        if (ramMb > 0 && ramMb < 4096) {
+            QMessageBox::warning(this, QStringLiteral("硬體需求警告"),
+                QStringLiteral("偵測到系統記憶體僅 %1 MB（< 4 GB）。\n"
+                               "AI 推論需要至少 4 GB RAM，建議 8 GB 以上。\n"
+                               "程式仍可啟動，但模型載入或推論可能失敗或極慢。")
+                    .arg(ramMb));
+        }
+    }
+
     const QString modelPath = resolveModelPath();
     if (!QFile::exists(modelPath)) {
         lblStatus->setText(LanguageManager::instance()
@@ -2643,6 +2890,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         disconnect(btnPhysicalArchive, nullptr, nullptr, nullptr);
         connect(btnPhysicalArchive, &QPushButton::clicked, this, [this]() { executePhysicalArchive(); });
     }
+
+    // Show empty state if no files loaded, and first-run card on fresh install
+    QTimer::singleShot(200, this, [this]() {
+        if (!fileList || fileList->count() == 0)
+            showEmptyStatePage();
+        updateNextStepHint();
+        showFirstRunCard();
+    });
 }
 
 void MainWindow::onDirectoryChanged(const QString &path) {
@@ -2811,6 +3066,7 @@ void MainWindow::onWorkspaceFactoryReset()
     tagManager.factoryResetWorkspaceData();
     if (!rootPath.trimmed().isEmpty()) {
         tagManager.loadTags(rootPath.toStdString());
+        tagManager.repairMalformedTagKeys();
     }
     loadCorrectionLogs();
 
@@ -2848,6 +3104,13 @@ void MainWindow::updateAllTexts() {
 
     m_llamaEngine->setOutputLanguage(lm.language() == LanguageManager::Language::EN_US ? QStringLiteral("en_US")
                                                                                    : QStringLiteral("zh_TW"));
+
+    if (m_btnModeToggle)
+        m_btnModeToggle->setText(m_simpleModeEnabled ? QStringLiteral("🔬 專業模式") : QStringLiteral("💡 簡易模式"));
+    if (m_btnSimpleFolderPicker)
+        m_btnSimpleFolderPicker->setText(QStringLiteral("📂 ") + lm.getText(QStringLiteral("open_folder")));
+    if (m_btnSimpleAnalyze)
+        m_btnSimpleAnalyze->setText(QStringLiteral("⚡ ") + lm.getText(QStringLiteral("btn_start_analysis")));
 
     if (btnAnalyzeFile) btnAnalyzeFile->setText(lm.getText(QStringLiteral("btn_analyze")));
     if (btnCancelAnalysis) btnCancelAnalysis->setText(lm.getText(QStringLiteral("btn_cancel")));
@@ -3316,7 +3579,7 @@ void MainWindow::setupFourColumnLayout() {
     tagsHeader->addStretch(1);
     chkRecursive = new QCheckBox(QStringLiteral("包含子資料夾"), this);
     chkRecursive->setChecked(false);
-    connect(chkRecursive, &QCheckBox::stateChanged, this, [this](int) {
+    connect(chkRecursive, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState) {
         if (fileListMode == FileListMode::PhysicalFolder) {
             scanFiles();
             sortFileList();
@@ -3327,6 +3590,9 @@ void MainWindow::setupFourColumnLayout() {
 
     m_btnStartAnalysis = new QPushButton(
         LanguageManager::instance().getText(QStringLiteral("btn_start_ai_analysis")), this);
+    m_btnStartAnalysis->setToolTip(QStringLiteral(
+        "掃描整個工作區，分析所有尚未處理的檔案\n"
+        "AI 會在背景持續運行，可邊瀏覽邊等待結果"));
     m_btnStartAnalysis->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(m_btnStartAnalysis, &QPushButton::clicked, this, &MainWindow::onStartAnalysisClicked);
     tagsLayout->addWidget(m_btnStartAnalysis);
@@ -3527,6 +3793,9 @@ void MainWindow::setupFourColumnLayout() {
     fileControlsRow->addStretch(1);
 
     btnBatchAnalyze = new QPushButton(QStringLiteral("資料夾分析"), this);
+    btnBatchAnalyze->setToolTip(QStringLiteral(
+        "批次分析目前資料夾內所有尚未分析的檔案\n"
+        "AI 會逐一閱讀每個檔案並自動生成中文標籤和摘要"));
     btnBatchAnalyze->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
     connect(btnBatchAnalyze, &QPushButton::clicked, this, [this]() { startBatchAnalysis(); });
     fileControlsRow->addWidget(btnBatchAnalyze, 0);
@@ -3571,9 +3840,11 @@ void MainWindow::setupFourColumnLayout() {
     fileList = new QListWidget(this);
     fileList->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     fileList->setContextMenuPolicy(Qt::CustomContextMenu);
+    fileList->setSelectionMode(QAbstractItemView::ExtendedSelection);
     fileList->setItemDelegate(new FileItemDelegate(fileList));
     connect(fileList, &QListWidget::itemClicked, this, &MainWindow::onFileSelected);
     connect(fileList, &QListWidget::customContextMenuRequested, this, &MainWindow::showFileContextMenu);
+    connect(fileList, &QListWidget::itemSelectionChanged, this, &MainWindow::onFileSelectionChanged);
     connect(fileList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
         if (!item) return;
         const QString absPath = item->data(Qt::UserRole).toString();
@@ -3581,6 +3852,7 @@ void MainWindow::setupFourColumnLayout() {
         QDesktopServices::openUrl(QUrl::fromLocalFile(absPath));
     });
     fileList->installEventFilter(this);
+    installEventFilter(this);
 
     m_bgQueueFloatingMonitor = new QWidget(fileList);
     m_bgQueueFloatingMonitor->setObjectName(QStringLiteral("bgQueueFloatingMonitor"));
@@ -3615,7 +3887,114 @@ void MainWindow::setupFourColumnLayout() {
     busyLay->addStretch(1);
     m_fileListPageStack->addWidget(semanticBusyPage);
 
+    // Page 2: empty state guide
+    m_emptyStatePage = new QWidget(this);
+    m_emptyStatePage->setStyleSheet(QStringLiteral("QWidget { background: transparent; }"));
+    auto *emptyLay = new QVBoxLayout(m_emptyStatePage);
+    emptyLay->setContentsMargins(24, 32, 24, 32);
+    emptyLay->setSpacing(0);
+    emptyLay->addStretch(1);
+
+    auto *emptyIcon = new QLabel(QStringLiteral("📁"), m_emptyStatePage);
+    emptyIcon->setAlignment(Qt::AlignCenter);
+    emptyIcon->setStyleSheet(QStringLiteral("font-size: 52px; background: transparent;"));
+    emptyLay->addWidget(emptyIcon);
+    emptyLay->addSpacing(16);
+
+    auto *emptyTitle = new QLabel(QStringLiteral("選擇一個資料夾，開始整理你的檔案"), m_emptyStatePage);
+    emptyTitle->setAlignment(Qt::AlignCenter);
+    emptyTitle->setWordWrap(true);
+    emptyTitle->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700; color: #e2e8f0; background: transparent;"));
+    emptyLay->addWidget(emptyTitle);
+    emptyLay->addSpacing(20);
+
+    struct Step { QString num; QString title; QString desc; };
+    const QList<Step> steps = {
+        { QStringLiteral("①"), QStringLiteral("開啟資料夾"),   QStringLiteral("點左側「選擇工作區」或上方「📂 開啟資料夾」") },
+        { QStringLiteral("②"), QStringLiteral("一鍵 AI 分析"), QStringLiteral("按「⚡ 開始分析」，AI 自動為每個檔案貼上繁中標籤") },
+        { QStringLiteral("③"), QStringLiteral("搜尋 & 整理"),  QStringLiteral("輸入關鍵字自然語言搜尋，或用「實體歸檔」整理到資料夾") },
+    };
+    for (const auto &s : steps) {
+        auto *row = new QWidget(m_emptyStatePage);
+        row->setStyleSheet(QStringLiteral(
+            "QWidget { background: rgba(30,58,95,0.45); border: 1px solid rgba(59,130,246,0.3);"
+            "  border-radius: 8px; }"));
+        auto *rowLay = new QHBoxLayout(row);
+        rowLay->setContentsMargins(14, 10, 14, 10);
+        auto *numLbl = new QLabel(s.num, row);
+        numLbl->setFixedWidth(24);
+        numLbl->setStyleSheet(QStringLiteral("font-size: 18px; color: #60a5fa; background: transparent; border: none;"));
+        auto *textCol = new QVBoxLayout();
+        auto *titleLbl = new QLabel(s.title, row);
+        titleLbl->setStyleSheet(QStringLiteral("font-size: 13px; font-weight: 600; color: #e2e8f0; background: transparent; border: none;"));
+        auto *descLbl = new QLabel(s.desc, row);
+        descLbl->setStyleSheet(QStringLiteral("font-size: 11px; color: #94a3b8; background: transparent; border: none;"));
+        textCol->addWidget(titleLbl);
+        textCol->addWidget(descLbl);
+        rowLay->addWidget(numLbl);
+        rowLay->addLayout(textCol, 1);
+        emptyLay->addWidget(row);
+        emptyLay->addSpacing(8);
+    }
+    emptyLay->addSpacing(20);
+
+    auto *emptyOpenBtn = new QPushButton(QStringLiteral("📂  開啟資料夾"), m_emptyStatePage);
+    emptyOpenBtn->setFixedHeight(44);
+    emptyOpenBtn->setCursor(Qt::PointingHandCursor);
+    emptyOpenBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #1d4ed8; color: white; border: none; border-radius: 8px;"
+        "  font-size: 14px; font-weight: 600; padding: 0 32px; }"
+        "QPushButton:hover { background: #2563eb; }"));
+    connect(emptyOpenBtn, &QPushButton::clicked, this, &MainWindow::openFolder);
+    auto *emptyBtnRow = new QHBoxLayout();
+    emptyBtnRow->addStretch(1);
+    emptyBtnRow->addWidget(emptyOpenBtn);
+    emptyBtnRow->addStretch(1);
+    emptyLay->addLayout(emptyBtnRow);
+    emptyLay->addStretch(1);
+    m_fileListPageStack->addWidget(m_emptyStatePage);
+
     filesLayout->addWidget(m_fileListPageStack, 1);
+
+    // Batch selection action bar (hidden until 2+ files are selected)
+    m_batchSelectionBar = new QWidget(this);
+    m_batchSelectionBar->setVisible(false);
+    m_batchSelectionBar->setStyleSheet(QStringLiteral(
+        "QWidget { background-color: #1e3a5f; border-radius: 6px; padding: 2px; }"
+        "QPushButton { background: #2563eb; color: white; border: none; border-radius: 4px;"
+        "  padding: 4px 10px; font-size: 12px; }"
+        "QPushButton:hover { background: #3b82f6; }"
+        "QLabel { color: #93c5fd; font-size: 12px; background: transparent; }"));
+    auto *batchBarLayout = new QHBoxLayout(m_batchSelectionBar);
+    batchBarLayout->setContentsMargins(8, 4, 8, 4);
+    batchBarLayout->setSpacing(8);
+    m_batchSelectionLabel = new QLabel(QStringLiteral("已選取 0 個檔案"), m_batchSelectionBar);
+    m_btnBatchAnalyzeSelected = new QPushButton(QStringLiteral("批次分析"), m_batchSelectionBar);
+    m_btnBatchArchiveSelected = new QPushButton(QStringLiteral("批次歸檔"), m_batchSelectionBar);
+    batchBarLayout->addWidget(m_batchSelectionLabel);
+    batchBarLayout->addStretch(1);
+    batchBarLayout->addWidget(m_btnBatchAnalyzeSelected);
+    batchBarLayout->addWidget(m_btnBatchArchiveSelected);
+    connect(m_btnBatchAnalyzeSelected, &QPushButton::clicked, this, [this]() {
+        QStringList paths;
+        for (QListWidgetItem *it : fileList->selectedItems())
+            paths << it->data(Qt::UserRole).toString();
+        if (!paths.isEmpty())
+            startAnalysisQueue(paths, false, false);
+    });
+    connect(m_btnBatchArchiveSelected, &QPushButton::clicked, this,
+            &MainWindow::executeBatchArchiveForSelectedFiles);
+    filesLayout->addWidget(m_batchSelectionBar);
+
+    // Contextual next-step hint strip
+    m_nextStepHint = new QLabel(this);
+    m_nextStepHint->setVisible(false);
+    m_nextStepHint->setWordWrap(false);
+    m_nextStepHint->setAlignment(Qt::AlignCenter);
+    m_nextStepHint->setStyleSheet(QStringLiteral(
+        "QLabel { background: rgba(15,23,42,0.7); color: #60a5fa; font-size: 11px;"
+        "  padding: 4px 8px; border-top: 1px solid rgba(59,130,246,0.2); }"));
+    filesLayout->addWidget(m_nextStepHint);
 
     auto *loadRow = new QHBoxLayout();
     btnLoadMore = new QPushButton(QStringLiteral("載入更多 (%1)").arg(BATCH_SIZE), this);
@@ -3808,6 +4187,7 @@ void MainWindow::setupFourColumnLayout() {
 
     auto *analysisRow = new QHBoxLayout();
     btnAnalyzeFile = new QPushButton(QStringLiteral("✨ 分析"), this);
+    btnAnalyzeFile->setToolTip(QStringLiteral("對目前選取的單一檔案執行 AI 分析，生成摘要與標籤"));
     connect(btnAnalyzeFile, &QPushButton::clicked, this, &MainWindow::executeSingleAnalysis);
     analysisRow->addWidget(btnAnalyzeFile);
 
@@ -3819,6 +4199,10 @@ void MainWindow::setupFourColumnLayout() {
 
     auto *archiveRow = new QHBoxLayout();
     btnPhysicalArchive = new QPushButton(QStringLiteral("實體歸檔 (依標籤)"), this);
+    btnPhysicalArchive->setToolTip(QStringLiteral(
+        "將有 AI 標籤的檔案實際搬移到對應的子資料夾\n"
+        "例如：標籤「合約」→ 自動建立並移至 archive/合約/ 資料夾\n"
+        "操作前會先顯示預覽，可以回上一步復原"));
     connect(btnPhysicalArchive, &QPushButton::clicked, this, &MainWindow::executePhysicalArchive);
     archiveRow->addWidget(btnPhysicalArchive);
 
@@ -4128,50 +4512,39 @@ void MainWindow::setupContextMenus() {
 }
 
 void MainWindow::showFileContextMenu(const QPoint &pos) {
-    // 1. 確認事件迴圈是否成功捕捉到訊號
-    qDebug() << "[Debug] 觸發右鍵選單，接收到 Viewport 座標：" << pos;
+    if (!fileList) return;
 
-    if (!fileList) {
-        qDebug() << "[Error] fileList 元件不存在或未初始化。";
-        return;
-    }
-
-    // 2. 執行 Hit-Testing
     QListWidgetItem *item = fileList->itemAt(pos);
-    if (!item) {
-        // 如果點到空白處，給予明確提示，而不是安靜地 return
-        qDebug() << "[Debug] 點擊到空白區域，沒有選中任何具體檔案項目。";
-        return;
-    }
-
-    // 3. 【關鍵修正】強制將右鍵點擊的項目設為「當前選取」狀態
-    fileList->setCurrentItem(item);
+    if (!item) return;
 
     const QString filePath = item->data(Qt::UserRole).toString();
-    if (filePath.isEmpty()) {
-        qDebug() << "[Error] 選中項目未綁定有效的文件路徑資料。";
-        return;
-    }
+    if (filePath.isEmpty()) return;
 
-    qDebug() << "[Debug] 成功鎖定檔案，準備彈出選單：" << filePath;
+    // Preserve multi-selection: only set current item without clearing selection
+    if (!item->isSelected())
+        fileList->setCurrentItem(item);
 
-    // 4. 建立並配置右鍵選單
     QMenu menu(this);
     auto &lm = LanguageManager::instance();
-    QAction *actAnalyze = menu.addAction(lm.getText(QStringLiteral("btn_analyze")));
-    QAction *actRename = menu.addAction(lm.getText(QStringLiteral("重新命名")));
-    QAction *actDelete = menu.addAction(lm.getText(QStringLiteral("刪除")));
-    menu.addSeparator();
-    QAction *actReveal = menu.addAction(lm.getText(QStringLiteral("在資料夾中顯示")));
 
-    // 5. 將 Viewport 座標轉換為全域螢幕座標並阻塞執行
-    QAction *chosen = menu.exec(fileList->viewport()->mapToGlobal(pos));
-    if (!chosen) {
-        qDebug() << "[Debug] 使用者取消了選單。";
-        return;
+    // Show selection count in menu title when multiple files selected
+    const int selCount = fileList->selectedItems().size();
+    if (selCount > 1) {
+        QAction *titleAct = menu.addAction(QStringLiteral("已選取 %1 個檔案").arg(selCount));
+        titleAct->setEnabled(false);
+        menu.addSeparator();
     }
 
-    // 6. 處理對應的 Action 邏輯
+    QAction *actAnalyze = menu.addAction(lm.getText(QStringLiteral("btn_analyze")));
+    QAction *actRename = selCount == 1 ? menu.addAction(lm.getText(QStringLiteral("重新命名"))) : nullptr;
+    QAction *actDelete = menu.addAction(lm.getText(QStringLiteral("刪除")));
+    menu.addSeparator();
+    QAction *actReveal = selCount == 1 ? menu.addAction(lm.getText(QStringLiteral("在資料夾中顯示"))) : nullptr;
+
+    QAction *chosen = menu.exec(fileList->viewport()->mapToGlobal(pos));
+    if (!chosen) return;
+
+    // 處理對應的 Action 邏輯
     if (chosen == actAnalyze) {
         clearAnalysisCacheForReanalysis(filePath);
         runSingleFileAnalysisForPath(filePath);
@@ -4215,38 +4588,31 @@ void MainWindow::showFileContextMenu(const QPoint &pos) {
             item->setData(Qt::UserRole + 1, relativePath);
         }
         onFileSelected(item);
-        qDebug() << "[Debug] 重新命名成功：" << newName;
         return;
     }
 
     if (chosen == actDelete) {
-        const int ret = QMessageBox::question(
-            this,
-            QStringLiteral("刪除確認"),
-            QStringLiteral("確定要刪除「%1」嗎？").arg(QFileInfo(filePath).fileName()),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No);
-
+        const QList<QListWidgetItem *> toDelete = fileList->selectedItems();
+        const QString confirmMsg = toDelete.size() == 1
+            ? QStringLiteral("確定要刪除「%1」嗎？").arg(QFileInfo(filePath).fileName())
+            : QStringLiteral("確定要刪除選取的 %1 個檔案嗎？").arg(toDelete.size());
+        const int ret = QMessageBox::question(this, QStringLiteral("刪除確認"), confirmMsg,
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
         if (ret != QMessageBox::Yes) return;
 
-        QFile file(filePath);
-        bool removed = file.moveToTrash();
-        if (!removed) removed = file.remove();
-
-        if (!removed) {
-            QMessageBox::warning(this, QStringLiteral("刪除失敗"), QStringLiteral("檔案可能被鎖定或沒有權限。"));
-            return;
+        for (QListWidgetItem *it : toDelete) {
+            const QString fp = it->data(Qt::UserRole).toString();
+            QFile f(fp);
+            bool removed = f.moveToTrash();
+            if (!removed) removed = f.remove();
+            if (removed)
+                delete fileList->takeItem(fileList->row(it));
         }
-
-        delete fileList->takeItem(fileList->row(item));
-        qDebug() << "[Debug] 檔案刪除成功：" << filePath;
         return;
     }
 
-    if (chosen == actReveal) {
-        const QFileInfo fi(filePath);
-        QDesktopServices::openUrl(QUrl::fromLocalFile(fi.absolutePath()));
-        qDebug() << "[Debug] 開啟檔案位置：" << fi.absolutePath();
+    if (actReveal && chosen == actReveal) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(filePath).absolutePath()));
     }
 }
 
@@ -4636,6 +5002,35 @@ static bool sfMoveFileForPhysicalArchive(const QString &srcPath, const QString &
 }
 } // namespace
 
+void MainWindow::executeBatchArchiveForSelectedFiles()
+{
+    if (!fileList || rootPath.isEmpty()) return;
+    const QString rootClean = QDir::cleanPath(rootPath);
+    QStringList filesToMove;
+    for (QListWidgetItem *it : fileList->selectedItems()) {
+        const QString fp = QDir::cleanPath(it->data(Qt::UserRole).toString());
+        if (fp.isEmpty()) continue;
+        QFileInfo fi(fp);
+        if (!fi.exists() || !fi.isFile()) continue;
+        if (!sfAbsolutePathUnderWorkspaceRoot(fp, rootClean)) continue;
+        std::vector<QString> tags;
+        { QMutexLocker locker(&tagMutex); tags = tagManager.getTags(fp); }
+        if (!tags.empty() && !filesToMove.contains(fp))
+            filesToMove << fp;
+    }
+    if (filesToMove.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("批次歸檔"),
+            QStringLiteral("選取的檔案均無 AI 標籤，請先執行分析。"));
+        return;
+    }
+    ArchiveDialog dialog(filesToMove, rootClean, this);
+    dialog.resize(500, 400);
+    if (dialog.exec() == QDialog::Accepted) {
+        scanFiles();
+        updateTagList();
+    }
+}
+
 void MainWindow::executePhysicalArchive() {
     auto &lm = LanguageManager::instance();
     if (rootPath.isEmpty()) {
@@ -4931,6 +5326,9 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     rootPath = abs;
     currentPath = abs;
 
+    if (m_btnSimpleAnalyze)
+        m_btnSimpleAnalyze->setEnabled(m_simpleModeEnabled && !rootPath.isEmpty());
+
     if (m_dirWatcher) {
         const QStringList oldDirs = m_dirWatcher->directories();
         if (!oldDirs.isEmpty()) m_dirWatcher->removePaths(oldDirs);
@@ -4946,6 +5344,7 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
     setFolderTreeCurrentPath(rootPath);
 
     tagManager.loadTags(rootPath.toStdString());
+    tagManager.repairMalformedTagKeys();
     loadCorrectionLogs();
     reloadCategoriesConfigFromWorkspace();
     disableSemanticOverlays();
@@ -5117,6 +5516,7 @@ void MainWindow::goHome() {
     setFolderTreeCurrentPath(currentPath);
 
     tagManager.loadTags(rootPath.toStdString());
+    tagManager.repairMalformedTagKeys();
     loadCorrectionLogs();
     loadAiUiDrawerAssignments();
     m_analysisByContentHash.clear();
@@ -5457,6 +5857,12 @@ void MainWindow::scanPhysicalFolder() {
     if (fileList)
         fileList->clear();
     renderFileListBatch(BATCH_SIZE);
+
+    if (m_pendingFilesToDisplay.empty())
+        showEmptyStatePage();
+    else
+        hideEmptyStatePage();
+    updateNextStepHint();
 }
 
 void MainWindow::populateVirtualTagFiles(const QString &tag) {
@@ -5720,8 +6126,6 @@ void MainWindow::updateTagListCountsOnly() {
 }
 
 void MainWindow::updateTagList() {
-    tagManager.repairMalformedTagKeys();
-
     QSet<QString> expandedDrawerRoles;
     if (m_aiTagTreeWidget) {
         for (int ti = 0; ti < m_aiTagTreeWidget->topLevelItemCount(); ++ti) {
@@ -5757,6 +6161,7 @@ void MainWindow::updateTagList() {
     const QString workspaceRoot = QDir::cleanPath(rootPath);
 
     std::map<QString, QSet<QString>> normToFiles;
+    QMap<QString, QSet<QString>> systemWhitelistToFiles;
     for (const QString &t : rawTags) {
         const QString canon = normalizeDisplayTag(t);
         std::vector<QString> files;
@@ -5767,23 +6172,11 @@ void MainWindow::updateTagList() {
         for (const QString &fp : files) {
             if (!sfAbsolutePathUnderWorkspaceRoot(fp, workspaceRoot)) continue;
             normToFiles[canon].insert(fp);
-        }
-    }
-
-    QMap<QString, QSet<QString>> systemWhitelistToFiles;
-    for (const QString &t : rawTags) {
-        const QString canon = normalizeDisplayTag(t);
-        if (TagManager::hasAiPrefix(canon)) continue;
-        const QString sysCanon = mapLooseSystemTagToWhitelistCanon(canon);
-        if (sysCanon.isEmpty()) continue;
-        std::vector<QString> files;
-        {
-            QMutexLocker locker(&tagMutex);
-            files = tagManager.getFilesByTag(t);
-        }
-        for (const QString &fp : files) {
-            if (!sfAbsolutePathUnderWorkspaceRoot(fp, workspaceRoot)) continue;
-            systemWhitelistToFiles[sysCanon].insert(fp);
+            if (!TagManager::hasAiPrefix(canon)) {
+                const QString sysCanon = mapLooseSystemTagToWhitelistCanon(canon);
+                if (!sysCanon.isEmpty())
+                    systemWhitelistToFiles[sysCanon].insert(fp);
+            }
         }
     }
 
@@ -6533,6 +6926,11 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == fileList && event->type() == QEvent::Resize) {
         repositionFloatingQueueMonitor();
+    }
+    if (watched == this && event->type() == QEvent::Resize && m_firstRunCard && m_firstRunCard->isVisible()) {
+        const QSize winSz = size();
+        m_firstRunCard->move(winSz.width() - m_firstRunCard->width() - 24,
+                             winSz.height() - m_firstRunCard->height() - 60);
     }
     return QMainWindow::eventFilter(watched, event);
 }
@@ -7533,6 +7931,17 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
 
     if (pdfMetadataOnly && contentQ.trimmed().isEmpty()) {
         contentQ = QStringLiteral("[Metadata-only classification — filename: %1]").arg(filename);
+    }
+
+    // Enrich sparse content with parent folder context so LLM has more signal
+    if (!pdfMetadataOnly && contentQ.trimmed().size() < 50) {
+        const QString parentFolder = fi.dir().dirName();
+        if (!parentFolder.isEmpty() && parentFolder != QStringLiteral("."))
+            contentQ.prepend(QStringLiteral("[Parent folder: %1]\n").arg(parentFolder));
+        const qint64 fileSizeKb = fi.size() / 1024;
+        contentQ += QStringLiteral("\n[Size: %1 KB, Modified: %2]")
+            .arg(fileSizeKb)
+            .arg(fi.lastModified().toString(QStringLiteral("yyyy-MM-dd")));
     }
 
     const bool contentReadable =

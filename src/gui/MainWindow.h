@@ -261,9 +261,31 @@ private:
     QLabel *lblBackgroundStatus = nullptr;
     QPushButton *m_btnRestartBackgroundAnalyze = nullptr;
     bool m_showRestartBackgroundPrompt = false;
+    bool m_simpleModeEnabled = false;
+    QPushButton *m_btnModeToggle = nullptr;
+    QWidget *m_simpleModeBar = nullptr;
+    QPushButton *m_btnSimpleFolderPicker = nullptr;
+    QPushButton *m_btnSimpleAnalyze = nullptr;
+    QLabel *m_simpleModeHint = nullptr;
+
+    void applySimpleMode(bool enable);
+    void loadSimpleModeFromSettings();
+    void showEmptyStatePage();
+    void hideEmptyStatePage();
+    void showFirstRunCard();
+    void updateNextStepHint();
+
+    QWidget *m_emptyStatePage = nullptr;
+    QWidget *m_firstRunCard = nullptr;
+    QLabel *m_nextStepHint = nullptr;
+
     QComboBox *cmbSort = nullptr;
     QComboBox *cmbTagFilter = nullptr;
     QListWidget *fileList = nullptr;
+    QWidget *m_batchSelectionBar = nullptr;
+    QLabel *m_batchSelectionLabel = nullptr;
+    QPushButton *m_btnBatchAnalyzeSelected = nullptr;
+    QPushButton *m_btnBatchArchiveSelected = nullptr;
     /// Index 0: file list; index 1: global semantic search progress placeholder.
     QStackedWidget *m_fileListPageStack = nullptr;
     QPushButton *btnLoadMore = nullptr;
@@ -480,6 +502,9 @@ private:
     void tryRestoreFileListSelectionAfterBatchPaint(int totalPendingCount);
     void syncPreviewBusySpinner();
     void clearAnalysisWorkFlagsAndSyncUi();
+
+    void onFileSelectionChanged();
+    void executeBatchArchiveForSelectedFiles();
 
     QTimer *m_analysisSpinTimer = nullptr;
     int m_analysisSpinPhase = 0;
