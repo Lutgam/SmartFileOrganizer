@@ -462,6 +462,155 @@ QString LanguageManager::getText(const QString &key) const {
         return en ? QStringLiteral("When enabled, reads metadata.json to skip duplicate LLM runs; when disabled, every file is re-analyzed.")
                   : QStringLiteral("勾選時可讀取 metadata.json 快取以略過重複 LLM 分析；取消勾選則每次強制重新分析。");
     }
+    if (key == QStringLiteral("redundancy_scan_btn"))
+        return en ? QStringLiteral("🔍 Scan duplicates now") : QStringLiteral("🔍 立即掃描重複檔案");
+    if (key == QStringLiteral("redundancy_scan_btn_busy"))
+        return en ? QStringLiteral("Scanning…") : QStringLiteral("掃描中…");
+    if (key == QStringLiteral("redundancy_scan_tooltip")) {
+        return en ? QStringLiteral("Standalone whole-workspace scan (size pre-filter, then SHA-256). No AI analysis needed.")
+                  : QStringLiteral("獨立掃描整個工作區（先比大小再比 SHA-256），不需要先執行 AI 分析");
+    }
+    if (key == QStringLiteral("autorules_btn"))
+        return en ? QStringLiteral("⚙️ Auto rules") : QStringLiteral("⚙️ 自動規則");
+    if (key == QStringLiteral("autorules_tooltip")) {
+        return en ? QStringLiteral("Deterministic organize rules (tag or archive by folder/extension/filename). Preview before apply.")
+                  : QStringLiteral("建立確定性的整理規則（依資料夾/副檔名/檔名自動標籤或歸檔），套用前可預覽");
+    }
+    if (key == QStringLiteral("rules_dialog_title"))
+        return en ? QStringLiteral("Auto-organize rules") : QStringLiteral("自動整理規則");
+    if (key == QStringLiteral("rules_dialog_intro")) {
+        return en ? QStringLiteral("Deterministic rules: condition (folder / extension / filename) → action (tag or move). Nothing is changed until you preview and confirm.")
+                  : QStringLiteral("確定性規則：條件（資料夾／副檔名／檔名）→ 動作（加標籤或歸檔）。套用前一定會先預覽，確認後才會變更檔案。");
+    }
+    if (key == QStringLiteral("rules_col_name"))
+        return en ? QStringLiteral("Name") : QStringLiteral("規則名稱");
+    if (key == QStringLiteral("rules_col_condition"))
+        return en ? QStringLiteral("Condition") : QStringLiteral("條件");
+    if (key == QStringLiteral("rules_col_action"))
+        return en ? QStringLiteral("Action") : QStringLiteral("動作");
+    if (key == QStringLiteral("rules_col_param"))
+        return en ? QStringLiteral("Tag / Folder") : QStringLiteral("標籤／目標資料夾");
+    if (key == QStringLiteral("rules_col_enabled"))
+        return en ? QStringLiteral("On") : QStringLiteral("啟用");
+    if (key == QStringLiteral("rules_cond_any"))
+        return en ? QStringLiteral("(all files)") : QStringLiteral("（所有檔案）");
+    if (key == QStringLiteral("rules_action_tag"))
+        return en ? QStringLiteral("Add tag") : QStringLiteral("加標籤");
+    if (key == QStringLiteral("rules_action_move"))
+        return en ? QStringLiteral("Move to folder") : QStringLiteral("歸檔至資料夾");
+    if (key == QStringLiteral("rules_btn_add"))
+        return en ? QStringLiteral("＋ Add rule") : QStringLiteral("＋ 新增規則");
+    if (key == QStringLiteral("rules_btn_remove"))
+        return en ? QStringLiteral("Delete") : QStringLiteral("刪除");
+    if (key == QStringLiteral("rules_btn_toggle"))
+        return en ? QStringLiteral("Enable/Disable") : QStringLiteral("啟用／停用");
+    if (key == QStringLiteral("rules_btn_apply"))
+        return en ? QStringLiteral("Preview & apply") : QStringLiteral("預覽並套用");
+    if (key == QStringLiteral("rules_btn_close"))
+        return en ? QStringLiteral("Close") : QStringLiteral("關閉");
+    if (key == QStringLiteral("rules_add_title"))
+        return en ? QStringLiteral("New rule") : QStringLiteral("新增規則");
+    if (key == QStringLiteral("rules_field_folder"))
+        return en ? QStringLiteral("Watch folder") : QStringLiteral("監控資料夾");
+    if (key == QStringLiteral("rules_folder_placeholder"))
+        return en ? QStringLiteral("(empty = whole workspace)") : QStringLiteral("（留空＝整個工作區）");
+    if (key == QStringLiteral("rules_field_suffix"))
+        return en ? QStringLiteral("Extensions") : QStringLiteral("副檔名");
+    if (key == QStringLiteral("rules_field_contains"))
+        return en ? QStringLiteral("Filename contains") : QStringLiteral("檔名包含");
+    if (key == QStringLiteral("rules_contains_placeholder"))
+        return en ? QStringLiteral("e.g. invoice / Screenshot") : QStringLiteral("例如：發票、Screenshot");
+    if (key == QStringLiteral("rules_param_placeholder"))
+        return en ? QStringLiteral("Tag text, or folder name under the workspace") : QStringLiteral("標籤文字，或工作區下的資料夾名稱");
+    if (key == QStringLiteral("rules_add_incomplete"))
+        return en ? QStringLiteral("Rule name and tag/folder are required.") : QStringLiteral("規則名稱與「標籤／目標資料夾」為必填。");
+    if (key == QStringLiteral("privacy_badge_label"))
+        return en ? QStringLiteral("🔒 100% Local AI") : QStringLiteral("🔒 100% 本地運算");
+    if (key == QStringLiteral("privacy_badge_tooltip")) {
+        return en ? QStringLiteral("All AI inference runs on this machine. Your files are never uploaded.\nThe only network access is the optional one-time model download.")
+                  : QStringLiteral("所有 AI 推論皆在本機執行，您的檔案內容永遠不會被上傳。\n唯一的網路行為是（可選的）首次模型下載。");
+    }
+    if (key == QStringLiteral("model_dl_title"))
+        return en ? QStringLiteral("Download AI models") : QStringLiteral("下載 AI 模型");
+    if (key == QStringLiteral("model_dl_offer_body")) {
+        return en ? QStringLiteral("No AI model found. Download the recommended models now?\n\nThis is the only time the app touches the network — all analysis afterwards runs 100% locally.")
+                  : QStringLiteral("找不到 AI 模型。要現在下載建議模型嗎？\n\n這是本程式唯一會連網的一次——下載完成後，所有分析皆 100% 在本機執行。");
+    }
+    if (key == QStringLiteral("model_dl_intro")) {
+        return en ? QStringLiteral("Select the models to download. They are saved next to the app and never leave your machine.")
+                  : QStringLiteral("選擇要下載的模型。模型檔將存放在程式目錄旁，您的檔案資料永遠不會離開這台電腦。");
+    }
+    if (key == QStringLiteral("model_dl_llm_role"))
+        return en ? QStringLiteral("file analysis & tagging") : QStringLiteral("檔案分析與標籤生成");
+    if (key == QStringLiteral("model_dl_embedding_role"))
+        return en ? QStringLiteral("semantic search (vector embeddings)") : QStringLiteral("語意搜尋（向量索引）");
+    if (key == QStringLiteral("model_dl_privacy_note")) {
+        return en ? QStringLiteral("🔒 Downloading models is the app's only network access. Your files are never uploaded.")
+                  : QStringLiteral("🔒 下載模型是本程式唯一的網路行為，您的檔案內容永遠不會被上傳。");
+    }
+    if (key == QStringLiteral("model_dl_start"))
+        return en ? QStringLiteral("Download") : QStringLiteral("開始下載");
+    if (key == QStringLiteral("model_dl_cancel"))
+        return en ? QStringLiteral("Cancel") : QStringLiteral("取消");
+    if (key == QStringLiteral("model_dl_downloading"))
+        return en ? QStringLiteral("Downloading %1 …") : QStringLiteral("正在下載 %1 …");
+    if (key == QStringLiteral("model_dl_all_done"))
+        return en ? QStringLiteral("✅ All models downloaded and verified.") : QStringLiteral("✅ 模型已全部下載並驗證完成。");
+    if (key == QStringLiteral("model_dl_failed"))
+        return en ? QStringLiteral("❌ Download failed: %1 (check network and retry)") : QStringLiteral("❌ 下載失敗：%1（請檢查網路後重試）");
+    if (key == QStringLiteral("model_dl_verify_failed"))
+        return en ? QStringLiteral("❌ Verification failed for %1 (incomplete file removed)") : QStringLiteral("❌ %1 驗證失敗（已刪除不完整檔案）");
+    if (key == QStringLiteral("tags_relinked_notice")) {
+        return en ? QStringLiteral("🔗 Re-attached tags to %1 renamed/moved file(s) by content match")
+                  : QStringLiteral("🔗 已透過內容比對，自動將標籤重新接回 %1 個被改名/搬移的檔案");
+    }
+    if (key == QStringLiteral("archive_recover_title"))
+        return en ? QStringLiteral("Unfinished archive detected") : QStringLiteral("偵測到未完成的歸檔作業");
+    if (key == QStringLiteral("archive_recover_body")) {
+        return en ? QStringLiteral("The app closed during a previous archive run (%1 planned moves). Restore the moved files to their original locations?")
+                  : QStringLiteral("上次歸檔作業未正常完成（共 %1 筆搬移計畫）。是否將已搬移的檔案還原回原始位置？");
+    }
+    if (key == QStringLiteral("archive_recover_done"))
+        return en ? QStringLiteral("Archive recovery: restored %1 file(s).")
+                  : QStringLiteral("歸檔復原完成：已還原 %1 個檔案。");
+    if (key == QStringLiteral("settings_pause_on_battery")) {
+        return en ? QStringLiteral("Auto-pause batch analysis on battery power")
+                  : QStringLiteral("使用電池供電時自動暫停批次分析");
+    }
+    if (key == QStringLiteral("batch_battery_pause_notice")) {
+        return en ? QStringLiteral("🔋 Running on battery — batch analysis auto-paused (resume anytime)")
+                  : QStringLiteral("🔋 偵測到電池供電，批次分析已自動暫停（可隨時按「繼續」恢復）");
+    }
+    if (key == QStringLiteral("batch_pause_label"))
+        return en ? QStringLiteral("Pause") : QStringLiteral("暫停");
+    if (key == QStringLiteral("batch_resume_label"))
+        return en ? QStringLiteral("Resume") : QStringLiteral("繼續");
+    if (key == QStringLiteral("batch_pause_tooltip")) {
+        return en ? QStringLiteral("Pause between files — the current file finishes, the queue waits")
+                  : QStringLiteral("在檔案之間暫停——當前檔案會完成分析，佇列保留等待繼續");
+    }
+    if (key == QStringLiteral("batch_paused_notice"))
+        return en ? QStringLiteral("⏸️ Batch analysis paused — queue preserved")
+                  : QStringLiteral("⏸️ 批次分析已暫停，佇列已保留");
+    if (key == QStringLiteral("batch_resumed_notice"))
+        return en ? QStringLiteral("▶️ Batch analysis resumed")
+                  : QStringLiteral("▶️ 批次分析已繼續");
+    if (key == QStringLiteral("batch_eta_sec"))
+        return en ? QStringLiteral(" — about %1s left") : QStringLiteral("（預估剩餘約 %1 秒）");
+    if (key == QStringLiteral("batch_eta_min_sec"))
+        return en ? QStringLiteral(" — about %1m %2s left") : QStringLiteral("（預估剩餘約 %1 分 %2 秒）");
+    if (key == QStringLiteral("watch_degraded_notice")) {
+        return en ? QStringLiteral("⚠️ Live folder monitoring partially disabled (%1 folders exceed the OS watch limit) — refresh manually after external changes")
+                  : QStringLiteral("⚠️ 即時資料夾監控已部分停用（%1 個資料夾超出系統監控上限），外部變更後請手動重新整理");
+    }
+    if (key == QStringLiteral("summary_low_confidence_prefix")) {
+        return en ? QStringLiteral("⚠️ [Low confidence — classified mainly by filename] ")
+                  : QStringLiteral("⚠️ [低信心：內容不足，主要依檔名推測] ");
+    }
+    if (key == QStringLiteral("settings_summary_typewriter")) {
+        return en ? QStringLiteral("Typewriter animation for AI summaries (off = instant display)")
+                  : QStringLiteral("AI 摘要打字機動畫（關閉時立即顯示全文）");
+    }
     if (key == QStringLiteral("settings_time_schedule"))
         return en ? QStringLiteral("Run analysis only during scheduled hours")
                   : QStringLiteral("啟用指定時段分析");

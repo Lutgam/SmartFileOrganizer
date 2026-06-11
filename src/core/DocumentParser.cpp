@@ -568,6 +568,18 @@ QString DocumentParser::truncateForAi(const QString &text, int maxChars)
     return text.left(maxChars) + QStringLiteral("\n") + QStringLiteral("...[內容過長已截斷]");
 }
 
+/// First 8 KB of a file decoded as UTF-8, or empty if it looks binary (NUL bytes).
+static QString readPlainTextHead(const QString &absPath)
+{
+    QFile f(absPath);
+    if (!f.open(QIODevice::ReadOnly))
+        return QString();
+    const QByteArray head = f.read(8000);
+    if (head.isEmpty() || head.contains('\0'))
+        return QString();
+    return QString::fromUtf8(head);
+}
+
 QString DocumentParser::extractTextForAi(const QString &filePath, bool *pdfMetadataOnly)
 {
     if (pdfMetadataOnly)
@@ -591,6 +603,8 @@ QString DocumentParser::extractTextForAi(const QString &filePath, bool *pdfMetad
         }
     } else {
         text = sanitizeTextForAi(extractTextQString(abs));
+        if (text.trimmed().isEmpty())
+            text = sanitizeTextForAi(readPlainTextHead(abs));
         static const QSet<QString> metadataFallbackSuffixes = {
             QStringLiteral("docx"), QStringLiteral("docm"), QStringLiteral("dotx"), QStringLiteral("dotm"),
             QStringLiteral("xlsx"), QStringLiteral("xlsm"), QStringLiteral("xltx"), QStringLiteral("xltm"),

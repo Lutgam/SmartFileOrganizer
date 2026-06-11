@@ -89,6 +89,26 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
     }
 
     {
+        m_summaryTypewriter = new QCheckBox(this);
+        m_summaryTypewriter->setChecked(false);
+        root->addWidget(m_summaryTypewriter);
+        connect(m_summaryTypewriter, &QCheckBox::toggled, this, [](bool on) {
+            QSettings s;
+            s.setValue(QStringLiteral("ui/summary_typewriter"), on);
+        });
+    }
+
+    {
+        m_pauseOnBattery = new QCheckBox(this);
+        m_pauseOnBattery->setChecked(false);
+        root->addWidget(m_pauseOnBattery);
+        connect(m_pauseOnBattery, &QCheckBox::toggled, this, [](bool on) {
+            QSettings s;
+            s.setValue(QStringLiteral("analysis/pause_on_battery"), on);
+        });
+    }
+
+    {
         auto *row = new QHBoxLayout();
         m_lblColdArchive = new QLabel(this);
         row->addWidget(m_lblColdArchive);
@@ -160,7 +180,7 @@ SettingsPanel::SettingsPanel(const QString &currentRootPath, QWidget *parent)
             QSettings s;
             s.setValue(QString::fromLatin1(kSettingsAiConcurrency), value);
         });
-        connect(m_llamaCpuThreadsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        connect(m_llamaCpuThreadsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [](int value) {
             QSettings s;
             const int ideal = qMax(1, QThread::idealThreadCount());
             s.setValue(QString::fromLatin1(kSettingsCpuThreads), qBound(1, value, ideal));
@@ -248,6 +268,10 @@ void SettingsPanel::applyLocalizedTexts()
         m_bgAutoAnalyze->setText(lm.getText(QStringLiteral("settings_bg_auto_analyze")));
     if (m_systemFileBypass)
         m_systemFileBypass->setText(lm.getText(QStringLiteral("settings_system_file_bypass")));
+    if (m_summaryTypewriter)
+        m_summaryTypewriter->setText(lm.getText(QStringLiteral("settings_summary_typewriter")));
+    if (m_pauseOnBattery)
+        m_pauseOnBattery->setText(lm.getText(QStringLiteral("settings_pause_on_battery")));
     if (m_lblColdArchive)
         m_lblColdArchive->setText(lm.getText(QStringLiteral("settings_cold_archive_prefix")));
     if (m_coldArchiveCombo) {
@@ -387,6 +411,16 @@ void SettingsPanel::loadFromSettings() {
     }
     if (m_systemFileBypass) {
         m_systemFileBypass->setChecked(s.value(QString::fromLatin1(kSettingsSystemFileBypass), true).toBool());
+    }
+    if (m_summaryTypewriter) {
+        m_summaryTypewriter->blockSignals(true);
+        m_summaryTypewriter->setChecked(s.value(QStringLiteral("ui/summary_typewriter"), false).toBool());
+        m_summaryTypewriter->blockSignals(false);
+    }
+    if (m_pauseOnBattery) {
+        m_pauseOnBattery->blockSignals(true);
+        m_pauseOnBattery->setChecked(s.value(QStringLiteral("analysis/pause_on_battery"), false).toBool());
+        m_pauseOnBattery->blockSignals(false);
     }
     if (m_coldArchiveCombo) {
         const int y = s.value(QString::fromLatin1(kSettingsColdArchiveYears), 0).toInt();

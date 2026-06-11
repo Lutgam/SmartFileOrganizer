@@ -70,3 +70,6 @@ config.local.json
 
 # Documentation
 SRS.md
+
+# Local AI tooling config
+.claude/

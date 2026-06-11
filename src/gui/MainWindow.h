@@ -32,6 +32,7 @@
 #include <QMutex>
 #include <QTime>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QVector>
 #include <QHash>
 #include <QMap>
@@ -48,6 +49,8 @@
 #include <vector>
 
 #include "../ai/LlamaEngine.h"
+#include "../ai/EmbeddingEngine.h"
+#include "../core/AutoRuleEngine.h"
 #include "../core/TagManager.h"
 #include "../core/DrawerCategoryLut.h"
 
@@ -65,6 +68,10 @@ struct SemanticSearchWorkerResult {
     QString rawLlmText;
     /// Epoch captured when the search was started (UI thread); mismatched handlers must drop results silently.
     quint64 workspaceEpochAtSubmit = 0;
+    /// Embedding-based search (vector index over the whole workspace).
+    bool usedEmbeddings = false;
+    int searchedFileCount = 0;
+    QHash<QString, QVector<float>> newEmbeddings; // key: content hash or "p:"+path
 };
 
 struct TagClusterWorkerResult {
@@ -73,6 +80,15 @@ struct TagClusterWorkerResult {
     QString rawLlmText;
     bool parseOk = false;
     bool rawIsLlmError = false;
+};
+
+/// Standalone full-workspace duplicate scan (size pre-filter, then SHA-256).
+struct RedundancyScanResult {
+    QMap<QString, QSet<QString>> hashGroups;  // sha256 -> paths (groups of >= 2)
+    QMap<QString, QSet<QString>> nameGroups;  // filename -> paths with differing content
+    int scannedFiles = 0;
+    int hashedFiles = 0;
+    quint64 workspaceEpochAtSubmit = 0;
 };
 
 class QStackedWidget;
@@ -310,6 +326,16 @@ private:
     QTextEdit *m_aiSummaryEdit = nullptr;
     QPushButton *btnBatchAnalyze = nullptr;
     QPushButton *btnStopBatchAnalyze = nullptr;
+    QPushButton *m_btnPauseBatchAnalyze = nullptr;
+    /// Pause between files: the in-flight inference finishes, the queue holds.
+    bool m_batchPaused = false;
+    QElapsedTimer m_batchEtaTimer;
+    void setBatchPaused(bool paused);
+    /// Auto-pause batch analysis on battery power (opt-in setting); fires at most
+    /// once per batch so a manual resume is respected.
+    QTimer *m_batteryCheckTimer = nullptr;
+    bool m_batteryPauseFiredThisBatch = false;
+    void ensureBatteryCheckTimer();
     QProgressBar *batchProgressBar = nullptr;
     QLabel *lblBatchStatus = nullptr;
     QTabWidget *m_previewTabWidget = nullptr;
@@ -329,6 +355,12 @@ private:
     int m_summaryTypewriterIndex = 0;
     QTreeWidget *m_taskCenterRedundancyTree = nullptr;
     QPushButton *m_taskCenterCleanBtn = nullptr;
+    QPushButton *m_btnRedundancyScan = nullptr;
+    QFutureWatcher<RedundancyScanResult> *m_redundancyScanWatcher = nullptr;
+    void runStandaloneRedundancyScan();
+    QPushButton *m_btnAutoRules = nullptr;
+    void openAutoRulesDialog();
+    void applyAutoRules(const QVector<SfAutoRule> &rules, QWidget *dialogParent);
 
     /// Task Center: cumulative redundancy (never cleared on new background batches until user cleans).
     QMap<QString, QSet<QString>> m_persistRedundancyHash;
@@ -355,6 +387,15 @@ private:
 
     TagManager tagManager;
     LlamaEngine *m_llamaEngine = nullptr;
+
+    /// Dedicated embedding model + persisted vector index for semantic search.
+    EmbeddingEngine *m_embeddingEngine = nullptr;
+    QHash<QString, QVector<float>> m_embeddingByHash; // content-hash (or "p:"+path) → L2-normalized vector
+    bool m_embeddingIndexLoaded = false;
+    bool ensureEmbeddingEngineLoaded();
+    QString embeddingIndexFilePath() const;
+    void loadEmbeddingIndexFromDisk();
+    void saveEmbeddingIndexToDisk() const;
 
     QFutureWatcher<SfAnalysisOutcome> *watcher = nullptr;
     QFutureWatcher<TagClusterWorkerResult> *m_consolidateWatcher = nullptr;
@@ -421,6 +462,9 @@ private:
     QSet<QString> m_coldArchiveBypassPaths;
     /// Single-file re-analyze: skip O(1) / hash / summary cache until LLM run starts.
     QSet<QString> m_forceReanalyzePaths;
+    /// Files analyzed with <50 chars of real content (classification guessed from
+    /// filename/metadata); shown with a low-confidence marker in the summary panel.
+    QSet<QString> m_lowConfidencePaths;
     bool m_isAnalysisRunning = false;
     int m_aiConcurrencyLimit = 2;
     bool m_o1CacheBypassEnabled = true;
@@ -533,13 +577,27 @@ private:
     QVector<QString> navHistory;
     int navIndex = -1;
 
-    // [newPath, oldPath] for last executePhysicalArchive() run
-    QList<QPair<QString, QString>> m_lastMoveHistory;
+    /// Undo stack for physical archive runs; each entry is one run's
+    /// (newPath, oldPath) move list, newest last. Depth capped.
+    QVector<QList<QPair<QString, QString>>> m_archiveUndoStack;
+    static constexpr int kArchiveUndoDepth = 10;
+    void pushArchiveUndoBatch(const QList<QPair<QString, QString>> &batch);
+    /// Crash-safe move journal: written before each file move, deleted after the
+    /// transaction commits; offered for rollback on next workspace open.
+    QString archiveJournalAbsPath() const;
+    void writeArchiveJournalFile(const QList<QPair<QString, QString>> &fromToPairs);
+    void clearArchiveJournalFile();
+    void recoverPendingArchiveJournal();
 
     QFileSystemWatcher *m_dirWatcher = nullptr;
     QTimer *m_dirDebounceTimer = nullptr;
     QString m_lastDirChangePath;
     QSet<QString> m_recursiveWatchPaths;
+    /// One-shot per workspace: warn the user when the OS watch limit degrades live monitoring.
+    bool m_watchDegradedNotified = false;
+    void notifyWatchDegradedOnce(int failedCount);
+    /// Re-attach tags to files renamed/moved outside the app by matching content hashes.
+    void relinkOrphanedTagsByContentHash();
 
     // Graph is embedded as Tab 3 (no standalone window)
 

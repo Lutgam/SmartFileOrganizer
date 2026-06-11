@@ -82,6 +82,8 @@
 #include "LanguageManager.h"
 #include "RedundancyReportDialog.h"
 #include "SettingsDialog.h"
+#include "ModelDownloadDialog.h"
+#include "RulesDialog.h"
 
 #include <QtGlobal>
 
@@ -89,7 +91,30 @@
 #  include <windows.h>
 #elif defined(Q_OS_DARWIN)
 #  include <sys/sysctl.h>
+#  include <IOKit/ps/IOPowerSources.h>
 #endif
+
+/// True when the machine is currently draining its battery (no AC power).
+static bool sfRunningOnBattery()
+{
+#if defined(Q_OS_DARWIN)
+    const CFTypeRef info = IOPSCopyPowerSourcesInfo();
+    if (!info)
+        return false;
+    const CFStringRef type = IOPSGetProvidingPowerSourceType(info);
+    const bool onBattery =
+        type && CFStringCompare(type, CFSTR("Battery Power"), 0) == kCFCompareEqualTo;
+    CFRelease(info);
+    return onBattery;
+#elif defined(Q_OS_WIN)
+    SYSTEM_POWER_STATUS sps;
+    if (GetSystemPowerStatus(&sps))
+        return sps.ACLineStatus == 0;
+    return false;
+#else
+    return false;
+#endif
+}
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -124,7 +149,7 @@ static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootP
                                                             LlamaEngine *llama,
                                                             const QString &userQuery,
                                                             quint64 workspaceEpochAtSubmit);
-static TagClusterWorkerResult sfParseTagClusterJsonIntoDrawerMap(const QString &rawIn, const QSet<QString> &aiTagSet);
+
 
 enum HeroSearchScopeComboData : int {
     HeroSearchScope_LocalFolder = 0,
@@ -1095,6 +1120,28 @@ static QString resolveModelPath() {
                : QDir::cleanPath(configured);
 }
 
+static bool sfMoveFileForPhysicalArchive(const QString &srcPath, const QString &destPath);
+
+/// Embedding model path: explicit setting first, then the default install location.
+static QString resolveEmbeddingModelPath()
+{
+    const QString configured =
+        QSettings().value(QStringLiteral("ai/embedding_model_path")).toString().trimmed();
+    if (!configured.isEmpty() && QFile::exists(configured))
+        return QDir::cleanPath(configured);
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates = {
+        QDir(appDir).filePath(QStringLiteral("assets/models/embedding_model.gguf")),
+        QDir(appDir).filePath(QStringLiteral("../assets/models/embedding_model.gguf")),
+    };
+    for (const QString &p : candidates) {
+        const QString clean = QDir::cleanPath(p);
+        if (QFile::exists(clean))
+            return clean;
+    }
+    return QString();
+}
+
 /// Full-file SHA-256 (lowercase hex). Empty if unreadable.
 static QString sha256HexOfFile(const QString &path)
 {
@@ -1116,10 +1163,6 @@ static QStringList sfFixedAiClusterDrawerKeys()
     return sfActiveDrawerCategoryLut().drawerKeys();
 }
 
-static QString sfLegacyAiDrawerKeyToCanon(const QString &rawIn)
-{
-    return sfActiveDrawerCategoryLut().normalizeDrawerKey(rawIn);
-}
 
 static QString sfAiFolderTagForDrawerCanon(const QString &canonicalDrawerKey)
 {
@@ -1230,48 +1273,6 @@ static QString mapLooseSystemTagToWhitelistCanon(const QString &rawIn)
     if (n0.contains(QStringLiteral("設計"))) return QStringLiteral("🎨設計");
     if (n0.contains(QStringLiteral("設定"))) return QStringLiteral("🧩設定");
 
-    return QString();
-}
-
-static QString aiCoreKeyForFuzzy(const QString &tagOrRaw)
-{
-    QString u = tagOrRaw.trimmed();
-    u = TagManager::stripAiPrefix(u).trimmed();
-    static const QRegularExpression reWs(QStringLiteral("\\s+"));
-    u.replace(reWs, QStringLiteral(" "));
-    return u.toLower();
-}
-
-static QString fuzzyResolveAiTagKey(const QString &rawIn, const QSet<QString> &aiTagSet)
-{
-    const QString raw = rawIn.trimmed();
-    if (raw.isEmpty()) return QString();
-
-    QStringList variants;
-    variants << raw;
-    if (!TagManager::hasAiPrefix(raw)) {
-        variants << (QStringLiteral("[AI] ") + raw);
-        variants << (QStringLiteral("[AI]") + raw);
-    }
-
-    for (const QString &cand0 : std::as_const(variants)) {
-        const QString k = normalizeDisplayTag(cand0.trimmed());
-        if (k.isEmpty()) continue;
-        if (aiTagSet.contains(k)) {
-            for (const QString &x : aiTagSet) {
-                if (x == k) return x;
-            }
-        }
-        for (const QString &x : aiTagSet) {
-            if (QString::compare(x, k, Qt::CaseInsensitive) == 0) return x;
-        }
-    }
-
-    const QString want = aiCoreKeyForFuzzy(raw);
-    if (want.isEmpty()) return QString();
-    for (const QString &x : aiTagSet) {
-        if (aiCoreKeyForFuzzy(x) == want) return x;
-    }
     return QString();
 }
 
@@ -1440,6 +1441,213 @@ void collectCheckedPathsFromRedundancyGroup(QTreeWidgetItem *grp, QStringList *o
 
 } // namespace
 
+void MainWindow::openAutoRulesDialog()
+{
+    if (rootPath.trimmed().isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 QStringLiteral("請先選擇工作區資料夾。"));
+        return;
+    }
+    RulesDialog dlg(rootPath, this);
+    connect(&dlg, &RulesDialog::applyRequested, this,
+            [this, &dlg](const QVector<SfAutoRule> &rules) { applyAutoRules(rules, &dlg); });
+    dlg.exec();
+    scanFiles();
+    updateTagList();
+}
+
+void MainWindow::applyAutoRules(const QVector<SfAutoRule> &rules, QWidget *dialogParent)
+{
+    const QString rootClean = QDir::cleanPath(rootPath);
+    const QVector<SfAutoRuleEngine::Match> matches = SfAutoRuleEngine::findMatches(rules, rootClean);
+    if (matches.isEmpty()) {
+        QMessageBox::information(dialogParent, QStringLiteral("Smartflie"),
+                                 QStringLiteral("沒有檔案符合目前的規則。"));
+        return;
+    }
+
+    // Deterministic preview — nothing moves until the user confirms.
+    QStringList preview;
+    for (const auto &m : matches) {
+        if (preview.size() >= 25) {
+            preview << QStringLiteral("…（共 %1 筆）").arg(matches.size());
+            break;
+        }
+        const SfAutoRule &r = rules[m.ruleIndex];
+        const QString verb = (r.action == SfAutoRule::Action::MoveToFolder)
+                                 ? QStringLiteral("→ 搬移至「%1」").arg(r.actionParam)
+                                 : QStringLiteral("→ 加標籤「%1」").arg(r.actionParam);
+        preview << QStringLiteral("%1 %2").arg(QFileInfo(m.filePath).fileName(), verb);
+    }
+    const auto answer = QMessageBox::question(
+        dialogParent, QStringLiteral("套用自動規則"),
+        QStringLiteral("以下 %1 個檔案將被處理：\n\n%2\n\n確定套用？")
+            .arg(matches.size())
+            .arg(preview.join(QLatin1Char('\n'))),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    QList<QPair<QString, QString>> moveBatch;
+    QList<QPair<QString, QString>> journalMoves;
+    int tagged = 0;
+    int moved = 0;
+
+    for (const auto &m : matches) {
+        const SfAutoRule &r = rules[m.ruleIndex];
+        if (r.action == SfAutoRule::Action::AddTag) {
+            QMutexLocker locker(&tagMutex);
+            tagManager.addTag(m.filePath, r.actionParam, false);
+            ++tagged;
+            continue;
+        }
+        const QString destDir = QDir(rootClean).absoluteFilePath(r.actionParam.trimmed());
+        const QString destPath = QDir(destDir).absoluteFilePath(QFileInfo(m.filePath).fileName());
+        journalMoves.append(qMakePair(m.filePath, destPath));
+        writeArchiveJournalFile(journalMoves);
+        if (!sfMoveFileForPhysicalArchive(m.filePath, destPath)) {
+            qDebug() << "applyAutoRules: move failed" << m.filePath << "->" << destPath;
+            continue;
+        }
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.relocateFilePath(m.filePath, destPath, false);
+        }
+        moveBatch.push_back(qMakePair(destPath, m.filePath));
+        ++moved;
+    }
+
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.saveTags();
+    }
+    clearArchiveJournalFile();
+    pushArchiveUndoBatch(moveBatch);
+
+    logToUI(QStringLiteral("Auto rules: tagged %1, moved %2 file(s).").arg(tagged).arg(moved));
+    QMessageBox::information(dialogParent, QStringLiteral("Smartflie"),
+                             QStringLiteral("規則套用完成：加標籤 %1 個、搬移 %2 個檔案。%3")
+                                 .arg(tagged)
+                                 .arg(moved)
+                                 .arg(moved > 0 ? QStringLiteral("\n（搬移可用「回上一步」復原）")
+                                                : QString()));
+}
+
+/// Worker: size pre-filter, then SHA-256 only inside same-size groups.
+static RedundancyScanResult sfRunStandaloneRedundancyScan(const QString &rootClean, quint64 epoch)
+{
+    RedundancyScanResult out;
+    out.workspaceEpochAtSubmit = epoch;
+    constexpr qint64 kMaxHashBytes = 512LL * 1024 * 1024;
+
+    QHash<qint64, QStringList> bySize;
+    QDirIterator it(rootClean, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString p = QDir::cleanPath(it.next());
+        if (p.contains(QStringLiteral("/.smartfile")) || p.contains(QStringLiteral("_冗餘檔案待處理區")))
+            continue;
+        const QFileInfo fi(p);
+        const qint64 sz = fi.size();
+        if (sz <= 0 || sz > kMaxHashBytes)
+            continue;
+        bySize[sz].append(p);
+        ++out.scannedFiles;
+    }
+
+    QHash<QString, QString> pathToHash;
+    for (auto sIt = bySize.constBegin(); sIt != bySize.constEnd(); ++sIt) {
+        if (sIt.value().size() < 2)
+            continue;
+        for (const QString &p : sIt.value()) {
+            QFile f(p);
+            if (!f.open(QIODevice::ReadOnly))
+                continue;
+            QCryptographicHash h(QCryptographicHash::Sha256);
+            if (!h.addData(&f))
+                continue;
+            const QString hex = QString::fromLatin1(h.result().toHex());
+            pathToHash.insert(p, hex);
+            out.hashGroups[hex].insert(p);
+            ++out.hashedFiles;
+        }
+    }
+    for (auto hIt = out.hashGroups.begin(); hIt != out.hashGroups.end();) {
+        if (hIt.value().size() < 2)
+            hIt = out.hashGroups.erase(hIt);
+        else
+            ++hIt;
+    }
+
+    // Same filename but different content (different size or different hash).
+    QHash<QString, QSet<QString>> byName;
+    for (auto sIt = bySize.constBegin(); sIt != bySize.constEnd(); ++sIt)
+        for (const QString &p : sIt.value())
+            byName[QFileInfo(p).fileName()].insert(p);
+    for (auto nIt = byName.constBegin(); nIt != byName.constEnd(); ++nIt) {
+        if (nIt.value().size() < 2)
+            continue;
+        QSet<QString> distinct;
+        for (const QString &p : nIt.value()) {
+            const QString hx = pathToHash.value(p);
+            distinct.insert(hx.isEmpty() ? QStringLiteral("size:%1").arg(QFileInfo(p).size()) : hx);
+        }
+        if (distinct.size() >= 2)
+            out.nameGroups.insert(nIt.key(), nIt.value());
+    }
+    return out;
+}
+
+void MainWindow::runStandaloneRedundancyScan()
+{
+    if (rootPath.trimmed().isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 QStringLiteral("請先選擇工作區資料夾。"));
+        return;
+    }
+    if (m_redundancyScanWatcher && m_redundancyScanWatcher->isRunning())
+        return;
+
+    if (!m_redundancyScanWatcher) {
+        m_redundancyScanWatcher = new QFutureWatcher<RedundancyScanResult>(this);
+        connect(m_redundancyScanWatcher, &QFutureWatcher<RedundancyScanResult>::finished, this, [this]() {
+            const RedundancyScanResult r = m_redundancyScanWatcher->result();
+            if (m_btnRedundancyScan) {
+                m_btnRedundancyScan->setEnabled(true);
+                m_btnRedundancyScan->setText(
+                    LanguageManager::instance().getText(QStringLiteral("redundancy_scan_btn")));
+            }
+            if (r.workspaceEpochAtSubmit
+                != static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire)))
+                return;
+            // Standalone scan is authoritative for the whole workspace: replace, not merge.
+            m_persistRedundancyHash.clear();
+            m_persistRedundancyName.clear();
+            mergeTaskCenterRedundancyBatch(0, 0, r.hashGroups, r.nameGroups);
+            int dupFiles = 0;
+            for (auto it2 = r.hashGroups.constBegin(); it2 != r.hashGroups.constEnd(); ++it2)
+                dupFiles += it2.value().size() - 1;
+            appendTaskCenterLog(QStringLiteral("🔍 重複檔案掃描完成：掃描 %1 檔、雜湊 %2 檔，"
+                                               "找到 %3 組完全重複（可釋放 %4 個多餘檔案）、%5 組同名異內容。")
+                                    .arg(r.scannedFiles)
+                                    .arg(r.hashedFiles)
+                                    .arg(r.hashGroups.size())
+                                    .arg(dupFiles)
+                                    .arg(r.nameGroups.size()));
+        });
+    }
+
+    if (m_btnRedundancyScan) {
+        m_btnRedundancyScan->setEnabled(false);
+        m_btnRedundancyScan->setText(
+            LanguageManager::instance().getText(QStringLiteral("redundancy_scan_btn_busy")));
+    }
+    appendTaskCenterLog(QStringLiteral("🔍 開始獨立重複檔案掃描（不需 AI 分析）…"));
+    const QString rootClean = QDir::cleanPath(rootPath);
+    const quint64 epoch = static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire));
+    m_redundancyScanWatcher->setFuture(
+        QtConcurrent::run(sfRunStandaloneRedundancyScan, rootClean, epoch));
+}
+
 void MainWindow::mergeTaskCenterRedundancyBatch(int batchFilesAnalyzed,
                                                 int batchNewTagAdds,
                                                 const QMap<QString, QSet<QString>> &hashGroups,
@@ -1511,14 +1719,6 @@ void MainWindow::refreshTaskCenterRedundancyTreeUi()
         cb->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Preferred);
         m_taskCenterRedundancyTree->setItemWidget(row, 0, cb);
         row->setSizeHint(0, QSize(pathFm.horizontalAdvance(displayPath) + 36, row->sizeHint(0).height()));
-    };
-
-    auto filterMultiPath = [](const QMap<QString, QSet<QString>> &in) {
-        QMap<QString, QSet<QString>> out;
-        for (auto it = in.constBegin(); it != in.constEnd(); ++it) {
-            if (it.value().size() >= 2) out.insert(it.key(), it.value());
-        }
-        return out;
     };
 
     const QMap<QString, QSet<QString>> hashToPaths =
@@ -2339,8 +2539,15 @@ void MainWindow::showAiSummaryForFile(const QString &filePath, const QString &su
         m_aiSummaryEdit->clear();
         return;
     }
+    if (m_lowConfidencePaths.contains(QDir::cleanPath(filePath))) {
+        displaySummary.prepend(
+            LanguageManager::instance().getText(QStringLiteral("summary_low_confidence_prefix")));
+    }
 
-    if (!typewriter) {
+    // Typewriter animation is opt-in (demo flair); default is instant display.
+    const bool animationEnabled =
+        QSettings().value(QStringLiteral("ui/summary_typewriter"), false).toBool();
+    if (!typewriter || !animationEnabled) {
         stopSummaryTypewriter();
         m_aiSummaryEdit->setHtml(highlightTextAsHtml(displaySummary, currentLocalSearchHighlightQuery()));
         return;
@@ -2620,9 +2827,25 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_taskCenterRedundancyTree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     tcRightLayout->addWidget(m_taskCenterRedundancyTree, 1);
 
+    auto *tcBtnRow = new QHBoxLayout();
+    m_btnAutoRules = new QPushButton(
+        LanguageManager::instance().getText(QStringLiteral("autorules_btn")), tcRightPane);
+    m_btnAutoRules->setToolTip(
+        LanguageManager::instance().getText(QStringLiteral("autorules_tooltip")));
+    connect(m_btnAutoRules, &QPushButton::clicked, this, &MainWindow::openAutoRulesDialog);
+    tcBtnRow->addWidget(m_btnAutoRules);
+
+    m_btnRedundancyScan = new QPushButton(
+        LanguageManager::instance().getText(QStringLiteral("redundancy_scan_btn")), tcRightPane);
+    m_btnRedundancyScan->setToolTip(
+        LanguageManager::instance().getText(QStringLiteral("redundancy_scan_tooltip")));
+    connect(m_btnRedundancyScan, &QPushButton::clicked, this, &MainWindow::runStandaloneRedundancyScan);
+    tcBtnRow->addWidget(m_btnRedundancyScan);
+
     m_taskCenterCleanBtn = new QPushButton(QStringLiteral("清理勾選檔案"), tcRightPane);
     connect(m_taskCenterCleanBtn, &QPushButton::clicked, this, &MainWindow::onTaskCenterCleanClicked);
-    tcRightLayout->addWidget(m_taskCenterCleanBtn);
+    tcBtnRow->addWidget(m_taskCenterCleanBtn);
+    tcRightLayout->addLayout(tcBtnRow);
 
     m_taskCenterSplitter->addWidget(tcLeftPane);
     m_taskCenterSplitter->addWidget(tcRightPane);
@@ -2740,7 +2963,23 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         "QPushButton:hover { color: #e2e8f0; border-color: #64748b; }"
         "QPushButton:checked { color: #fbbf24; border-color: #fbbf24; background: rgba(251,191,36,0.1); }"));
     m_btnModeToggle->setCheckable(true);
-    m_mainTabWidget->setCornerWidget(m_btnModeToggle, Qt::TopRightCorner);
+    {
+        // Corner: privacy badge (core claim: 100% local, data never leaves) + mode toggle.
+        auto *corner = new QWidget(m_mainTabWidget);
+        auto *cornerLayout = new QHBoxLayout(corner);
+        cornerLayout->setContentsMargins(0, 0, 4, 0);
+        cornerLayout->setSpacing(8);
+        auto *privacyBadge = new QLabel(
+            LanguageManager::instance().getText(QStringLiteral("privacy_badge_label")), corner);
+        privacyBadge->setToolTip(
+            LanguageManager::instance().getText(QStringLiteral("privacy_badge_tooltip")));
+        privacyBadge->setStyleSheet(QStringLiteral(
+            "QLabel { color: #4ade80; font-size: 11px; font-weight: 600;"
+            " border: 1px solid rgba(74,222,128,0.45); border-radius: 9px; padding: 2px 8px; }"));
+        cornerLayout->addWidget(privacyBadge);
+        cornerLayout->addWidget(m_btnModeToggle);
+        m_mainTabWidget->setCornerWidget(corner, Qt::TopRightCorner);
+    }
     connect(m_btnModeToggle, &QPushButton::toggled, this, [this](bool checked) {
         m_simpleModeEnabled = checked;
         applySimpleMode(checked);
@@ -2766,6 +3005,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         if (m_semanticSearchWatcher && m_semanticSearchWatcher->isRunning()) return;
         if (rootPath.trimmed().isEmpty()) return;
 
+        relinkOrphanedTagsByContentHash();
         scanFiles();
         updateTagList();
         if (m_bgAutoAnalyzeEnabled) {
@@ -2872,6 +3112,26 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         lblStatus->setText(LanguageManager::instance()
                                .getText(QStringLiteral("❌ 找不到模型: %1（請確認 assets/models/chat_model.gguf）"))
                                .arg(modelPath));
+        // First-run path: offer to download the recommended models instead of
+        // sending the user to HuggingFace by hand.
+        QTimer::singleShot(400, this, [this]() {
+            auto &lm = LanguageManager::instance();
+            const auto answer = QMessageBox::question(
+                this, lm.getText(QStringLiteral("model_dl_title")),
+                lm.getText(QStringLiteral("model_dl_offer_body")),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            if (answer != QMessageBox::Yes)
+                return;
+            const QString destDir =
+                QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("assets/models"));
+            ModelDownloadDialog dlg(destDir, this);
+            if (dlg.exec() != QDialog::Accepted || dlg.downloadedLlmPath().isEmpty())
+                return;
+            const QString newModel = dlg.downloadedLlmPath();
+            lblStatus->setText(lm.getText(QStringLiteral("正在自動載入模型… %1")).arg(newModel));
+            modelLoadWatcher->setFuture(QtConcurrent::run(
+                [this, newModel]() { return m_llamaEngine->loadModel(newModel.toStdString()); }));
+        });
     } else {
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("正在自動載入模型… %1")).arg(modelPath));
         modelLoadWatcher->setFuture(QtConcurrent::run([this, modelPath]() {
@@ -2898,6 +3158,91 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         updateNextStepHint();
         showFirstRunCard();
     });
+}
+
+void MainWindow::relinkOrphanedTagsByContentHash()
+{
+    if (rootPath.trimmed().isEmpty())
+        return;
+    const QString rootClean = QDir::cleanPath(rootPath);
+
+    // Orphans: tagged paths that vanished from disk but have a persisted content hash.
+    QHash<QString, QString> orphanHashToPath;
+    {
+        std::vector<QString> tagged;
+        {
+            QMutexLocker locker(&tagMutex);
+            tagged = tagManager.taggedFilePaths();
+        }
+        for (const QString &p : tagged) {
+            const QString clean = QDir::cleanPath(p);
+            if (!sfAbsolutePathUnderWorkspaceRoot(clean, rootClean))
+                continue;
+            if (QFile::exists(clean))
+                continue;
+            QString hx;
+            {
+                QMutexLocker locker(&tagMutex);
+                hx = tagManager.fileContentHash(clean);
+            }
+            if (!hx.isEmpty())
+                orphanHashToPath.insert(hx, clean);
+        }
+    }
+    if (orphanHashToPath.isEmpty())
+        return;
+
+    // Newcomers: untagged on-disk files; hash until every orphan is matched.
+    constexpr qint64 kMaxHashBytes = 256LL * 1024 * 1024;
+    constexpr int kMaxCandidatesPerRun = 500;
+    int hashed = 0;
+    int relinked = 0;
+    QDirIterator it(rootClean, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext() && !orphanHashToPath.isEmpty() && hashed < kMaxCandidatesPerRun) {
+        const QString cand = QDir::cleanPath(it.next());
+        if (cand.contains(QStringLiteral("/.smartfile")))
+            continue;
+        bool hasTags = false;
+        {
+            QMutexLocker locker(&tagMutex);
+            hasTags = !tagManager.getTags(cand).empty();
+        }
+        if (hasTags)
+            continue;
+        const QFileInfo fi(cand);
+        if (fi.size() <= 0 || fi.size() > kMaxHashBytes)
+            continue;
+        const QString hx = sha256HexOfFile(cand);
+        ++hashed;
+        if (hx.isEmpty())
+            continue;
+        const auto found = orphanHashToPath.constFind(hx);
+        if (found == orphanHashToPath.constEnd())
+            continue;
+
+        const QString oldPath = found.value();
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.relocateFilePath(oldPath, cand, false);
+        }
+        if (m_aiSummaryByPath.contains(oldPath))
+            m_aiSummaryByPath.insert(cand, m_aiSummaryByPath.take(oldPath));
+        if (m_lowConfidencePaths.remove(oldPath))
+            m_lowConfidencePaths.insert(cand);
+        orphanHashToPath.remove(hx);
+        ++relinked;
+        qDebug() << "relinkOrphanedTags: re-attached tags" << oldPath << "->" << cand;
+    }
+
+    if (relinked > 0) {
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.saveTags();
+        }
+        logToUI(LanguageManager::instance()
+                    .getText(QStringLiteral("tags_relinked_notice"))
+                    .arg(relinked));
+    }
 }
 
 void MainWindow::onDirectoryChanged(const QString &path) {
@@ -3095,6 +3440,19 @@ void MainWindow::onWorkspaceFactoryReset()
 void MainWindow::updateAllTexts() {
     auto &lm = LanguageManager::instance();
 
+    if (m_btnRedundancyScan && m_btnRedundancyScan->isEnabled()) {
+        m_btnRedundancyScan->setText(lm.getText(QStringLiteral("redundancy_scan_btn")));
+        m_btnRedundancyScan->setToolTip(lm.getText(QStringLiteral("redundancy_scan_tooltip")));
+    }
+    if (m_btnAutoRules) {
+        m_btnAutoRules->setText(lm.getText(QStringLiteral("autorules_btn")));
+        m_btnAutoRules->setToolTip(lm.getText(QStringLiteral("autorules_tooltip")));
+    }
+    if (m_btnPauseBatchAnalyze) {
+        m_btnPauseBatchAnalyze->setText(lm.getText(
+            m_batchPaused ? QStringLiteral("batch_resume_label") : QStringLiteral("batch_pause_label")));
+        m_btnPauseBatchAnalyze->setToolTip(lm.getText(QStringLiteral("batch_pause_tooltip")));
+    }
     if (m_mainTabWidget && m_workspaceTab) m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_workspaceTab), lm.getText(QStringLiteral("tab_workspace")));
     if (m_mainTabWidget && m_graphTab) m_mainTabWidget->setTabText(m_mainTabWidget->indexOf(m_graphTab), lm.getText(QStringLiteral("tab_graph")));
     if (m_mainTabWidget && m_settingsTab) {
@@ -3420,6 +3778,12 @@ void MainWindow::haltInFlightAnalysisWork()
         m_scheduleRetryTimer->stop();
     if (btnStopBatchAnalyze)
         btnStopBatchAnalyze->setEnabled(false);
+        m_batchPaused = false;
+        if (m_btnPauseBatchAnalyze) {
+            m_btnPauseBatchAnalyze->setEnabled(false);
+            m_btnPauseBatchAnalyze->setText(
+                LanguageManager::instance().getText(QStringLiteral("batch_pause_label")));
+        }
     if (btnBatchAnalyze)
         btnBatchAnalyze->setEnabled(true);
     if (btnAnalyzeFile)
@@ -3802,6 +4166,12 @@ void MainWindow::setupFourColumnLayout() {
 
     btnStopBatchAnalyze = new QPushButton(QStringLiteral("停止"), this);
     btnStopBatchAnalyze->setEnabled(false);
+    m_batchPaused = false;
+    if (m_btnPauseBatchAnalyze) {
+        m_btnPauseBatchAnalyze->setEnabled(false);
+        m_btnPauseBatchAnalyze->setText(
+            LanguageManager::instance().getText(QStringLiteral("batch_pause_label")));
+    }
     btnStopBatchAnalyze->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
     connect(btnStopBatchAnalyze, &QPushButton::clicked, this, [this]() {
         const bool wasBg = m_batchTriggeredByBackgroundAuto;
@@ -3822,6 +4192,12 @@ void MainWindow::setupFourColumnLayout() {
         updateBackgroundStatusLabel();
         syncBatchProgressBars();
         if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
+        m_batchPaused = false;
+        if (m_btnPauseBatchAnalyze) {
+            m_btnPauseBatchAnalyze->setEnabled(false);
+            m_btnPauseBatchAnalyze->setText(
+                LanguageManager::instance().getText(QStringLiteral("batch_pause_label")));
+        }
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
         if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
         syncBatchAnalyzeButtonLabel();
@@ -3835,6 +4211,15 @@ void MainWindow::setupFourColumnLayout() {
     });
     fileControlsRow->addWidget(btnStopBatchAnalyze, 0);
 
+    m_btnPauseBatchAnalyze = new QPushButton(QStringLiteral("暫停"), this);
+    m_btnPauseBatchAnalyze->setEnabled(false);
+    m_btnPauseBatchAnalyze->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    m_btnPauseBatchAnalyze->setToolTip(
+        LanguageManager::instance().getText(QStringLiteral("batch_pause_tooltip")));
+    connect(m_btnPauseBatchAnalyze, &QPushButton::clicked, this,
+            [this]() { setBatchPaused(!m_batchPaused); });
+    fileControlsRow->addWidget(m_btnPauseBatchAnalyze, 0);
+
     filesLayout->addLayout(fileControlsRow);
 
     fileList = new QListWidget(this);
@@ -3845,7 +4230,7 @@ void MainWindow::setupFourColumnLayout() {
     connect(fileList, &QListWidget::itemClicked, this, &MainWindow::onFileSelected);
     connect(fileList, &QListWidget::customContextMenuRequested, this, &MainWindow::showFileContextMenu);
     connect(fileList, &QListWidget::itemSelectionChanged, this, &MainWindow::onFileSelectionChanged);
-    connect(fileList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+    connect(fileList, &QListWidget::itemDoubleClicked, this, [](QListWidgetItem *item) {
         if (!item) return;
         const QString absPath = item->data(Qt::UserRole).toString();
         if (absPath.isEmpty()) return;
@@ -5031,6 +5416,111 @@ void MainWindow::executeBatchArchiveForSelectedFiles()
     }
 }
 
+QString MainWindow::archiveJournalAbsPath() const
+{
+    if (rootPath.trimmed().isEmpty())
+        return QString();
+    return QDir(QDir::cleanPath(rootPath))
+        .absoluteFilePath(QStringLiteral(".smartfile/archive_journal.json"));
+}
+
+void MainWindow::writeArchiveJournalFile(const QList<QPair<QString, QString>> &fromToPairs)
+{
+    const QString jp = archiveJournalAbsPath();
+    if (jp.isEmpty())
+        return;
+    QDir().mkpath(QFileInfo(jp).absolutePath());
+    QJsonArray arr;
+    for (const auto &p : fromToPairs) {
+        QJsonObject o;
+        o.insert(QStringLiteral("from"), p.first);
+        o.insert(QStringLiteral("to"), p.second);
+        arr.append(o);
+    }
+    QJsonObject root;
+    root.insert(QStringLiteral("status"), QStringLiteral("in_progress"));
+    root.insert(QStringLiteral("moves"), arr);
+    QFile f(jp);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+        f.flush();
+    }
+}
+
+void MainWindow::clearArchiveJournalFile()
+{
+    const QString jp = archiveJournalAbsPath();
+    if (!jp.isEmpty())
+        QFile::remove(jp);
+}
+
+void MainWindow::pushArchiveUndoBatch(const QList<QPair<QString, QString>> &batch)
+{
+    if (batch.isEmpty())
+        return;
+    m_archiveUndoStack.append(batch);
+    while (m_archiveUndoStack.size() > kArchiveUndoDepth)
+        m_archiveUndoStack.removeFirst();
+    if (btnUndoPhysicalArchive)
+        btnUndoPhysicalArchive->setEnabled(true);
+}
+
+void MainWindow::recoverPendingArchiveJournal()
+{
+    const QString jp = archiveJournalAbsPath();
+    if (jp.isEmpty() || !QFile::exists(jp))
+        return;
+    QFile f(jp);
+    if (!f.open(QIODevice::ReadOnly))
+        return;
+    const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+    f.close();
+    const QJsonArray moves = root.value(QStringLiteral("moves")).toArray();
+    if (moves.isEmpty()) {
+        QFile::remove(jp);
+        return;
+    }
+
+    auto &lm = LanguageManager::instance();
+    const auto answer = QMessageBox::question(
+        this, lm.getText(QStringLiteral("archive_recover_title")),
+        lm.getText(QStringLiteral("archive_recover_body")).arg(moves.size()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (answer != QMessageBox::Yes) {
+        QFile::remove(jp);
+        return;
+    }
+
+    int restored = 0;
+    for (int i = moves.size() - 1; i >= 0; --i) {
+        const QJsonObject mo = moves.at(i).toObject();
+        const QString from = QDir::cleanPath(mo.value(QStringLiteral("from")).toString());
+        const QString to = QDir::cleanPath(mo.value(QStringLiteral("to")).toString());
+        if (from.isEmpty() || to.isEmpty())
+            continue;
+        // Roll back only moves that actually happened and whose source slot is free.
+        if (!QFile::exists(to) || QFile::exists(from))
+            continue;
+        if (!QDir().mkpath(QFileInfo(from).absolutePath()))
+            continue;
+        if (!QFile::rename(to, from))
+            continue;
+        {
+            QMutexLocker locker(&tagMutex);
+            tagManager.relocateFilePath(to, from, false);
+        }
+        ++restored;
+    }
+    {
+        QMutexLocker locker(&tagMutex);
+        tagManager.saveTags();
+    }
+    QFile::remove(jp);
+    logToUI(lm.getText(QStringLiteral("archive_recover_done")).arg(restored));
+    scanFiles();
+    updateTagList();
+}
+
 void MainWindow::executePhysicalArchive() {
     auto &lm = LanguageManager::instance();
     if (rootPath.isEmpty()) {
@@ -5099,9 +5589,8 @@ void MainWindow::executePhysicalArchive() {
         return;
     }
 
-    m_lastMoveHistory.clear();
-    if (btnUndoPhysicalArchive)
-        btnUndoPhysicalArchive->setEnabled(false);
+    QList<QPair<QString, QString>> moveBatch;     // (newPath, oldPath) for undo
+    QList<QPair<QString, QString>> journalMoves;  // (from, to) crash journal
 
     QSet<QString> sourceDirsForCleanup;
     int movedCount = 0;
@@ -5132,6 +5621,9 @@ void MainWindow::executePhysicalArchive() {
         if (QDir::cleanPath(fiSrc.absolutePath()) == QDir::cleanPath(destDir))
             continue;
 
+        journalMoves.append(qMakePair(srcPath, destPath));
+        writeArchiveJournalFile(journalMoves);
+
         if (!sfMoveFileForPhysicalArchive(srcPath, destPath)) {
             qDebug() << "executePhysicalArchive: move failed" << srcPath << "->" << destPath;
             continue;
@@ -5139,7 +5631,7 @@ void MainWindow::executePhysicalArchive() {
 
         qDebug() << "executePhysicalArchive: moved" << srcPath << "->" << destPath;
         ++movedCount;
-        m_lastMoveHistory.push_back(qMakePair(destPath, srcPath));
+        moveBatch.push_back(qMakePair(destPath, srcPath));
         sourceDirsForCleanup.insert(fiSrc.absolutePath());
 
         {
@@ -5161,8 +5653,8 @@ void MainWindow::executePhysicalArchive() {
         tagManager.saveTags();
     }
 
-    if (btnUndoPhysicalArchive)
-        btnUndoPhysicalArchive->setEnabled(!m_lastMoveHistory.isEmpty());
+    clearArchiveJournalFile();
+    pushArchiveUndoBatch(moveBatch);
 
     logToUI(QStringLiteral("Physical archive: moved %1 file(s).").arg(movedCount));
 
@@ -5196,7 +5688,7 @@ void MainWindow::executePhysicalArchive() {
 }
 
 void MainWindow::undoLastPhysicalArchive() {
-    if (m_lastMoveHistory.isEmpty()) {
+    if (m_archiveUndoStack.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("回上一步 (復原歸檔)"), QStringLiteral("沒有可復原的歸檔紀錄。"));
         return;
     }
@@ -5211,8 +5703,11 @@ void MainWindow::undoLastPhysicalArchive() {
         return;
     }
 
+    const QList<QPair<QString, QString>> batch = m_archiveUndoStack.takeLast();
+    QList<QPair<QString, QString>> journalMoves;  // (from, to) crash journal
+
     bool movedAny = false;
-    for (const auto &p : m_lastMoveHistory) {
+    for (const auto &p : batch) {
         const QString newPath = QDir::cleanPath(p.first);
         const QString oldPath = QDir::cleanPath(p.second);
 
@@ -5237,6 +5732,9 @@ void MainWindow::undoLastPhysicalArchive() {
             continue;
         }
 
+        journalMoves.append(qMakePair(newPath, oldPath));
+        writeArchiveJournalFile(journalMoves);
+
         QFile f(newPath);
         if (!f.rename(oldPath)) {
             qDebug() << "undoLastPhysicalArchive: rename failed" << newPath << "->" << oldPath << f.errorString();
@@ -5256,9 +5754,9 @@ void MainWindow::undoLastPhysicalArchive() {
         tagManager.saveTags();
     }
 
-    m_lastMoveHistory.clear();
+    clearArchiveJournalFile();
     if (btnUndoPhysicalArchive) {
-        btnUndoPhysicalArchive->setEnabled(false);
+        btnUndoPhysicalArchive->setEnabled(!m_archiveUndoStack.isEmpty());
     }
 
     scanFiles();
@@ -5345,6 +5843,13 @@ void MainWindow::mapsHomeFixAndSetRoot(const QString &dir) {
 
     tagManager.loadTags(rootPath.toStdString());
     tagManager.repairMalformedTagKeys();
+    m_archiveUndoStack.clear();
+    if (btnUndoPhysicalArchive)
+        btnUndoPhysicalArchive->setEnabled(false);
+    recoverPendingArchiveJournal();
+    relinkOrphanedTagsByContentHash();
+    m_embeddingByHash.clear();
+    m_embeddingIndexLoaded = false;
     loadCorrectionLogs();
     reloadCategoriesConfigFromWorkspace();
     disableSemanticOverlays();
@@ -5747,6 +6252,8 @@ void MainWindow::restorePersistedAnalysisUiState()
         if (!sfSummaryAcceptableForStorage(summary))
             continue;
         m_aiSummaryByPath.insert(path, summary);
+        if (cache.value(QStringLiteral("low_confidence")).toBool())
+            m_lowConfidencePaths.insert(path);
     }
 
     updateTagList();
@@ -6059,7 +6566,7 @@ void MainWindow::updateTagListCountsOnly() {
         return n;
     };
 
-    auto updateList = [this, &countTaggedFilesInWorkspace](QListWidget *list) {
+    auto updateList = [&countTaggedFilesInWorkspace](QListWidget *list) {
         if (!list) return;
         for (int i = 0; i < list->count(); ++i) {
             QListWidgetItem *it = list->item(i);
@@ -6081,7 +6588,7 @@ void MainWindow::updateTagListCountsOnly() {
         }
     };
 
-    auto updateAiTree = [this, &countTaggedFilesInWorkspace](QTreeWidget *tree) {
+    auto updateAiTree = [&countTaggedFilesInWorkspace](QTreeWidget *tree) {
         if (!tree) return;
         std::function<void(QTreeWidgetItem *)> walk;
         walk = [&](QTreeWidgetItem *it) {
@@ -6253,7 +6760,6 @@ void MainWindow::updateTagList() {
             QFont f = root->font(0);
             f.setBold(true);
             root->setFont(0, f);
-            const int totalKids = drawerToLeaves.value(drawerKey).size();
             int sumFiles = 0;
             for (const QString &lf : drawerToLeaves.value(drawerKey))
                 sumFiles += countFor(lf);
@@ -6971,9 +7477,8 @@ void MainWindow::onSaveSemanticResultsAsAiCategory()
         return;
     }
 
-    m_lastMoveHistory.clear();
-    if (btnUndoPhysicalArchive)
-        btnUndoPhysicalArchive->setEnabled(false);
+    QList<QPair<QString, QString>> moveBatch;     // (newPath, oldPath) for undo
+    QList<QPair<QString, QString>> journalMoves;  // (from, to) crash journal
 
     QSet<QString> sourceDirsForCleanup;
     int moved = 0;
@@ -6991,12 +7496,15 @@ void MainWindow::onSaveSemanticResultsAsAiCategory()
         const QString destPath = QDir(destDir).absoluteFilePath(fiSrc.fileName());
         if (QDir::cleanPath(fiSrc.absolutePath()) == QDir::cleanPath(destDir))
             continue;
+        journalMoves.append(qMakePair(srcPath, destPath));
+        writeArchiveJournalFile(journalMoves);
+
         if (!sfMoveFileForPhysicalArchive(srcPath, destPath)) {
             qDebug() << "onSaveSemanticResultsAsAiCategory: move failed" << srcPath << "->" << destPath;
             continue;
         }
 
-        m_lastMoveHistory.push_back(qMakePair(destPath, srcPath));
+        moveBatch.push_back(qMakePair(destPath, srcPath));
         sourceDirsForCleanup.insert(fiSrc.absolutePath());
         {
             QMutexLocker locker(&tagMutex);
@@ -7016,8 +7524,8 @@ void MainWindow::onSaveSemanticResultsAsAiCategory()
         tagManager.saveTags();
     }
 
-    if (btnUndoPhysicalArchive)
-        btnUndoPhysicalArchive->setEnabled(!m_lastMoveHistory.isEmpty());
+    clearArchiveJournalFile();
+    pushArchiveUndoBatch(moveBatch);
 
     scanFiles();
     updateTagList();
@@ -7107,12 +7615,211 @@ void MainWindow::setHeroSemanticBusy(bool busy)
     }
 }
 
+QString MainWindow::embeddingIndexFilePath() const
+{
+    if (rootPath.trimmed().isEmpty())
+        return QString();
+    return QDir(QDir::cleanPath(rootPath))
+        .absoluteFilePath(QStringLiteral(".smartfile/embeddings.bin"));
+}
+
+void MainWindow::loadEmbeddingIndexFromDisk()
+{
+    if (m_embeddingIndexLoaded)
+        return;
+    m_embeddingIndexLoaded = true;
+    m_embeddingByHash.clear();
+    const QString p = embeddingIndexFilePath();
+    if (p.isEmpty() || !QFile::exists(p))
+        return;
+    QFile f(p);
+    if (!f.open(QIODevice::ReadOnly))
+        return;
+    QDataStream ds(&f);
+    ds.setVersion(QDataStream::Qt_6_0);
+    ds >> m_embeddingByHash;
+    qDebug() << "[Embedding] index loaded:" << m_embeddingByHash.size() << "vectors";
+}
+
+void MainWindow::saveEmbeddingIndexToDisk() const
+{
+    const QString p = embeddingIndexFilePath();
+    if (p.isEmpty())
+        return;
+    QDir().mkpath(QFileInfo(p).absolutePath());
+    QFile f(p);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return;
+    QDataStream ds(&f);
+    ds.setVersion(QDataStream::Qt_6_0);
+    ds << m_embeddingByHash;
+}
+
+bool MainWindow::ensureEmbeddingEngineLoaded()
+{
+    if (m_embeddingEngine && m_embeddingEngine->isModelLoaded())
+        return true;
+    const QString p = resolveEmbeddingModelPath();
+    if (p.isEmpty())
+        return false;
+    if (!m_embeddingEngine)
+        m_embeddingEngine = new EmbeddingEngine();
+    return m_embeddingEngine->loadModel(p.toStdString());
+}
+
+/// Vector semantic search across the whole workspace: embed-on-miss with a
+/// per-run cap, then cosine ranking. Replaces the 30-file LLM prompt stuffing.
+static SemanticSearchWorkerResult sfRunEmbeddingSemanticSearch(
+    const QString &rootClean,
+    const QHash<QString, QString> &summaryByPath,
+    QHash<QString, QVector<float>> indexSnapshot,
+    const QString &userQuery,
+    quint64 epoch,
+    TagManager *tagMgr,
+    QMutex *tagMutexPtr,
+    EmbeddingEngine *emb)
+{
+    SemanticSearchWorkerResult out;
+    out.workspaceEpochAtSubmit = epoch;
+    out.usedEmbeddings = true;
+
+    const QVector<float> queryVec = emb->embedText(userQuery);
+    if (queryVec.isEmpty()) {
+        out.rawLlmText = QStringLiteral("Error: query embedding failed");
+        return out;
+    }
+
+    constexpr int kMaxNewEmbedsPerRun = 800;
+    constexpr int kTopK = 30;
+    constexpr float kSimilarityFloor = 0.35f;
+
+    struct Scored {
+        QString path;
+        float sim;
+    };
+    std::vector<Scored> scored;
+
+    QDirIterator it(rootClean, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString p = QDir::cleanPath(it.next());
+        if (p.contains(QStringLiteral("/.smartfile")))
+            continue;
+        const QFileInfo fi(p);
+        if (!sfSemanticWorkerIsAnalyzableFile(fi))
+            continue;
+
+        QString hashKey;
+        QString tagsJoined;
+        {
+            QMutexLocker locker(tagMutexPtr);
+            hashKey = tagMgr->fileContentHash(p);
+            QStringList tl;
+            for (const QString &t : tagMgr->getTags(p)) {
+                const QString tt = TagManager::stripAiPrefix(t).trimmed();
+                if (!tt.isEmpty())
+                    tl << tt;
+            }
+            tagsJoined = tl.join(QLatin1Char(' '));
+        }
+        const QString key = hashKey.isEmpty() ? (QStringLiteral("p:") + p) : hashKey;
+
+        QVector<float> v = indexSnapshot.value(key);
+        if (v.isEmpty()) {
+            if (out.newEmbeddings.size() >= kMaxNewEmbedsPerRun)
+                continue; // index keeps growing across runs
+            QString text = fi.fileName();
+            if (!tagsJoined.isEmpty())
+                text += QLatin1Char(' ') + tagsJoined;
+            const QString sum = summaryByPath.value(p).trimmed();
+            if (!sum.isEmpty())
+                text += QLatin1Char(' ') + sum.left(400);
+            v = emb->embedText(text);
+            if (v.isEmpty())
+                continue;
+            out.newEmbeddings.insert(key, v);
+        }
+
+        out.validWorkspacePathsSnapshot.insert(p);
+        scored.push_back({p, EmbeddingEngine::similarity(queryVec, v)});
+    }
+    out.searchedFileCount = static_cast<int>(scored.size());
+
+    std::sort(scored.begin(), scored.end(),
+              [](const Scored &a, const Scored &b) { return a.sim > b.sim; });
+
+    int id = 0;
+    for (const Scored &s : scored) {
+        if (id >= kTopK)
+            break;
+        // Always surface the 3 nearest matches; beyond that require the floor.
+        if (id >= 3 && s.sim < kSimilarityFloor)
+            break;
+        ++id;
+        out.pickedAbsolutePaths.append(s.path);
+        out.idToPathSnapshot.insert(id, s.path);
+    }
+    out.rawLlmText = QStringLiteral("embedding-search ok (%1 files)").arg(out.searchedFileCount);
+    return out;
+}
+
 void MainWindow::runHeroSemanticSearchQuery()
 {
     if (!m_heroOmnibox) return;
     const QString t = m_heroOmnibox->text();
     if (t.trimmed().isEmpty()) {
         clearSemanticSearchFilter();
+        return;
+    }
+
+    // Preferred path: dedicated embedding model → vector search over the whole
+    // workspace (no 30-file cap, no LLM needed).
+    if (ensureEmbeddingEngineLoaded()) {
+        if (m_semanticSearchWatcher && m_semanticSearchWatcher->isRunning())
+            return;
+        const QString rootSnap = QDir::cleanPath(rootPath);
+        if (rootSnap.isEmpty()) {
+            if (lblStatus)
+                lblStatus->setText(QStringLiteral("⚠️ 尚未設定工作區"));
+            return;
+        }
+        if (!m_semanticSearchWatcher)
+            return;
+
+        loadEmbeddingIndexFromDisk();
+        const QHash<QString, QString> summarySnap = m_aiSummaryByPath;
+        const QHash<QString, QVector<float>> indexSnap = m_embeddingByHash;
+        const QString userQuery = t.trimmed();
+        const quint64 searchEpoch =
+            static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire));
+
+        setHeroSemanticBusy(true);
+        logToUI(QStringLiteral("Semantic search (embeddings): \"%1\"").arg(userQuery));
+        if (lblStatus)
+            lblStatus->setText(
+                LanguageManager::instance().getText(QStringLiteral("語意搜尋進行中…")));
+
+        TagManager *tm = &tagManager;
+        QMutex *mx = &tagMutex;
+        EmbeddingEngine *emb = m_embeddingEngine;
+        m_semanticSearchWatcher->setFuture(QtConcurrent::run(
+            [rootSnap, summarySnap, indexSnap, userQuery, searchEpoch, tm, mx,
+             emb]() -> SemanticSearchWorkerResult {
+                try {
+                    return sfRunEmbeddingSemanticSearch(rootSnap, summarySnap, indexSnap,
+                                                        userQuery, searchEpoch, tm, mx, emb);
+                } catch (const std::exception &e) {
+                    SemanticSearchWorkerResult errOut;
+                    errOut.workspaceEpochAtSubmit = searchEpoch;
+                    errOut.rawLlmText =
+                        QStringLiteral("Error: %1").arg(QString::fromUtf8(e.what()));
+                    return errOut;
+                } catch (...) {
+                    SemanticSearchWorkerResult errOut;
+                    errOut.workspaceEpochAtSubmit = searchEpoch;
+                    errOut.rawLlmText = QStringLiteral("Error: embedding search failed");
+                    return errOut;
+                }
+            }));
         return;
     }
 
@@ -7156,7 +7863,6 @@ void MainWindow::runHeroSemanticSearchQuery()
         return;
     }
 
-    const int maxFiles = 30;
     const QHash<QString, QString> summarySnap = m_aiSummaryByPath;
     const QString userQuery = t.trimmed();
 
@@ -7167,7 +7873,8 @@ void MainWindow::runHeroSemanticSearchQuery()
 
     const quint64 searchEpoch = static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire));
     m_semanticSearchWatcher->setFuture(QtConcurrent::run(
-        [rootSnap, maxFiles, summarySnap, userQuery, searchEpoch](TagManager *tm, QMutex *mx, LlamaEngine *eng) -> SemanticSearchWorkerResult {
+        [rootSnap, summarySnap, userQuery, searchEpoch](TagManager *tm, QMutex *mx, LlamaEngine *eng) -> SemanticSearchWorkerResult {
+            constexpr int maxFiles = 30;
             try {
                 return sfRunSemanticSearchWorker(rootSnap, maxFiles, summarySnap, tm, mx, eng, userQuery, searchEpoch);
             } catch (const std::exception &e) {
@@ -7210,6 +7917,16 @@ void MainWindow::onSemanticSearchFinished()
 
     if (res.rawLlmText.trimmed().startsWith(QStringLiteral("Error:"), Qt::CaseInsensitive))
         qWarning() << "[semantic-search] LLM reported error (fallback may have been used):" << res.rawLlmText;
+
+    // Persist vectors computed during this run so later searches start warm.
+    if (res.usedEmbeddings && !res.newEmbeddings.isEmpty()) {
+        for (auto nIt = res.newEmbeddings.constBegin(); nIt != res.newEmbeddings.constEnd(); ++nIt)
+            m_embeddingByHash.insert(nIt.key(), nIt.value());
+        saveEmbeddingIndexToDisk();
+        logToUI(QStringLiteral("Embedding index: +%1 vectors (total %2)")
+                    .arg(res.newEmbeddings.size())
+                    .arg(m_embeddingByHash.size()));
+    }
 
     QSet<QString> picked;
     QStringList pickedOrdered;
@@ -7254,7 +7971,13 @@ void MainWindow::onSemanticSearchFinished()
     refreshCurrentAnalysisTargetUi();
 
     if (lblStatus) {
-        lblStatus->setText(QStringLiteral("✅ 語意搜尋完成，已為您找到最相關的資料。"));
+        if (res.usedEmbeddings) {
+            lblStatus->setText(QStringLiteral("✅ 語意搜尋完成（向量索引）：已搜尋 %1 個檔案，找到 %2 筆相關結果。")
+                                   .arg(res.searchedFileCount)
+                                   .arg(m_semanticPickedPaths.size()));
+        } else {
+            lblStatus->setText(QStringLiteral("✅ 語意搜尋完成，已為您找到最相關的資料。"));
+        }
     }
 }
 
@@ -7898,6 +8621,39 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
         return tagManager.getRejectedTagsForFile(fp).join(QStringLiteral(", "));
     }();
 
+    // Few-shot correction feedback: corrections the user made on SIMILAR files
+    // (same suffix or same folder) become soft guidance in the prompt.
+    const QString correctionExamples = [this, &fi, fp]() {
+        std::vector<TagRejectedLogEntry> entries;
+        {
+            QMutexLocker locker(&tagMutex);
+            entries = tagManager.rejectedTagLogEntries();
+        }
+        if (entries.empty())
+            return QString();
+        const QString suffix = fi.suffix().toLower();
+        const QString parentDir = QDir::cleanPath(fi.absolutePath());
+        QStringList lines;
+        QSet<QString> seen;
+        for (auto it = entries.rbegin(); it != entries.rend() && lines.size() < 3; ++it) {
+            const QString entryPath = QDir::cleanPath(it->filePath);
+            if (entryPath.isEmpty() || entryPath == fp)
+                continue; // own-file rejections are already hard-excluded
+            const QFileInfo efi(entryPath);
+            const bool similar = (efi.suffix().toLower() == suffix)
+                                 || (QDir::cleanPath(efi.absolutePath()) == parentDir);
+            if (!similar)
+                continue;
+            const QString key = efi.fileName() + QLatin1Char('|') + it->rejectedTag;
+            if (seen.contains(key))
+                continue;
+            seen.insert(key);
+            lines << QStringLiteral("- 「%1」曾被誤標為「%2」（使用者已拒絕）")
+                         .arg(efi.fileName(), it->rejectedTag);
+        }
+        return lines.join(QLatin1Char('\n'));
+    }();
+
     const QString suffix = fi.suffix().toLower();
     const QSet<QString> zipXmlExtractable = zipOrPdfTextExtractSuffixes();
     const QSet<QString> legacyBinaryBlocked = {QStringLiteral("doc"), QStringLiteral("xls"), QStringLiteral("ppt")};
@@ -7935,6 +8691,7 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
 
     // Enrich sparse content with parent folder context so LLM has more signal
     if (!pdfMetadataOnly && contentQ.trimmed().size() < 50) {
+        m_lowConfidencePaths.insert(QDir::cleanPath(fp));
         const QString parentFolder = fi.dir().dirName();
         if (!parentFolder.isEmpty() && parentFolder != QStringLiteral("."))
             contentQ.prepend(QStringLiteral("[Parent folder: %1]\n").arg(parentFolder));
@@ -7953,14 +8710,15 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
     const quint64 flightEpoch = static_cast<quint64>(m_workspaceEpoch.load(std::memory_order_acquire));
     QFuture<SfAnalysisOutcome> future = QtConcurrent::run(
         [this, flightEpoch, filename, content, rejectedTagsCsv, existingTags, contentReadable, suffix,
-         pdfMetadataOnly]() {
+         pdfMetadataOnly, correctionExamples]() {
             std::string raw = m_llamaEngine->suggestTags(filename.toStdString(),
                                                        content,
                                                        rejectedTagsCsv.toStdString(),
                                                        existingTags.toStdString(),
                                                        contentReadable,
                                                        suffix.toStdString(),
-                                                       pdfMetadataOnly);
+                                                       pdfMetadataOnly,
+                                                       correctionExamples.toStdString());
             return SfAnalysisOutcome{std::move(raw), flightEpoch};
         });
     ++m_activeAnalysisWorkers;
@@ -7983,6 +8741,12 @@ void MainWindow::cancelAnalysis() {
         m_currentAnalyzingFile.clear();
         m_backgroundAnalyzeFolderLabel.clear();
         if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
+        m_batchPaused = false;
+        if (m_btnPauseBatchAnalyze) {
+            m_btnPauseBatchAnalyze->setEnabled(false);
+            m_btnPauseBatchAnalyze->setText(
+                LanguageManager::instance().getText(QStringLiteral("batch_pause_label")));
+        }
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
         syncBatchAnalyzeButtonLabel();
         updateBackgroundStatusLabel();
@@ -7994,6 +8758,49 @@ void MainWindow::cancelAnalysis() {
     updateStartAnalysisButtonUi();
     unlockUI();
     syncFolderNavigationLockState();
+}
+
+void MainWindow::ensureBatteryCheckTimer()
+{
+    if (m_batteryCheckTimer)
+        return;
+    m_batteryCheckTimer = new QTimer(this);
+    m_batteryCheckTimer->setInterval(60 * 1000);
+    connect(m_batteryCheckTimer, &QTimer::timeout, this, [this]() {
+        if (!m_isBatchMode) {
+            m_batteryCheckTimer->stop();
+            return;
+        }
+        if (m_batchPaused || m_batteryPauseFiredThisBatch)
+            return;
+        if (!QSettings().value(QStringLiteral("analysis/pause_on_battery"), false).toBool())
+            return;
+        if (!sfRunningOnBattery())
+            return;
+        m_batteryPauseFiredThisBatch = true;
+        logToUI(LanguageManager::instance().getText(QStringLiteral("batch_battery_pause_notice")), 1);
+        setBatchPaused(true);
+    });
+}
+
+void MainWindow::setBatchPaused(bool paused)
+{
+    if (m_batchPaused == paused)
+        return;
+    m_batchPaused = paused;
+    auto &lm = LanguageManager::instance();
+    if (m_btnPauseBatchAnalyze) {
+        m_btnPauseBatchAnalyze->setText(lm.getText(
+            paused ? QStringLiteral("batch_resume_label") : QStringLiteral("batch_pause_label")));
+    }
+    if (paused) {
+        logToUI(lm.getText(QStringLiteral("batch_paused_notice")));
+        updateBackgroundStatusLabel();
+    } else {
+        logToUI(lm.getText(QStringLiteral("batch_resumed_notice")));
+        if (m_isBatchMode)
+            processNextInQueue();
+    }
 }
 
 void MainWindow::startBatchAnalysis() {
@@ -8032,6 +8839,12 @@ void MainWindow::processNextInQueue() {
         stopAnalysisSpinner();
         if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(true);
         if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(false);
+        m_batchPaused = false;
+        if (m_btnPauseBatchAnalyze) {
+            m_btnPauseBatchAnalyze->setEnabled(false);
+            m_btnPauseBatchAnalyze->setText(
+                LanguageManager::instance().getText(QStringLiteral("batch_pause_label")));
+        }
         if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
         syncBatchAnalyzeButtonLabel();
         updateBackgroundStatusLabel();
@@ -8045,6 +8858,18 @@ void MainWindow::processNextInQueue() {
 
     if (m_analysisQueue.isEmpty()) {
         tryFinalizeBatchAnalysis();
+        return;
+    }
+
+    if (m_batchPaused) {
+        m_currentAnalyzingFile.clear();
+        stopAnalysisSpinner();
+        if (lblBatchStatus) {
+            lblBatchStatus->setText(
+                LanguageManager::instance().getText(QStringLiteral("batch_paused_notice")));
+            refreshRobotAnalysisStatusLabelHeight(lblBatchStatus);
+        }
+        updateBackgroundStatusLabel();
         return;
     }
 
@@ -8354,10 +9179,27 @@ void MainWindow::watchDirectoryRecursively(const QString &rootPathParam)
         }
     }
 
+    int failed = 0;
     for (const QString &p : toAdd) {
-        if (!m_dirWatcher->addPath(p))
+        if (!m_dirWatcher->addPath(p)) {
             qWarning() << "QFileSystemWatcher addPath failed:" << p;
+            ++failed;
+        }
     }
+    notifyWatchDegradedOnce(failed);
+}
+
+void MainWindow::notifyWatchDegradedOnce(int failedCount)
+{
+    if (m_watchDegradedNotified || failedCount <= 0)
+        return;
+    m_watchDegradedNotified = true;
+    const QString msg = LanguageManager::instance()
+                            .getText(QStringLiteral("watch_degraded_notice"))
+                            .arg(failedCount);
+    logToUI(msg, 1);
+    if (lblStatus)
+        lblStatus->setText(msg);
 }
 
 void MainWindow::applyFilesystemWatchPolicy()
@@ -8366,6 +9208,7 @@ void MainWindow::applyFilesystemWatchPolicy()
     const QStringList oldDirs = m_dirWatcher->directories();
     if (!oldDirs.isEmpty()) m_dirWatcher->removePaths(oldDirs);
     m_recursiveWatchPaths.clear();
+    m_watchDegradedNotified = false;
 
     if (rootPath.trimmed().isEmpty()) return;
 
@@ -8402,11 +9245,15 @@ void MainWindow::ensureRecursiveWatchCoversWorkspace()
     }
 
     const QStringList watched = m_dirWatcher->directories();
+    int failed = 0;
     for (const QString &p : toAdd) {
         if (watched.contains(p)) continue;
-        if (!m_dirWatcher->addPath(p))
+        if (!m_dirWatcher->addPath(p)) {
             qWarning() << "QFileSystemWatcher addPath failed (dynamic):" << p;
+            ++failed;
+        }
     }
+    notifyWatchDegradedOnce(failed);
 }
 
 void MainWindow::primeAnalysisCacheFromDisk(const QString &sha256Hex)
@@ -8449,6 +9296,17 @@ void MainWindow::beginBatchAnalysisUi()
     if (btnAnalyzeFile) btnAnalyzeFile->setEnabled(false);
     if (btnBatchAnalyze) btnBatchAnalyze->setEnabled(false);
     if (btnStopBatchAnalyze) btnStopBatchAnalyze->setEnabled(true);
+    m_batchPaused = false;
+    m_batchEtaTimer.restart();
+    m_batteryPauseFiredThisBatch = false;
+    ensureBatteryCheckTimer();
+    if (m_batteryCheckTimer)
+        m_batteryCheckTimer->start();
+    if (m_btnPauseBatchAnalyze) {
+        m_btnPauseBatchAnalyze->setEnabled(true);
+        m_btnPauseBatchAnalyze->setText(
+            LanguageManager::instance().getText(QStringLiteral("batch_pause_label")));
+    }
     updateBackgroundStatusLabel();
     syncBatchProgressBars();
     syncBatchAnalyzeButtonLabel();
@@ -8468,6 +9326,9 @@ void MainWindow::applyCachedAnalysisForHashHit(const QString &fp, const QJsonObj
             recordBatchPathForContentHash(contentHashHex, fp);
         return;
     }
+
+    if (copy.value(QStringLiteral("low_confidence")).toBool())
+        m_lowConfidencePaths.insert(QDir::cleanPath(fp));
 
     if (m_isBatchMode) {
         persistAnalysisResultForFile(fp, copy, contentHashHex);
@@ -8516,7 +9377,23 @@ QString MainWindow::formatBatchAnalyzingStatusLine() const
     }
     if (fname.isEmpty())
         fname = QStringLiteral("—");
-    return QStringLiteral("🤖 正在分析 (%1/%2): %3").arg(idx).arg(m_totalBatchSize).arg(fname);
+
+    QString etaPart;
+    if (m_batchCompletedCount >= 2 && m_batchEtaTimer.isValid()) {
+        const double elapsedSec = m_batchEtaTimer.elapsed() / 1000.0;
+        const int remaining = qMax(0, m_totalBatchSize - m_batchCompletedCount);
+        const int etaSec = static_cast<int>(elapsedSec / m_batchCompletedCount * remaining);
+        if (etaSec >= 60)
+            etaPart = LanguageManager::instance()
+                          .getText(QStringLiteral("batch_eta_min_sec"))
+                          .arg(etaSec / 60)
+                          .arg(etaSec % 60);
+        else
+            etaPart = LanguageManager::instance()
+                          .getText(QStringLiteral("batch_eta_sec"))
+                          .arg(etaSec);
+    }
+    return QStringLiteral("🤖 正在分析 (%1/%2): %3%4").arg(idx).arg(m_totalBatchSize).arg(fname, etaPart);
 }
 
 void MainWindow::persistAnalysisResultForFile(const QString &filePath,
@@ -8541,6 +9418,8 @@ void MainWindow::persistAnalysisResultForFile(const QString &filePath,
 
     QJsonObject persistObj = obj;
     persistObj.insert(QStringLiteral("summary"), summary);
+    if (m_lowConfidencePaths.contains(fp))
+        persistObj.insert(QStringLiteral("low_confidence"), true);
     QJsonArray tagsForPersist = persistObj.value(QStringLiteral("tags")).toArray();
     bool hasNonemptyTag = false;
     for (const QJsonValue &v : tagsForPersist) {
@@ -8684,6 +9563,12 @@ void MainWindow::tryFinalizeBatchAnalysis()
         btnBatchAnalyze->setEnabled(true);
     if (btnStopBatchAnalyze)
         btnStopBatchAnalyze->setEnabled(false);
+        m_batchPaused = false;
+        if (m_btnPauseBatchAnalyze) {
+            m_btnPauseBatchAnalyze->setEnabled(false);
+            m_btnPauseBatchAnalyze->setText(
+                LanguageManager::instance().getText(QStringLiteral("batch_pause_label")));
+        }
     if (btnAnalyzeFile)
         btnAnalyzeFile->setEnabled(!currentFilePath().isEmpty());
     syncBatchAnalyzeButtonLabel();
@@ -9845,58 +10730,6 @@ static SemanticSearchWorkerResult sfRunSemanticSearchWorker(const QString &rootP
 
     if (useKeywordFallback && !out.pickedAbsolutePaths.isEmpty()) {
         sfSortSemanticPickedPathsByDrawerCohesion(&out.pickedAbsolutePaths, tagMgr, tagMutex);
-    }
-    return out;
-}
-
-static TagClusterWorkerResult sfParseTagClusterJsonIntoDrawerMap(const QString &rawIn, const QSet<QString> &aiTagSet)
-{
-    TagClusterWorkerResult out;
-    try {
-        QString capped = rawIn;
-        if (capped.size() > 500000)
-            capped.truncate(500000);
-        const QString jsonText = extractFirstBalancedJsonObject(capped);
-        QJsonParseError err{};
-        const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &err);
-        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-            out.parseError = err.errorString();
-            return out;
-        }
-        const QJsonObject rootObj = doc.object();
-        QHash<QString, QSet<QString>> bucket;
-        for (const QString &k : sfFixedAiClusterDrawerKeys())
-            bucket.insert(k, {});
-        for (auto jt = rootObj.begin(); jt != rootObj.end(); ++jt) {
-            const QString canonKey = sfNormalizeDrawerJsonKeyToCanon(jt.key());
-            if (canonKey.isEmpty()) continue;
-            QStringList members;
-            const QJsonValue v = jt.value();
-            if (v.isArray()) {
-                for (const auto &el : v.toArray()) {
-                    const QString s = el.toString().trimmed();
-                    if (!s.isEmpty()) members << s;
-                }
-            } else if (v.isString()) {
-                const QString s = v.toString().trimmed();
-                if (!s.isEmpty()) members << s;
-            }
-            for (const QString &m : members) {
-                const QString child = fuzzyResolveAiTagKey(m, aiTagSet);
-                if (child.isEmpty()) continue;
-                bucket[canonKey].insert(child);
-            }
-        }
-        for (const QString &drawerKey : sfFixedAiClusterDrawerKeys()) {
-            const QSet<QString> kids = bucket.value(drawerKey);
-            for (const QString &child : kids)
-                out.newAiTagToDrawerKey.insert(child, drawerKey);
-        }
-        out.parseOk = true;
-    } catch (const std::exception &e) {
-        out.parseError = QString::fromUtf8(e.what());
-    } catch (...) {
-        out.parseError = QStringLiteral("unknown exception");
     }
     return out;
 }

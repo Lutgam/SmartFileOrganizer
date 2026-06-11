@@ -58,6 +58,8 @@ private:
     QPushButton *m_browseBtn = nullptr;
     QCheckBox *m_bgAutoAnalyze = nullptr;
     QCheckBox *m_systemFileBypass = nullptr;
+    QCheckBox *m_summaryTypewriter = nullptr;
+    QCheckBox *m_pauseOnBattery = nullptr;
     QComboBox *m_coldArchiveCombo = nullptr;
 
     QSpinBox *m_concurrencySpin = nullptr;

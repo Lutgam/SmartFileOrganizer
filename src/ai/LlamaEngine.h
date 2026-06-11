@@ -32,9 +32,14 @@ public:
                             const std::string& existingTags = "",
                             bool contentReadable = true,
                             const std::string& fileExt = "",
-                            bool pdfMetadataOnly = false);
+                            bool pdfMetadataOnly = false,
+                            const std::string& correctionExamples = "");
     void setCancelFlag(std::atomic<bool>* flag) { m_cancelFlag = flag; } // Link to UI cancel flag
     void setOutputLanguage(const QString &lang);
+
+    /// Raw model output of the most recent suggestTags call, captured before the
+    /// sanitizer runs. Used by the eval runner to measure JSON validity at the source.
+    QString lastRawSuggestTagsOutput() const;
 
 private:
     friend struct InferenceGuard;
@@ -45,14 +50,18 @@ private:
     void startIdleTimerAsync();
 
     /// Serialized with `m_mutex` / `InferenceGuard`; safe to call from worker threads (never use BlockingQueuedConnection).
-    std::string generateResponseImpl(const std::string &prompt, int maxNewTokens);
+    /// When grammarGbnf is non-null, decoding is constrained so the output can
+    /// only be a string matched by the grammar (e.g. guaranteed-valid JSON).
+    std::string generateResponseImpl(const std::string &prompt, int maxNewTokens,
+                                     const char *grammarGbnf = nullptr);
     std::string suggestTagsImpl(const std::string &filename,
                                 const std::string &content,
                                 const std::string &rejectedTagsCsv,
                                 const std::string &existingTags,
                                 bool contentReadable,
                                 const std::string &fileExt,
-                                bool pdfMetadataOnly);
+                                bool pdfMetadataOnly,
+                                const std::string &correctionExamples);
 
     QTimer* idleTimer = nullptr;
     std::string m_modelPath;
@@ -62,6 +71,7 @@ private:
     struct llama_model* model = nullptr;
     struct llama_context* ctx = nullptr;
     std::atomic<bool>* m_cancelFlag = nullptr; // Points to MainWindow's flag (not owned)
+    QString m_lastRawSuggestTags;
 
     QString m_currentLanguage = QStringLiteral("zh_TW");
 };

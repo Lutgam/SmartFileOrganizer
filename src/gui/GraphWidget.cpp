@@ -291,14 +291,6 @@ static bool sfIsSyntheticAiDrawerFolderTag(const QString &t)
     return sfActiveDrawerCategoryLut().isSyntheticDrawerFolderTag(t);
 }
 
-static QString sfHeuristicDrawerKeyForAiTag(const QString &rawAiTag)
-{
-    const QString core = TagManager::stripAiPrefix(rawAiTag).trimmed();
-    if (core.isEmpty())
-        return QStringLiteral("📦 雜項");
-    return sfActiveDrawerCategoryLut().matchText(core);
-}
-
 } // namespace
 
 // --- Edge Implementation ---
