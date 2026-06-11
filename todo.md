@@ -1,17 +1,39 @@
-# 🗺️ SmartFile Organizer - 未來開發藍圖 (Roadmap & TODO)
+# 🗺️ SmartFile Organizer - 開發藍圖 (Roadmap & TODO)
 
-雖然目前系統已具備完整的邊緣 AI 推論與檔案管理能力，但為了因應更龐大與複雜的企業級需求，未來預計進行以下階段性升級：
+> 最後更新：2026-06-11（報告前衝刺完成後）
 
-## 🚀 Phase 1: 深度語意與搜尋強化 (Deep Semantics & Search)
-- [ ] **導入向量資料庫 (Vector Database)**: 整合 FAISS 或 ChromaDB，將目前的「標籤關鍵字匹配」升級為真正的「自然語言語意搜尋 (Semantic Search)」，允許使用者輸入完整白話文來尋找檔案。
-- [ ] **OCR 影像辨識整合**: 針對圖片掃描檔 (Scanned PDF, JPG)，於背景引入輕量化 Tesseract OCR 引擎，確保無文本檔案也能進行精準的 LLM 語意分析。
-- [ ] **多模態推論 (Multimodal AI)**: 升級 Llama 模型以支援 Vision 視覺能力，直接針對圖片與圖表內容生成摘要。
+## ✅ 已完成（2026-06 衝刺）
 
-## 🎨 Phase 2: 進階體驗與工作流 (Advanced UX & Workflow)
-- [ ] **全域深色模式 (Dark Mode)**: 遵循作業系統色彩定義，提供完整的 Light/Dark 主題切換。
-- [ ] **智慧拖曳歸檔 (Smart Drag & Drop)**: 允許使用者將檔案直接拖曳至左側的「虛擬 AI 標籤樹」上，系統自動建立實體捷徑或進行搬移。
-- [ ] **自訂分類訓練 (Custom LUT Builder)**: 提供視覺化介面，讓使用者能自由微調 `categories_config.json`，打造專屬的 AI 字典。
+- [x] **量化評估框架**（`sfo_eval` CLI）：100 檔合成基準語料 + 人工標註匯入支援，輸出準確率／吞吐量／RAM 報告（目前：抽屜分類 86%、JSON 合法率 100%）
+- [x] **GBNF 約束解碼**：LLM 輸出在生成階段即保證合法 JSON，移除下游修補負擔
+- [x] **Embeddings 語意搜尋**：BGE-M3 向量索引取代「30 檔 prompt 填充」，全工作區檢索、索引持久化
+- [x] **GPU 加速（Metal）**：`n_gpu_layers=100` 全層 offload（原 Phase 3 項目）
+- [x] **模型下載管理器**：首次啟動一鍵下載 + GGUF 完整性驗證
+- [x] **資料安全**：歸檔交易日誌（當機可復原）、10 層 undo、標籤 content-hash 錨定（外部改名自動接回）
+- [x] **自動規則引擎**：確定性條件 → 加標籤／歸檔，套用前預覽
+- [x] **獨立重複檔案掃描**：大小預過濾 + SHA-256，不依賴 AI 分析
+- [x] **單元測試 + CI**：5 個 Qt Test 套件，GitHub Actions（macOS + Windows，含 MSVC `/utf-8` 修復）
+- [x] **UX**：批次 ETA、暫停／恢復、電池感知暫停、低信心標記、打字機動畫改為選項、監控降級提示
+- [x] **隱私主張**：UI 離線徽章 + 程式碼層零網路驗證
+- [x] **糾錯回饋**：使用者修正紀錄以 few-shot 注入相似檔案的分析 prompt
 
-## ⚙️ Phase 3: 底層效能與跨平台 (Performance & Cross-Platform)
-- [ ] **GPU 加速支援 (Vulkan / Metal / CUDA)**: 根據不同作業系統，動態切換推論後端，進一步將單檔分析時間壓縮至毫秒級。
-- [ ] **記憶體動態卸載 (Memory Swapping)**: 針對超大型工作區，實作模型記憶體的動態載入與釋放機制，降低背景常駐的 RAM 佔用。
+## 🚀 Phase 1: 深度語意強化
+
+- [ ] **OCR 影像辨識**：掃描 PDF / 圖片接入輕量 OCR（Tesseract 或 Vision framework），使無文本檔案也能精準分析
+- [ ] **多模態推論**：Vision 模型直接對圖片內容生成摘要
+- [ ] **語意搜尋進階**：embedding 索引增量更新掛到分析完成事件（目前為查詢時惰性建立）；超大型工作區（>10 萬檔）再評估 ANN 索引（HNSW）
+
+## 🎨 Phase 2: 進階體驗
+
+- [ ] **Agent 自然語言視窗**（規劃中，安全設計優先）：「把 2023 的報稅文件整理到一個資料夾」→ AI 提出計畫 → 逐項確認 → 透過交易日誌執行
+- [ ] **全域深色模式**：跟隨系統 Light/Dark
+- [ ] **智慧拖曳歸檔**：檔案拖曳至標籤樹自動歸檔
+- [ ] **自訂分類訓練 UI**：視覺化編輯 `categories_config.json`
+- [ ] **i18n 全量補完**：新功能與主要訊息已雙語化；歷史運行時訊息持續遷移至 LanguageManager
+
+## ⚙️ Phase 3: 底層與跨平台
+
+- [ ] **Vulkan / CUDA 後端**：Windows/Linux GPU 加速（macOS Metal 已完成）
+- [ ] **記憶體動態卸載**：超大工作區的模型動態載入／釋放（閒置 3 分鐘自動卸載已實作）
+- [ ] **MainWindow 模組化重構**：10k 行 God Object 拆分（刻意延後至報告後，避免上台前迴歸風險）
+- [ ] **評估語料擴充**：以真實使用者檔案 + 人工標註重跑 `sfo_eval`，與合成語料數據對照

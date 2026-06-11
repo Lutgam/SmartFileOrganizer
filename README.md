@@ -2,40 +2,104 @@
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
-![C++](https://img.shields.io/badge/C++-17%2B-00599C?logo=c%2B%2B)
+![C++](https://img.shields.io/badge/C++-20-00599C?logo=c%2B%2B)
 ![Qt](https://img.shields.io/badge/Qt-6.x-41CD52?logo=qt)
-![AI](https://img.shields.io/badge/Edge%20AI-Llama.cpp-FF9900)
+![AI](https://img.shields.io/badge/Edge%20AI-llama.cpp-FF9900)
+![Privacy](https://img.shields.io/badge/privacy-100%25%20local-4ade80)
 
-SmartFile Organizer 是一款基於 **C++/Qt** 與 **Edge AI (本地邊緣推論)** 技術打造的新世代智慧檔案管理工具。透過內建的本地端 LLM (大型語言模型)，系統能自動深度解析檔案語意、生成精準摘要與標籤，並進行全自動的分類歸檔，徹底解決傳統檔案管理中「找不到、懶得理、重複存」的三大痛點。
+SmartFile Organizer 是一款 **隱私優先（100% 本地運算）** 的 AI 檔案管理桌面工具。內建本地 LLM 與 embedding 模型，自動解析檔案語意、生成摘要與標籤、提供全工作區向量語意搜尋與自動歸檔——**您的檔案內容永遠不會離開這台電腦**。
 
-## ✨ 核心特色 (Key Features)
+## 🔒 核心主張：隱私優先的本地 AI
 
-* **🧠 邊緣 AI 語意引擎 (Edge AI Engine)**
-  * 內建基於 `Llama.cpp` 的本地推論引擎，完全離線運行，確保使用者隱私資料不外洩。
-  * 支援 18 大維度動態分類 (LUT Routing)，自動解析檔案內容並賦予多維度語意標籤與摘要。
-* **🚀 非同步串流與極致效能 (Async Streaming & Performance)**
-  * 實作多執行緒與 `QtConcurrent` 任務佇列，確保 AI 運算時 UI 絕對流暢 (Anti-Jitter)。
-  * 獨創 **Metadata Hash 快取機制**：首次分析後即建立指紋特徵，未來載入時間趨近於 0 秒。
-* **🗑️ 工業級冗餘比對 (Industrial-grade Redundancy Check)**
-  * 基於 SHA-256 二進位特徵值比對，精準抓出「散落各處、檔名不同但靈魂相同」的無效佔用檔案。
-  * 具備多維度分組邏輯，能安全分辨「同檔名但不同格式 (如 PDF vs PPTX)」的邊緣情境。
-* **🎨 現代化沉浸式體驗 (Immersive UX)**
-  * 支援側邊導覽 (Sidebar Navigation)、標籤樹狀圖、即時狀態跑馬燈與預覽控制區。
-  * 具備高度防呆機制 (I/O 阻斷、字串淨化、路徑鎖定)。
+- 所有 AI 推論（標籤生成、摘要、語意搜尋）皆在本機 CPU/GPU 上執行
+- 程式碼層面可驗證：除「首次模型下載」外，**全程式零網路呼叫**
+- 無帳號、無訂閱、無遙測——離線環境可完整使用
 
-## 🛠️ 技術堆疊 (Tech Stack)
+## 📊 量化評估（合成基準語料，100 檔 / 10 類別）
 
-* **GUI 框架**: Qt 6 (Widgets / QSS)
-* **核心語言**: Modern C++ (C++17)
-* **AI 引擎**: Llama.cpp (GGUF Format)
-* **資料持久化**: JSON (Metadata & Config) / QSettings
+| 指標 | 數值 |
+|---|---|
+| 抽屜分類正確率 | **86.0%** |
+| LLM 原始輸出 JSON 合法率 | **100%**（GBNF 約束解碼） |
+| 平均單檔分析時間 | ~10–20 秒（Apple M4） |
+| 峰值記憶體 | ~5.8 GB |
 
-## 🚀 快速啟動 (Quick Start)
+> 重現方式：`./build/sfo_eval --generate /tmp/corpus && ./build/sfo_eval --run /tmp/corpus --model <model.gguf>`，報告輸出於 `corpus/eval_report.md`。框架同時支援匯入人工標註的真實檔案語料（編輯 `manifest.json` 即可）。
 
-1. 克隆本專案：`git clone https://github.com/Lutgam/SmartFileOrganizer.git`
-2. 準備 AI 模型：將相容的 `.gguf` 模型放置於 `./models/` 目錄下。
-3. 編譯環境：使用 CMake 或 Qt Creator 開啟專案進行編譯 (建議使用 Release 模式以獲得最佳推論效能)。
-4. 啟動並載入您需要整理的工作區資料夾，點擊「▶️ 開始 AI 智能分析」。
+## ✨ 主要功能
+
+* **🧠 本地 AI 語意引擎** — llama.cpp + GBNF 約束解碼（語法錯誤的 JSON 物理上不可能出現），LUT 抽屜分類路由，使用者糾錯紀錄會以 few-shot 形式回饋給後續分析
+* **🔎 向量語意搜尋** — 專用 embedding 模型（BGE-M3）對全工作區建立向量索引，自然語言搜尋不限檔案數量，索引持久化、跨次啟動累積
+* **🗂️ 自動規則引擎** — 確定性整理規則（資料夾／副檔名／檔名 → 加標籤／歸檔），套用前必先預覽
+* **🛡️ 資料安全** — 實體歸檔具備交易日誌（當機可復原）、10 層復原堆疊；檔案在外部被改名／搬移時以 content-hash 自動重新接回標籤
+* **🗑️ 重複檔案掃描** — 獨立全工作區掃描（先比大小再比 SHA-256），不需先執行 AI 分析
+* **⚡ 體驗細節** — 批次分析 ETA 預估、暫停／恢復、電池供電自動暫停（可選）、低信心結果標示、簡易模式與新手引導、繁中／英文雙語介面
+
+## 🛠️ 技術堆疊
+
+* **GUI**: Qt 6 (Widgets)
+* **語言**: C++20
+* **AI**: llama.cpp（GGUF；聊天模型 + embedding 模型）
+* **持久化**: JSON metadata + QSettings + 二進位向量索引
+* **測試**: Qt Test（5 個測試套件），GitHub Actions CI（macOS + Windows）
+
+## 🏗️ 架構
+
+```mermaid
+graph TD
+    UI[MainWindow / Qt Widgets] --> Core
+    UI --> AI
+    subgraph Core[sfo_core 靜態庫]
+        TM[TagManager<br/>雙向索引 + content-hash]
+        DP[DocumentParser<br/>PDF/Office/純文字抽取]
+        LUT[DrawerCategoryLut<br/>抽屜分類路由]
+        ARE[AutoRuleEngine<br/>確定性規則]
+        AJS[AiJsonSanitizer<br/>LLM 輸出語意防護]
+    end
+    subgraph AI[sfo_ai 靜態庫]
+        LE[LlamaEngine<br/>GBNF 約束生成]
+        EE[EmbeddingEngine<br/>向量索引]
+    end
+    AI --> LCPP[llama.cpp<br/>Metal / CPU 後端]
+    Tests[tests/ 單元測試] --> Core
+    Eval[sfo_eval 評估 CLI] --> Core
+    Eval --> AI
+```
+
+## 💻 系統需求
+
+| | 最低 | 建議 |
+|---|---|---|
+| RAM | 8 GB（模型載入後峰值約 6 GB） | 16 GB |
+| 硬碟 | 5 GB（模型檔） | 8 GB |
+| macOS | Apple Silicon（Metal 加速） | M 系列晶片 |
+| Windows | x64、AVX2 CPU | 具獨立 GPU 更佳 |
+
+低於 4 GB RAM 時程式會於啟動時警告；推論可能極慢或失敗。
+
+## 🚀 快速啟動
+
+```bash
+git clone https://github.com/Lutgam/SmartFileOrganizer.git
+cd SmartFileOrganizer
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+./build/SmartFileOrganizer
+```
+
+1. 首次啟動若無模型，會引導您**一鍵下載建議模型**（Qwen2.5-3B + BGE-M3，含進度與完整性驗證）；也可在設定中手動指定任何 `.gguf`。
+2. 選擇工作區資料夾 → 點「開始 AI 智能分析」。
+3. 跑單元測試：`ctest --test-dir build --output-on-failure`
+
+## 📁 專案結構
+
+```
+src/core/   TagManager、DocumentParser、分類 LUT、規則引擎（純邏輯、可測試）
+src/ai/     LlamaEngine（LLM）、EmbeddingEngine（向量）、輸出防護層
+src/gui/    MainWindow、設定、模型下載器、規則管理、關聯圖譜
+tests/      Qt Test 單元測試（CI 自動執行）
+tools/      sfo_eval 量化評估 CLI
+```
 
 ## 授權條款 (License)
 

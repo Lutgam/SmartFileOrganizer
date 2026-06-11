@@ -550,6 +550,216 @@ RLHF 標籤糾錯機制：實作 👎 AI 標籤糾錯 按鈕，以 QInputDialog 
 
 DLP 真實沙盒模式：於主設定面板實裝「強制啟用本地沙盒模式」，底層透過 QNetworkProxy 注入全域黑洞 (Blackhole Proxy)，實體阻斷應用程式層級的所有對外網路請求，嚴格貫徹資料外洩防護 (Data Loss Prevention)。
 
+---
+
+## 13.36 – 13.49 AI 摘要輸出與分析快取修復日誌（2026-05-16）
+
+### 總覽：我們在對抗什麼？
+
+今日主線可概括為三層問題，彼此牽連：
+
+| 層級 | 現象 | 根因類型 |
+|------|------|----------|
+| **解析層** | 摘要空白、`...`、假性失敗 | LLM 非純 JSON、Markdown 包裹、嚴格 `fromJson` |
+| **快取層** | 已分析仍重跑，或該重跑卻跳過 | `hasValidAnalysis` 標準反覆調整、摘要/標籤判定不一致 |
+| **系統層** | macOS 批次死迴圈、單檔分析無 UI、預覽失效 | `QFileSystemWatcher`、`QFutureWatcher` 生命週期、誤把預覽也阻斷提取 |
+
+最終目標：**只要跑過一次分析，就必須有可顯示、可持久化的摘要與標籤；解析失敗也要有明確 fallback，不能是空字串或 `...`。**
+
+---
+
+### 時間序詳錄
+
+#### Sprint 13.36 — JSON 降級防護與嚴格快取審查
+
+**遇到的問題**
+- 極端檔案時模型未輸出合法 JSON → `QJsonDocument::fromJson` 失敗 → 上層當成「未分析」。
+- `hasValidAnalysis` 過鬆：有 path 或空 meta 也算有效 → 批次不再重跑，但 UI 沒有可用摘要。
+- 快取裡的「提取失敗」預設摘要被當成有效結果。
+
+**實作解法**
+1. **`TagManager::hasValidAnalysis` 收緊**：摘要非空、不含 `analysis_skipped_empty_extract`、至少一個標籤。
+2. **`LlamaEngine::ensureSuggestTagsJson`**：JSON 解析失敗時不丟空字串；`summary` 用 raw 或 `analysis_json_fallback_summary`；`tags` 給預設標籤；仍輸出 compact JSON 供持久化。
+3. **`LanguageManager`**：`skippedEmptyExtractSummaryPhrases()`、`analysisJsonFallbackSummaryPhrases()` 等雙語片語列表。
+4. **`sfSummaryAcceptableForStorage`**：與快取驗證對齊的白名單／拒絕規則。
+
+---
+
+#### Sprint 13.37 — 批次死迴圈防護與絕對 Fallback
+
+**遇到的問題**
+- 同一檔案在批次佇列中被反覆分析。
+- 部分路徑在 parse 失敗後仍可能 early return，未寫入任何結果。
+
+**實作解法**
+1. **`m_processedInThisBatch`**：本輪批次已處理路徑記錄，遇重複直接跳過。
+2. **`sfApplyAiParseFallback` / `onAnalysisFinished`**：JSON 例外、模型 Error、標籤為空時強制寫入本地化絕對 fallback。
+3. **`hasValidAnalysis` 略為放寬**：允許 hash 快取 JSON 內非空 `tags` 判定有效。
+
+---
+
+#### Sprint 13.38 — 摘要白名單與標籤垃圾過濾
+
+**遇到的問題**
+- 模型輸出含 `:`、`...`、過長句當標籤 → 寫入後又被視為無效。
+- 空檔案提取路徑與正常分析路徑的摘要混用，觸發重跑。
+
+**實作解法**
+1. **`sanitizeTagsArray` / `sfFilterAiAnalysisTags`**：過濾垃圾標籤格式。
+2. **空內容跳過**：`extractedTrimLen < 20` 時寫入 `analysis_skipped_empty_extract` + `terminal_empty_extract`。
+3. **摘要儲存白名單**：`sfSummaryAcceptableForStorage` 與 `LanguageManager` 片語列表同步。
+
+---
+
+#### Sprint 13.39 — macOS 監聽器與快取寬鬆化
+
+**遇到的問題**
+- `metadata.json` 寫入觸發 `QFileSystemWatcher` → `scanFiles` → 再次分析，形成迴圈。
+- 3 秒 metadata 冷卻在批次期間會吃掉合法事件。
+
+**實作解法**
+1. **Watcher 僅 UI 刷新**：不再呼叫 `startBatchAnalysis` / `processNextInQueue`。
+2. **移除** `m_lastMetadataSaveTime` 冷卻、`m_suppressFsWatchDebouncedScanUntilMs`。
+3. **`hasValidAnalysis` 階段性放寬**，減少 fallback 摘要造成的重跑。
+
+---
+
+#### Sprint 13.40 — 停止 Watcher 觸發分析 + Hash-Only 通行
+
+**遇到的問題**
+- Watcher 刷新後仍可能重入分析佇列。
+- 嚴格 summary 檢查導致「已有 hash、fallback 摘要」永遠不算完成。
+
+**實作解法**
+1. **Watcher 徹底與 AI 佇列脫鉤**（延續 13.39）。
+2. **`hasValidAnalysis` 一度改為僅 content hash 非空**（13.41 部分收回）。
+
+---
+
+#### Sprint 13.41 — 移除 Debounce 陷阱 + 恢復 Hash+標籤
+
+**遇到的問題**
+- Hash-only 過於寬鬆，與 UI 藍圈（需標籤）不一致。
+
+**實作解法**
+1. **`hasValidAnalysis`**：content hash 存在，且（檔案有標籤或 hash 快取 JSON 內 tags 非空）；不再檢查 summary Error。
+2. **持久化後記憶體同步**：先 `setFileContentHash` + `recordHashAnalysis`，再 `saveTags()`。
+
+---
+
+#### Sprint 13.42 — 物理閹割摘要驗證（Lobotomize Summary Validation）
+
+**遇到的問題**
+- Fallback 摘要被 `sfSummaryAcceptableForStorage` 拒絕 → 仍進分析佇列 → **無限重跑**。
+
+**實作解法**
+1. **`sfSummaryAcceptableForStorage` → 恒 `return true`**。
+2. **`pathHasUsableAnalysisSummary`**：僅可分析副檔名 + `hasValidAnalysis`。
+3. **移除「摘要不合格就 return」**；空摘要改填 `analysis_json_fallback_summary`。
+4. **`LlamaEngine::coerceSummaryText`**：摘要永不為空。
+
+---
+
+#### Sprint 13.43 — 標籤陣列保底 + 無腦通行證
+
+**遇到的問題**
+- 垃圾標籤過濾器清空 `tags` → `hasValidAnalysis` 失敗 → 死迴圈。
+
+**實作解法**
+1. **過濾後若 tags 為空** → 強制 `analysis_manual_classify_tag`（需手動分類）。
+2. **`hasValidAnalysis` → 僅需 content hash**。
+3. **`persistAnalysisResultForFile`**：第一件事寫 hash；tags 空則注入保底再寫 cache。
+
+---
+
+#### Sprint 13.44 — 快取絕對阻斷文本提取（後部分回滾）
+
+**遇到的問題**
+- `metadata.json` 寫入觸發 `scanFiles` → 選檔 → **`updatePreviewForFile` 再 PDF 提取** → UI 卡頓。
+
+**實作解法（當時）**
+1. **`pathShouldSkipDocumentTextExtraction`**：已快取則跳過 `extractPdfText` / `extractTextForAi`。
+2. **右鍵「✨ 分析」**：`clearAnalysisCacheForReanalysis` → `runSingleFileAnalysisForPath`。
+
+**緊急回滾**
+- **撤銷** `updatePreviewForFile` 內的阻斷：預覽必須顯示真實文件文字，不可用 AI 摘要代替。
+- **保留** 右鍵先清快取再分析、分析路徑上的快取短路。
+
+---
+
+#### Sprint 13.45 — 單檔分析非同步靜默死亡
+
+**遇到的問題**
+- 終端有 PDF extract log，但 UI 無「分析完成」。
+- 共用單一 `QFutureWatcher` 重複 `setFuture()` → `finished` 信號丟失。
+
+**實作解法**
+1. **每次分析 `new QFutureWatcher` + `deleteLater()`**（`submitAnalysisJob()`）。
+2. **`SfAnalysisOutcome::filePath`**：回調時路徑不丟失。
+3. **調試日誌**：`[LLM] 開始推論` / `[UI] 收到分析完成訊號`。
+4. **統一 `persistAnalysisResultForFile`**；找不到 list item 仍持久化。
+
+---
+
+#### Sprint 13.47 — 破碎 PDF 導致 LLM 胡言亂語
+
+**遇到的問題**
+- PDF 含大量 `\r\n`、破碎排版 → prompt 過長、非 JSON 冗長輸出、推理極慢。
+
+**實作解法**
+1. **進入 LLM 前文本淨化**：`\r\n\t` 與連續空白壓成單空格。
+2. **System Prompt**：破碎文本早退 + `kJsonOnlyStrictEn`（僅 JSON，以 `{` 開頭 `}` 結尾）。
+3. **`kMaxNewTokensSuggestTagsJson`：600 → 180**，硬性截斷生成。
+
+---
+
+#### Sprint 13.49 — JSON 暴力提取器（解析層最終修復）
+
+**遇到的問題**
+- 模型推論正常，但 JSON 前後有客套話、`` ```json `` → `fromJson` 失敗 → 空值或 `...`。
+
+**實作解法**
+1. **`brutalExtractJsonFromLlmResponse()`**：第一個 `{` 到最後一個 `}`；無括號則保底 JSON（`AI 未回傳標準格式` + `需手動分類`）。
+2. **`ensureSuggestTagsJson`** 解析前一律走暴力切片。
+3. **Prompt 強化**：`You MUST output ONLY a valid JSON object... Start with '{' and end with '}'`。
+4. **禁止 UI 顯示 `...` 或空摘要**：`coerceSummaryText` / `sfCoerceStorageSummary` → `analysis_parsed_no_summary`；`showAiSummaryForFile` 顯示 fallback；`persistAnalysisResultForFile` 寫入前強制補齊。
+
+**新增 i18n keys**：`analysis_nonstandard_format_summary`、`analysis_parsed_no_summary`、`analysis_manual_classify_tag`。
+
+---
+
+### 關鍵函數演變（摘要相關）
+
+| 函數 | 最終行為（2026-05-16） |
+|------|------------------------|
+| `sfSummaryAcceptableForStorage` | 恒 true（13.42） |
+| `hasValidAnalysis` | 有 content hash 即 true（13.43） |
+| `pathHasUsableAnalysisSummary` | 可分析副檔名 + hasValidAnalysis |
+| `brutalExtractJsonFromLlmResponse` | 剪 `{…}` 或保底 JSON（13.49） |
+| `sfCoerceStorageSummary` | 空/`...` →「解析完成但無摘要」（13.49） |
+
+**管線**：`LlamaEngine::suggestTags` → `ensureSuggestTagsJson` → `brutalExtractJsonFromLlmResponse` → `QJsonDocument::fromJson` → `sanitizeSuggestTagsObject` → `MainWindow::onAnalysisFinished` → `sfCoerceStorageSummary` → `persistAnalysisResultForFile` → `showAiSummaryForFile` / `m_aiSummaryByPath`。
+
+---
+
+### 設計權衡（給後續維護）
+
+1. **摘要不嚴、hash 嚴**：13.42 放開摘要、13.43 用 hash 止 loop → 可能留下「摘要很爛但不再分析」；靠 fallback 文案保證可讀。
+2. **預覽 vs 分析提取分離**：13.44 教訓——預覽永遠可跑 PDF 提取；僅分析路徑可對已 hash 檔案短路。
+3. **解析雙層保險**：LlamaEngine 暴力剪 JSON + MainWindow 多候選 regex。
+
+---
+
+### 驗收建議（摘要輸出）
+
+- 模型輸出帶 Markdown／客套話的 JSON → 應顯示正常摘要，非 `...`。
+- 批次已分析檔案：不應因 fallback 摘要無限重跑。
+- 單檔分析：終端應有 `[UI] 收到分析完成訊號`。
+- 右鍵分析：先清快取再跑 LLM。
+- 點選已分析 PDF：右側預覽仍顯示提取文字，非僅 AI 摘要。
+
+---
+
 ## 🌍 深度技術探討：跨國軟體架構 (i18n) 與 MVC 顯示解耦
 
 在實作系統中英動態切換的過程中，我們遇到了 7 項跨國軟體開發的經典架構挑戰，並逐一實作了底層解法：

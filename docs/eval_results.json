@@ -1,0 +1,1506 @@
+{
+    "avg_seconds_per_file": 20.92278,
+    "cases": [
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": true,
+            "path": "作業系統_期末考_解答.txt",
+            "predicted_drawer": "🎓 大學學業與通識",
+            "raw_json_valid": true,
+            "seconds": 11.884,
+            "summary": "本檔案為作業系統課程的期末考解答,包含行程排程、死結預防與虛擬記憶體的申論題詳解。",
+            "tags": [
+                "作業系統",
+                "期末考",
+                "解答"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": false,
+            "path": "資料結構_第三次作業.txt",
+            "predicted_drawer": "🎓 大學學業與通識",
+            "raw_json_valid": true,
+            "seconds": 10.703,
+            "summary": "資料結構課程第三次作業：實作二元搜尋樹的插入與刪除，並分析時間複雜度。",
+            "tags": [
+                "資料結構",
+                "二元搜尋樹",
+                "時間複雜度"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": true,
+            "path": "普通心理學_課堂筆記_W5.txt",
+            "predicted_drawer": "🎓 大學學業與通識",
+            "raw_json_valid": true,
+            "seconds": 10.254,
+            "summary": "普通心理學第五週課堂筆記，主題為古典制約與操作制約的差異與實驗設計。",
+            "tags": [
+                "普通心理學",
+                "課堂筆記",
+                "心理學理論"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": true,
+            "path": "計算機概論_考古題_110.txt",
+            "predicted_drawer": "🎓 大學學業與通識",
+            "raw_json_valid": true,
+            "seconds": 10.058,
+            "summary": "110 學年度計算機概論期中考古題，含選擇題與簡答題，附參考解答。",
+            "tags": [
+                "計算機概論",
+                "考古題",
+                "期中考"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": true,
+            "path": "離散數學_講義_圖論.txt",
+            "predicted_drawer": "🎓 大學學業與通識",
+            "raw_json_valid": true,
+            "seconds": 10.811,
+            "summary": "離散數學課程講義：圖論基礎，涵蓋尤拉路徑、漢米爾頓迴圈與著色問題。",
+            "tags": [
+                "離散數學",
+                "圖論",
+                "數學講義"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": true,
+            "path": "程式設計_期中考重點整理.txt",
+            "predicted_drawer": "🎓 大學學業與通識",
+            "raw_json_valid": true,
+            "seconds": 10.522,
+            "summary": "程式設計期中考重點整理：指標、遞迴、結構體與動態記憶體配置。",
+            "tags": [
+                "程式設計",
+                "期中考",
+                "考試重點"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": false,
+            "path": "通識_藝術概論_期末報告.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 10.676,
+            "summary": "通識課程藝術概論期末報告草稿，主題為印象派繪畫的光影表現。",
+            "tags": [
+                "藝術",
+                "印象派",
+                "光影表現"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": false,
+            "path": "線性代數_第二章作業解答.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 10.627,
+            "summary": "線性代數第二章作業解答：矩陣秩、列空間與零空間的計算過程。",
+            "tags": [
+                "線性代數",
+                "矩陣"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": false,
+            "path": "統計學_小考二_試題.txt",
+            "predicted_drawer": "🎓 大學學業與通識",
+            "raw_json_valid": true,
+            "seconds": 10.539,
+            "summary": "統計學第二次小考試題：假設檢定、信賴區間與 p 值的觀念題。",
+            "tags": [
+                "統計學",
+                "假設檢定",
+                "信賴區間"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🎓 大學學業與通識",
+            "keyword_hit": true,
+            "path": "微積分_期末總複習講義.txt",
+            "predicted_drawer": "🎓 大學學業與通識",
+            "raw_json_valid": true,
+            "seconds": 10.962,
+            "summary": "微積分期末總複習講義，整理極限、微分、積分與級數收斂的核心定理。",
+            "tags": [
+                "微積分",
+                "期末考",
+                "數學"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": true,
+            "path": "電磁學_馬克士威方程式推導.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 9.751,
+            "summary": "馬克士威方程組的微分形式推導",
+            "tags": [
+                "電磁學",
+                "馬克士威方程",
+                "微分形式"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": true,
+            "path": "熱力學_卡諾循環分析.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 10.051,
+            "summary": "卡諾循環的效率推導與熵變分析",
+            "tags": [
+                "熱力學",
+                "卡諾循環",
+                "熵變"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": true,
+            "path": "解剖學_上肢神經支配整理.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 11.301,
+            "summary": "上肢神經支配整理：臂神經叢的分支、正中神經與尺神經的支配肌群。",
+            "tags": [
+                "解剖學",
+                "神經學",
+                "上肢"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": true,
+            "path": "藥理學_抗生素機轉比較.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 9.546,
+            "summary": "藥理學_抗生素機轉比較",
+            "tags": [
+                "抗生素",
+                "藥理學",
+                "機轉"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": true,
+            "path": "生理學_心臟電位傳導.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 10.117,
+            "summary": "心臟電位傳導路徑的順序",
+            "tags": [
+                "心臟電位",
+                "生理學",
+                "心臟傳導"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": true,
+            "path": "有機化學_親核取代反應.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 11.458,
+            "summary": "SN1 與 SN2 親核取代反應的機構比較、立體化學與溶劑效應。",
+            "tags": [
+                "有機化學",
+                "親核取代反應",
+                "立體化學"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": true,
+            "path": "工程力學_樑的剪力彎矩圖.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 48.602,
+            "summary": "樑的剪力彎矩圖繪製與內力計算",
+            "tags": [
+                "工程力學",
+                "樑分析",
+                "結構力學"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": false,
+            "path": "近代物理_光電效應實驗.txt",
+            "predicted_drawer": "📦 雜項",
+            "raw_json_valid": true,
+            "seconds": 10.467,
+            "summary": "光電效應實驗數據分析，驗證普朗克常數並討論光子能量量子化。",
+            "tags": [
+                "光電效應",
+                "普朗克常數",
+                "光子能量量子化"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": true,
+            "path": "普通化學_化學平衡常數.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 10.554,
+            "summary": "化學平衡常數的計算與勒沙特列原理應用，含溫度與壓力的影響。",
+            "tags": [
+                "化學平衡",
+                "勒沙特列原理",
+                "化學常數"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🔬 STEM與醫學專業",
+            "keyword_hit": false,
+            "path": "病理學_發炎反應分期.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 11.019,
+            "summary": "急性發炎與慢性發炎的病理機轉、細胞激素參與及組織修復過程。",
+            "tags": [
+                "病理學",
+                "發炎反應",
+                "免疫學"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": true,
+            "path": "民法總則_意思表示筆記.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 10.215,
+            "summary": "民法總則中意思表示的成立要件、錯誤撤銷與虛偽表示的法律效果。",
+            "tags": [
+                "民法",
+                "法律",
+                "意思表示"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": true,
+            "path": "刑法分則_竊盜罪構成要件.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 9.977,
+            "summary": "刑法分則竊盜罪的構成要件分析",
+            "tags": [
+                "刑法",
+                "竊盜罪",
+                "構成要件"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": true,
+            "path": "個體經濟學_供需彈性.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 10.293,
+            "summary": "供需彈性計算與課稅歸宿分析",
+            "tags": [
+                "供需彈性",
+                "課稅歸宿",
+                "個體經濟學"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": true,
+            "path": "西洋哲學史_康德批判哲學.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 11.176,
+            "summary": "康德三大批判的核心問題：純粹理性、實踐理性與判斷力的界限。",
+            "tags": [
+                "康德",
+                "批判哲學",
+                "西洋哲學史"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": true,
+            "path": "社會學_符號互動論摘要.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 11.107,
+            "summary": "符號互動論的理論脈絡：米德的自我理論與高夫曼的戲劇論。",
+            "tags": [
+                "社會學",
+                "符號互動論"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": true,
+            "path": "行銷管理_STP策略分析.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 10.588,
+            "summary": "行銷管理 STP 策略分析",
+            "tags": [
+                "行銷管理",
+                "STP 策略",
+                "市場區隔"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": true,
+            "path": "憲法_違憲審查制度比較.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 11.438,
+            "summary": "憲法違憲審查制度的比較分析",
+            "tags": [
+                "憲法",
+                "違憲審查",
+                "法律"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": false,
+            "path": "近代史_明治維新影響.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 11.921,
+            "summary": "明治維新對東亞政治格局的影響",
+            "tags": [
+                "明治維新",
+                "政治格局",
+                "東亞"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": true,
+            "path": "發展心理學_皮亞傑理論.txt",
+            "predicted_drawer": "⚖️ 法商與人文社會",
+            "raw_json_valid": true,
+            "seconds": 13.105,
+            "summary": "皮亞傑認知發展四階段理論與具體運思期的守恆概念實驗。",
+            "tags": [
+                "發展心理學",
+                "皮亞傑理論",
+                "認知發展"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "⚖️ 法商與人文社會",
+            "keyword_hit": false,
+            "path": "企業管理_波特五力分析.txt",
+            "predicted_drawer": "💼 商務與職場管理",
+            "raw_json_valid": true,
+            "seconds": 12.62,
+            "summary": "以波特五力模型分析產業競爭結構",
+            "tags": [
+                "企業管理",
+                "波特五力分析",
+                "產業競爭結構"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": true,
+            "path": "finetune_llama_lora.py",
+            "predicted_drawer": "🤖 AI與資料科學",
+            "raw_json_valid": true,
+            "seconds": 12.493,
+            "summary": "使用 peft 與 transformers 進行 Llama 模型微調",
+            "tags": [
+                "Llama",
+                "模型微調",
+                "Python"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": true,
+            "path": "機器學習_過擬合對策筆記.txt",
+            "predicted_drawer": "🤖 AI與資料科學",
+            "raw_json_valid": true,
+            "seconds": 13.964,
+            "summary": "整理機器學習過擬合的對策：正則化、dropout、資料增強與早停法。",
+            "tags": [
+                "機器學習",
+                "過擬合",
+                "模型調整"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": false,
+            "path": "transformer_attention_實作.py",
+            "predicted_drawer": "📦 雜項",
+            "raw_json_valid": true,
+            "seconds": 12.695,
+            "summary": "Transformer 多頭注意力實作",
+            "tags": [
+                "Transformer",
+                "多頭注意力",
+                "實作"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": true,
+            "path": "dataset_前處理流程.txt",
+            "predicted_drawer": "🤖 AI與資料科學",
+            "raw_json_valid": true,
+            "seconds": 13.955,
+            "summary": "訓練資料集前處理流程：缺值填補、標準化、類別編碼與訓練驗證切分。",
+            "tags": [
+                "資料前處理",
+                "機器學習",
+                "資料分析"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": true,
+            "path": "深度學習_CNN架構比較.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 13.137,
+            "summary": "比較 ResNet、VGG 與 EfficientNet 的卷積架構設計與參數效率。",
+            "tags": [
+                "深度學習",
+                "CNN",
+                "卷積架構"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": true,
+            "path": "nlp_詞嵌入技術整理.txt",
+            "predicted_drawer": "🤖 AI與資料科學",
+            "raw_json_valid": true,
+            "seconds": 14.062,
+            "summary": "NLP 詞嵌入技術整理：word2vec、GloVe 與上下文化嵌入的差異。",
+            "tags": [
+                "NLP",
+                "詞嵌入",
+                "自然語言處理"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": true,
+            "path": "模型量化_int8_實驗紀錄.txt",
+            "predicted_drawer": "🤖 AI與資料科學",
+            "raw_json_valid": true,
+            "seconds": 12.933,
+            "summary": "模型 int8 量化實驗對推論速度與準確率的影響",
+            "tags": [
+                "模型量化",
+                "深度學習",
+                "實驗紀錄"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": true,
+            "path": "pytorch_訓練迴圈範本.py",
+            "predicted_drawer": "🤖 AI與資料科學",
+            "raw_json_valid": true,
+            "seconds": 13.102,
+            "summary": "PyTorch 訓練迴圈範本",
+            "tags": [
+                "PyTorch",
+                "訓練迴圈",
+                "深度學習"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": false,
+            "path": "強化學習_QLearning筆記.txt",
+            "predicted_drawer": "🔬 STEM與醫學專業",
+            "raw_json_valid": true,
+            "seconds": 86.383,
+            "summary": "Q-Learning 與 DQN 的差異在於經驗回放、目標網路與探索策略設計。",
+            "tags": [
+                "強化學習",
+                "QLearning",
+                "DQN"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🤖 AI與資料科學",
+            "keyword_hit": true,
+            "path": "資料科學_特徵工程心法.txt",
+            "predicted_drawer": "🤖 AI與資料科學",
+            "raw_json_valid": true,
+            "seconds": 11.195,
+            "summary": "特徵工程實務：交互特徵、時間窗聚合與目標編碼的洩漏風險。",
+            "tags": [
+                "特徵工程",
+                "資料科學",
+                "機器學習"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": true,
+            "path": "kernel_module_hello.c",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 9.673,
+            "summary": "Linux kernel module 的初始化程式碼",
+            "tags": [
+                "Linux",
+                "kernel_module",
+                "C語言"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": true,
+            "path": "docker_compose_部署筆記.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 11.677,
+            "summary": "Docker Compose 多容器部署筆記：網路設定、volume 掛載與健康檢查。",
+            "tags": [
+                "Docker",
+                "多容器部署"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": true,
+            "path": "cmake_跨平台建置設定.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 11.122,
+            "summary": "CMake 跨平台建置設定：FetchContent 管理依賴與多組態產生器。",
+            "tags": [
+                "CMake",
+                "跨平台",
+                "建置設定"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": true,
+            "path": "rust_所有權系統筆記.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 11.734,
+            "summary": "Rust 所有權與借用檢查：生命週期標註與移動語意的常見錯誤。",
+            "tags": [
+                "Rust",
+                "所有權",
+                "借用檢查"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": true,
+            "path": "linux_系統呼叫追蹤.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 11.896,
+            "summary": "使用 strace 追蹤 Linux 系統呼叫，分析檔案 I/O 與行程建立開銷。",
+            "tags": [
+                "Linux",
+                "系統呼叫",
+                "程式開銷分析"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": true,
+            "path": "compiler_詞法分析器實作.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 12.299,
+            "summary": "編譯器前端詞法分析器實作：有限狀態機與正規表達式轉換。",
+            "tags": [
+                "編譯器",
+                "詞法分析器",
+                "有限狀態機"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": true,
+            "path": "驅動程式_中斷處理機制.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 12.428,
+            "summary": "裝置驅動程式的中斷處理機制",
+            "tags": [
+                "驅動程式",
+                "中斷處理",
+                "Linux"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": true,
+            "path": "devops_CI管線設計.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 14.699,
+            "summary": "DevOps CI 管線設計：建置快取、平行測試與部署閘門的實務配置。",
+            "tags": [
+                "DevOps",
+                "CI",
+                "管線設計"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": false,
+            "path": "記憶體配置器_實作分析.c",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 14.885,
+            "summary": "自訂記憶體配置器實作分析",
+            "tags": [
+                "記憶體配置器",
+                "實作分析",
+                "C語言"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "⚙️ 系統與底層開發",
+            "keyword_hit": true,
+            "path": "作業系統_排程器演算法.txt",
+            "predicted_drawer": "🎓 大學學業與通識",
+            "raw_json_valid": true,
+            "seconds": 16.01,
+            "summary": "作業系統排程器演算法比較",
+            "tags": [
+                "作業系統",
+                "排程器",
+                "演算法"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": true,
+            "path": "react_hooks_狀態管理.txt",
+            "predicted_drawer": "🌐 網頁與後端開發",
+            "raw_json_valid": true,
+            "seconds": 374.193,
+            "summary": "React Hooks 狀態管理實務：useState、useEffect 依賴陣列與自訂 hook。",
+            "tags": [
+                "React",
+                "狀態管理",
+                "JavaScript"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": true,
+            "path": "django_rest_api_設計.txt",
+            "predicted_drawer": "🌐 網頁與後端開發",
+            "raw_json_valid": true,
+            "seconds": 10.643,
+            "summary": "Django REST framework API 設計：序列化器、視圖集與權限控制。",
+            "tags": [
+                "Django",
+                "REST API",
+                "序列化器"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": false,
+            "path": "user_auth_middleware.ts",
+            "predicted_drawer": "🎨 設計與影音剪輯",
+            "raw_json_valid": true,
+            "seconds": 9.374,
+            "summary": "Express 中的驗證中間件",
+            "tags": [
+                "Express",
+                "驗證中間件",
+                "JWT"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": true,
+            "path": "css_grid_排版技巧.txt",
+            "predicted_drawer": "🌐 網頁與後端開發",
+            "raw_json_valid": true,
+            "seconds": 11.821,
+            "summary": "CSS Grid 排版技巧：自適應欄位、區域命名與與 Flexbox 的取捨。",
+            "tags": [
+                "CSS Grid",
+                "排版技巧",
+                "Flexbox"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": true,
+            "path": "vue_組件通訊整理.txt",
+            "predicted_drawer": "🌐 網頁與後端開發",
+            "raw_json_valid": true,
+            "seconds": 11.1,
+            "summary": "Vue 組件通訊方式整理：props、emit、provide/inject 與 Pinia 狀態。",
+            "tags": [
+                "Vue",
+                "組件",
+                "通訊方式"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": true,
+            "path": "nodejs_事件迴圈解析.txt",
+            "predicted_drawer": "🌐 網頁與後端開發",
+            "raw_json_valid": true,
+            "seconds": 11.808,
+            "summary": "Node.js 事件迴圈解析：微任務、巨任務與 I/O 回呼的執行順序。",
+            "tags": [
+                "Node.js",
+                "事件迴圈",
+                "程式設計"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": true,
+            "path": "api_版本管理策略.txt",
+            "predicted_drawer": "🌐 網頁與後端開發",
+            "raw_json_valid": true,
+            "seconds": 10.592,
+            "summary": "REST API 版本管理策略：URL 版本、Header 協商與向後相容設計。",
+            "tags": [
+                "API",
+                "版本管理"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": false,
+            "path": "frontend_效能優化清單.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 11.698,
+            "summary": "前端效能優化：程式碼分割、圖片延遲載入與 Core Web Vitals 指標。",
+            "tags": [
+                "前端",
+                "效能優化",
+                "Core Web Vitals"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": true,
+            "path": "flask_藍圖架構範例.py",
+            "predicted_drawer": "🌐 網頁與後端開發",
+            "raw_json_valid": true,
+            "seconds": 11.257,
+            "summary": "Flask 藍圖架構範例",
+            "tags": [
+                "Flask",
+                "藍圖",
+                "架構範例"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🌐 網頁與後端開發",
+            "keyword_hit": true,
+            "path": "html_語意化標籤指南.txt",
+            "predicted_drawer": "🌐 網頁與後端開發",
+            "raw_json_valid": true,
+            "seconds": 14.136,
+            "summary": "HTML 語意化標籤指南：header、article、section 的正確使用與無障礙",
+            "tags": [
+                "HTML",
+                "語意化",
+                "無障礙設計"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": true,
+            "path": "MainActivity.kt",
+            "predicted_drawer": "📱 行動與跨平台開發",
+            "raw_json_valid": true,
+            "seconds": 9.992,
+            "summary": "Android 入口活動",
+            "tags": [
+                "Android",
+                "行動開發",
+                "應用程式"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": true,
+            "path": "flutter_widget_生命週期.txt",
+            "predicted_drawer": "📱 行動與跨平台開發",
+            "raw_json_valid": true,
+            "seconds": 10.466,
+            "summary": "Flutter StatefulWidget 生命週期介紹",
+            "tags": [
+                "Flutter",
+                "生命周期",
+                "StatefulWidget"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": true,
+            "path": "ios_swiftui_導航設計.txt",
+            "predicted_drawer": "📱 行動與跨平台開發",
+            "raw_json_valid": true,
+            "seconds": 12.573,
+            "summary": "SwiftUI NavigationStack 導航設計：路徑管理與深層連結處理。",
+            "tags": [
+                "SwiftUI",
+                "導航設計",
+                "iOS開發"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": true,
+            "path": "android_room_資料庫整合.txt",
+            "predicted_drawer": "📱 行動與跨平台開發",
+            "raw_json_valid": true,
+            "seconds": 13.949,
+            "summary": "Android Room 資料庫整合：Entity、DAO 與遷移策略的實務範例。",
+            "tags": [
+                "Android",
+                "資料庫",
+                "Room"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": true,
+            "path": "kotlin_協程併發模式.txt",
+            "predicted_drawer": "📱 行動與跨平台開發",
+            "raw_json_valid": true,
+            "seconds": 15.209,
+            "summary": "Kotlin 協程併發模式：structured concurrency、Flow 與例外傳播。",
+            "tags": [
+                "Kotlin",
+                "協程",
+                "併發模式"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": true,
+            "path": "app_上架審核清單.txt",
+            "predicted_drawer": "📱 行動與跨平台開發",
+            "raw_json_valid": true,
+            "seconds": 16.66,
+            "summary": "行動 App 上架審核清單：隱私權聲明、權限說明與截圖規格。",
+            "tags": [
+                "行動",
+                "上架審核",
+                "App"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": true,
+            "path": "swift_記憶體管理ARC.txt",
+            "predicted_drawer": "📱 行動與跨平台開發",
+            "raw_json_valid": true,
+            "seconds": 14.945,
+            "summary": "Swift ARC 記憶體管理：強弱引用、循環引用與 capture list。",
+            "tags": [
+                "Swift",
+                "記憶體管理",
+                "ARC"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": true,
+            "path": "跨平台_框架選型比較.txt",
+            "predicted_drawer": "📱 行動與跨平台開發",
+            "raw_json_valid": true,
+            "seconds": 14.512,
+            "summary": "行動跨平台框架選型比較",
+            "tags": [
+                "Flutter",
+                "React Native",
+                "行動開發"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": true,
+            "path": "android_jetpack_compose筆記.txt",
+            "predicted_drawer": "📱 行動與跨平台開發",
+            "raw_json_valid": true,
+            "seconds": 16.109,
+            "summary": "Jetpack Compose 宣告式 UI：remember、state hoisting 與重組最佳化。",
+            "tags": [
+                "Jetpack Compose",
+                "宣告式 UI",
+                "Android UI"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "📱 行動與跨平台開發",
+            "keyword_hit": false,
+            "path": "mobile_推播通知整合.txt",
+            "predicted_drawer": "⚙️ 系統與底層開發",
+            "raw_json_valid": true,
+            "seconds": 15.361,
+            "summary": "行動推播通知整合：FCM 與 APNs 的憑證設定與背景處理。",
+            "tags": [
+                "推播通知",
+                "FCM",
+                "APNs"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "托福_口說模板整理.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 16.068,
+            "summary": "托福口說第一題與第二題的答題模板,含轉折語與時間分配建議。",
+            "tags": [
+                "托福",
+                "口說",
+                "答題模板"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "雅思_寫作Task2_範文.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 15.669,
+            "summary": "雅思寫作 Task 2 範文解析：論點開展、同義替換與高分句型。",
+            "tags": [
+                "雅思",
+                "寫作",
+                "Task2"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "GRE_填空高頻單字.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 15.867,
+            "summary": "GRE 填空高頻單字整理：六選二同義詞配對與語境判斷技巧。",
+            "tags": [
+                "GRE",
+                "填空",
+                "單字"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "留學_SOP_草稿_v3.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 16.918,
+            "summary": "留學申請 SOP 草稿：研究動機、學術背景與選校理由的段落安排。",
+            "tags": [
+                "留學申請",
+                "SOP",
+                "研究動機"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "推薦信_教授範本.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 12.958,
+            "summary": "學術推薦信範本：課堂表現、研究能力與人格特質的具體事例。",
+            "tags": [
+                "學術",
+                "推薦信",
+                "範本"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "多益_聽力Part3_筆記.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 13.231,
+            "summary": "多益聽力 Part 3 對話題型筆記：預讀題目與關鍵字定位策略。",
+            "tags": [
+                "多益",
+                "聽力",
+                "筆記"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "美國簽證_F1_面試準備.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 13.911,
+            "summary": "F1學生簽證面試準備：財力證明、學習計畫與常見問題應答。",
+            "tags": [
+                "F1簽證",
+                "面試準備",
+                "學生簽證"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "雅思_單字_學術分類.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 13.48,
+            "summary": "雅思學術單字分類整理：環境、科技、教育與健康主題詞彙。",
+            "tags": [
+                "雅思",
+                "學術單字",
+                "分類整理"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "留學_選校評估表.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 13.028,
+            "summary": "留學選校評估表：排名、學費、地點、研究方向與獎學金機會。",
+            "tags": [
+                "留學",
+                "選校",
+                "評估表"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "✈️ 語文檢定與留學",
+            "keyword_hit": true,
+            "path": "托福_閱讀長難句解析.txt",
+            "predicted_drawer": "✈️ 語文檢定與留學",
+            "raw_json_valid": true,
+            "seconds": 13.515,
+            "summary": "托福閱讀長難句解析：插入語、倒裝與指代關係的拆解方法。",
+            "tags": [
+                "托福",
+                "閱讀",
+                "長難句"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": false,
+            "path": "東京五日_行程規劃.txt",
+            "predicted_drawer": "🏖️ 旅遊與生活票證",
+            "raw_json_valid": true,
+            "seconds": 307.069,
+            "summary": "東京五日自由行行程規劃：淺草、澀谷、築地市場與一日近郊路線。",
+            "tags": [
+                "東京",
+                "自由行",
+                "旅行"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": true,
+            "path": "長榮航空_電子機票_TPE-NRT.txt",
+            "predicted_drawer": "🏖️ 旅遊與生活票證",
+            "raw_json_valid": true,
+            "seconds": 24.158,
+            "summary": "長榮航空電子機票確認：台北桃園至東京成田，含航廈與行李額度。",
+            "tags": [
+                "電子機票",
+                "長榮航空"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": true,
+            "path": "京都_飯店訂房確認.txt",
+            "predicted_drawer": "🏖️ 旅遊與生活票證",
+            "raw_json_valid": true,
+            "seconds": 44.328,
+            "summary": "京都飯店訂房確認信",
+            "tags": [
+                "飯店",
+                "訂房",
+                "確認信"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": true,
+            "path": "環球影城_門票QR.txt",
+            "predicted_drawer": "🏖️ 旅遊與生活票證",
+            "raw_json_valid": true,
+            "seconds": 10.623,
+            "summary": "大阪環球影城一日門票電子憑證，含快速通關使用說明。",
+            "tags": [
+                "環球影城",
+                "門票",
+                "電子憑證"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": true,
+            "path": "高鐵_台北左營_車票.txt",
+            "predicted_drawer": "🏖️ 旅遊與生活票證",
+            "raw_json_valid": true,
+            "seconds": 9.978,
+            "summary": "高鐵台北至左營車票訂位紀錄",
+            "tags": [
+                "高鐵",
+                "車票",
+                "訂位"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": true,
+            "path": "護照更新_申請須知.txt",
+            "predicted_drawer": "🏖️ 旅遊與生活票證",
+            "raw_json_valid": true,
+            "seconds": 10.947,
+            "summary": "護照效期更新申請須知：應備文件、規費與工作天數。",
+            "tags": [
+                "護照",
+                "申請",
+                "更新"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": false,
+            "path": "沖繩_租車自駕_行程.txt",
+            "predicted_drawer": "🏖️ 旅遊與生活票證",
+            "raw_json_valid": true,
+            "seconds": 11.98,
+            "summary": "沖繩租車自駕行程：國際駕照、美麗海水族館與古宇利島路線。",
+            "tags": [
+                "沖繩",
+                "租車",
+                "自駕"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": false,
+            "path": "歐洲_跨國火車_訂票紀錄.txt",
+            "predicted_drawer": "📦 雜項",
+            "raw_json_valid": true,
+            "seconds": 11.714,
+            "summary": "歐洲跨國火車訂票紀錄：巴黎至蘇黎世的訂位車廂與轉乘資訊。",
+            "tags": [
+                "火車",
+                "訂票",
+                "歐洲"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": true,
+            "path": "民宿_墾丁_住宿確認.txt",
+            "predicted_drawer": "🏖️ 旅遊與生活票證",
+            "raw_json_valid": true,
+            "seconds": 11.704,
+            "summary": "墾丁海景民宿住宿確認：入住日期、訂金收據與接駁說明。",
+            "tags": [
+                "住宿",
+                "墾丁",
+                "民宿"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "🏖️ 旅遊與生活票證",
+            "keyword_hit": false,
+            "path": "日本_溫泉旅館_預約信.txt",
+            "predicted_drawer": "📦 雜項",
+            "raw_json_valid": true,
+            "seconds": 11.948,
+            "summary": "箱根溫泉旅館預約確認信：一泊二食方案與露天風呂使用時段。",
+            "tags": [
+                "溫泉旅館",
+                "預約信",
+                "箱根"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": true,
+            "path": "2024_綜合所得稅_試算.txt",
+            "predicted_drawer": "📊 財務與試算表",
+            "raw_json_valid": true,
+            "seconds": 12.482,
+            "summary": "2024 年度綜合所得稅試算：標準扣除額、列舉扣除與級距稅率計算。",
+            "tags": [
+                "綜合所得稅",
+                "稅率",
+                "稅務"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": true,
+            "path": "公司_季度損益表_Q3.txt",
+            "predicted_drawer": "📊 財務與試算表",
+            "raw_json_valid": true,
+            "seconds": 12.165,
+            "summary": "公司第三季損益表摘要：營收、毛利率、營業費用與稅後淨利。",
+            "tags": [
+                "季度損益表",
+                "公司財務",
+                "財務報表"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": true,
+            "path": "電子發票_載具歸戶說明.txt",
+            "predicted_drawer": "📊 財務與試算表",
+            "raw_json_valid": true,
+            "seconds": 13.008,
+            "summary": "電子發票手機條碼載具歸戶說明與中獎獎金自動匯款設定。",
+            "tags": [
+                "電子發票",
+                "手機條碼",
+                "獎金匯款"
+            ]
+        },
+        {
+            "drawer_hit": false,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": true,
+            "path": "個人_月度預算規劃.txt",
+            "predicted_drawer": "💼 商務與職場管理",
+            "raw_json_valid": true,
+            "seconds": 13.908,
+            "summary": "個人月度預算規劃：固定支出、儲蓄率與緊急預備金目標。",
+            "tags": [
+                "預算",
+                "儲蓄",
+                "財務管理"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": true,
+            "path": "報稅_扣繳憑單整理.txt",
+            "predicted_drawer": "📊 財務與試算表",
+            "raw_json_valid": true,
+            "seconds": 15.574,
+            "summary": "年度報稅扣繳憑單整理清單：薪資、利息與股利所得明細。",
+            "tags": [
+                "報稅",
+                "扣繳憑單",
+                "所得稅"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": true,
+            "path": "公司_資產負債表_年報.txt",
+            "predicted_drawer": "📊 財務與試算表",
+            "raw_json_valid": true,
+            "seconds": 70.341,
+            "summary": "年度資產負債表摘要：流動資產、長期負債與股東權益變動。",
+            "tags": [
+                "資產負債表",
+                "財務報表",
+                "公司年報"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": true,
+            "path": "廠商_報價發票_2024-031.txt",
+            "predicted_drawer": "📊 財務與試算表",
+            "raw_json_valid": true,
+            "seconds": 11.291,
+            "summary": "廠商報價發票 2024-031：品項單價、稅額與付款條件三十天。",
+            "tags": [
+                "廠商",
+                "報價發票",
+                "付款條件"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": true,
+            "path": "記帳_現金流量表_範本.txt",
+            "predicted_drawer": "📊 財務與試算表",
+            "raw_json_valid": true,
+            "seconds": 11.421,
+            "summary": "現金流量表範本：營業、投資與籌資活動的現金流分類。",
+            "tags": [
+                "現金流量表",
+                "財務報表",
+                "會計"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": false,
+            "path": "投資_股利所得_試算.txt",
+            "predicted_drawer": "📊 財務與試算表",
+            "raw_json_valid": true,
+            "seconds": 11.843,
+            "summary": "股利所得課稅試算：合併計稅與分離課稅的稅負比較。",
+            "tags": [
+                "股利所得",
+                "課稅",
+                "稅負"
+            ]
+        },
+        {
+            "drawer_hit": true,
+            "expected_drawer": "📊 財務與試算表",
+            "keyword_hit": true,
+            "path": "年度_財務報表_分析筆記.txt",
+            "predicted_drawer": "📊 財務與試算表",
+            "raw_json_valid": true,
+            "seconds": 12.069,
+            "summary": "年度財務報表分析筆記：流動比率、負債比與股東權益報酬率。",
+            "tags": [
+                "財務報表",
+                "財務分析",
+                "會計"
+            ]
+        }
+    ],
+    "drawer_accuracy_pct": 86,
+    "files_per_minute": 2.867502734880733,
+    "keyword_hit_rate_pct": 81,
+    "model": "/Users/zackchen/Desktop/專案檔案/Smartflie/assets/models/chat_model.gguf",
+    "peak_rss_mb": 5825,
+    "raw_json_valid_rate_pct": 100
+}
