@@ -6,7 +6,10 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
+#include <QDateTime>
 #include <QMimeDatabase>
+#include <QImageReader>
 #include <QMimeType>
 #include <QRegularExpression>
 #include <QSet>
@@ -566,6 +569,36 @@ QString DocumentParser::truncateForAi(const QString &text, int maxChars)
     if (text.size() <= maxChars)
         return text;
     return text.left(maxChars) + QStringLiteral("\n") + QStringLiteral("...[內容過長已截斷]");
+}
+
+QString DocumentParser::extractMetadataContext(const QString &filePath)
+{
+    const QFileInfo fi(filePath);
+    if (!fi.exists() || !fi.isFile())
+        return QString();
+
+    const QMimeType mt = QMimeDatabase().mimeTypeForFile(fi);
+    const QString mime = mt.isValid() ? mt.name() : QStringLiteral("application/octet-stream");
+
+    QString ctx = QStringLiteral("[此檔案無可擷取文字內容，以下為其中繼資料 (Metadata)]\n");
+    ctx += QStringLiteral("檔名: %1\n").arg(fi.fileName());
+    ctx += QStringLiteral("副檔名: %1\n").arg(fi.suffix().toLower());
+    ctx += QStringLiteral("MIME 類型: %1\n").arg(mime);
+    ctx += QStringLiteral("大小: %1 KB\n").arg(fi.size() / 1024);
+    ctx += QStringLiteral("修改日期: %1\n").arg(fi.lastModified().toString(QStringLiteral("yyyy-MM-dd")));
+
+    const QString parent = fi.dir().dirName();
+    if (!parent.isEmpty() && parent != QStringLiteral("."))
+        ctx += QStringLiteral("所在資料夾: %1\n").arg(parent);
+
+    // For images, add pixel dimensions without decoding the whole bitmap.
+    if (mime.startsWith(QStringLiteral("image/"))) {
+        QImageReader reader(fi.absoluteFilePath());
+        const QSize sz = reader.size();
+        if (sz.isValid())
+            ctx += QStringLiteral("影像尺寸: %1 x %2 像素\n").arg(sz.width()).arg(sz.height());
+    }
+    return ctx.trimmed();
 }
 
 /// First 8 KB of a file decoded as UTF-8, or empty if it looks binary (NUL bytes).

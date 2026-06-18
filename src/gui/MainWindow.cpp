@@ -5101,6 +5101,88 @@ private:
     QComboBox *m_folderCombo = nullptr;
 };
 
+/// Checkbox picker for packing semantic-search results into a new folder.
+/// Mirrors ArchiveDialog, but the destination is a NEW folder named by the user
+/// (semantic results are virtual, not tied to an existing subfolder).
+class SemanticPackDialog : public QDialog
+{
+public:
+    explicit SemanticPackDialog(const QStringList &resultFiles, QWidget *parent = nullptr)
+        : QDialog(parent)
+    {
+        setWindowTitle(QStringLiteral("打包搜尋結果為資料夾"));
+        resize(460, 420);
+
+        auto *mainLayout = new QVBoxLayout(this);
+        mainLayout->addWidget(
+            new QLabel(QStringLiteral("請勾選要打包的檔案 (取消勾選即不打包)："), this));
+
+        m_fileList = new QListWidget(this);
+        m_fileList->setSelectionMode(QAbstractItemView::NoSelection);
+        for (const QString &path : resultFiles) {
+            const QString clean = QDir::cleanPath(path);
+            if (clean.isEmpty())
+                continue;
+            auto *item = new QListWidgetItem(QFileInfo(clean).fileName(), m_fileList);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(Qt::Checked);
+            item->setData(Qt::UserRole, clean);
+            item->setToolTip(clean);
+        }
+        mainLayout->addWidget(m_fileList, 1);
+
+        auto *selectRow = new QHBoxLayout();
+        auto *btnSelectAll = new QPushButton(QStringLiteral("全選"), this);
+        auto *btnDeselectAll = new QPushButton(QStringLiteral("取消全選"), this);
+        connect(btnSelectAll, &QPushButton::clicked, this, [this]() {
+            for (int i = 0; i < m_fileList->count(); ++i)
+                if (QListWidgetItem *item = m_fileList->item(i))
+                    item->setCheckState(Qt::Checked);
+        });
+        connect(btnDeselectAll, &QPushButton::clicked, this, [this]() {
+            for (int i = 0; i < m_fileList->count(); ++i)
+                if (QListWidgetItem *item = m_fileList->item(i))
+                    item->setCheckState(Qt::Unchecked);
+        });
+        selectRow->addWidget(btnSelectAll);
+        selectRow->addWidget(btnDeselectAll);
+        selectRow->addStretch(1);
+        mainLayout->addLayout(selectRow);
+
+        mainLayout->addWidget(new QLabel(QStringLiteral("新資料夾名稱："), this));
+        m_folderEdit = new QLineEdit(this);
+        m_folderEdit->setPlaceholderText(QStringLiteral("例如：財務報告"));
+        mainLayout->addWidget(m_folderEdit);
+
+        auto *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        connect(buttonBox, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        if (QPushButton *okBtn = buttonBox->button(QDialogButtonBox::Ok))
+            okBtn->setEnabled(m_fileList->count() > 0);
+        mainLayout->addWidget(buttonBox);
+    }
+
+    QString getFolderName() const { return m_folderEdit->text().trimmed(); }
+
+    QStringList getCheckedFiles() const
+    {
+        QStringList out;
+        for (int i = 0; i < m_fileList->count(); ++i) {
+            QListWidgetItem *item = m_fileList->item(i);
+            if (!item || item->checkState() != Qt::Checked)
+                continue;
+            const QString path = QDir::cleanPath(item->data(Qt::UserRole).toString());
+            if (!path.isEmpty())
+                out << path;
+        }
+        return out;
+    }
+
+private:
+    QListWidget *m_fileList = nullptr;
+    QLineEdit *m_folderEdit = nullptr;
+};
+
 namespace {
 QString sanitizeTagFolderName(const QString &tag) {
     QString s = tag.trimmed();
@@ -7453,18 +7535,19 @@ void MainWindow::onSaveSemanticResultsAsAiCategory()
         return;
     }
 
-    bool ok = false;
-    QString folderName = QInputDialog::getText(
-        this,
-        QStringLiteral("打包/新增為標籤資料夾"),
-        QStringLiteral("請輸入新資料夾名稱："),
-        QLineEdit::Normal,
-        QString(),
-        &ok);
-    if (!ok)
+    // Checkbox picker: let the user choose which results to pack (default all).
+    SemanticPackDialog dlg(m_semanticPickedPaths, this);
+    if (dlg.exec() != QDialog::Accepted)
         return;
 
-    folderName = sanitizeTagFolderName(folderName.trimmed());
+    const QStringList chosenFiles = dlg.getCheckedFiles();
+    if (chosenFiles.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Smartflie"),
+                                 QStringLiteral("未勾選任何檔案。"));
+        return;
+    }
+
+    QString folderName = sanitizeTagFolderName(dlg.getFolderName());
     if (folderName.isEmpty() || folderName == QStringLiteral("_未命名標籤")) {
         QMessageBox::warning(this, QStringLiteral("Smartflie"), QStringLiteral("資料夾名稱不可為空。"));
         return;
@@ -7482,7 +7565,7 @@ void MainWindow::onSaveSemanticResultsAsAiCategory()
 
     QSet<QString> sourceDirsForCleanup;
     int moved = 0;
-    for (const QString &pathRaw : std::as_const(m_semanticPickedPaths)) {
+    for (const QString &pathRaw : std::as_const(chosenFiles)) {
         const QString srcPath = QDir::cleanPath(pathRaw);
         if (srcPath.isEmpty())
             continue;
@@ -8320,7 +8403,11 @@ void MainWindow::runSingleFileAnalysisForPath(const QString &absPath)
     }
 
     QFileInfo fi(fp);
-    if (!isAnalyzableFile(fi) || !sfPathHasAnalyzableTextOrDocSuffix(fp)) {
+    // Single-file analysis accepts ANY analyzable file: text/doc files use their
+    // extracted content; images/binaries/unknown types fall back to metadata-based
+    // classification (see analyzeFileForPath). Batch analysis keeps the text/doc
+    // filter to avoid flooding the queue with low-signal media files.
+    if (!isAnalyzableFile(fi)) {
         lblStatus->setText(LanguageManager::instance().getText(QStringLiteral("此項目不可分析")));
         return;
     }
@@ -8687,6 +8774,18 @@ void MainWindow::analyzeFileForPath(const QString &absPath, bool forceColdArchiv
 
     if (pdfMetadataOnly && contentQ.trimmed().isEmpty()) {
         contentQ = QStringLiteral("[Metadata-only classification — filename: %1]").arg(filename);
+    }
+
+    // Unreadable file types (images, binaries, unknown extensions): no text layer
+    // exists, so classify from rich metadata (filename + MIME + size + date +
+    // image dimensions) rather than skipping the file entirely.
+    if (!isTextExt && contentQ.trimmed().isEmpty()) {
+        const QString meta = DocumentParser::extractMetadataContext(fp);
+        if (!meta.trimmed().isEmpty()) {
+            contentQ = meta;
+            pdfMetadataOnly = true; // reuse the metadata-only path (low-confidence, no hallucination)
+            m_lowConfidencePaths.insert(QDir::cleanPath(fp));
+        }
     }
 
     // Enrich sparse content with parent folder context so LLM has more signal

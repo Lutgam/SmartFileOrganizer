@@ -16,6 +16,8 @@ private slots:
     void truncateForAi_caps();
     void sanitizeTextForAi_keepsNormalText();
     void extractText_missingFile();
+    void extractMetadataContext_binaryFile();
+    void extractMetadataContext_missingFile();
 
 private:
     QString writeTempFile(const QString &dir, const QString &name, const QByteArray &bytes) const
@@ -84,6 +86,28 @@ void TestDocumentParser::extractText_missingFile()
 {
     const QString out = DocumentParser::extractTextQString(QStringLiteral("/nonexistent/no_such_file.txt"));
     QVERIFY(out.trimmed().isEmpty());
+}
+
+void TestDocumentParser::extractMetadataContext_binaryFile()
+{
+    // An unreadable-content file (binary bytes) must still yield a metadata
+    // descriptor containing filename, MIME and size so it can be classified.
+    QTemporaryDir dir;
+    const QString p = writeTempFile(dir.path(), QStringLiteral("掃描檔案.bin"),
+                                    QByteArrayLiteral("\x00\x01\x02\xFF\xFE binary"));
+    QVERIFY(!p.isEmpty());
+
+    const QString meta = DocumentParser::extractMetadataContext(p);
+    QVERIFY(!meta.trimmed().isEmpty());
+    QVERIFY(meta.contains(QStringLiteral("掃描檔案.bin")));   // filename
+    QVERIFY(meta.contains(QStringLiteral("MIME")));            // mime field present
+    QVERIFY(meta.contains(QStringLiteral("KB")));              // size field present
+}
+
+void TestDocumentParser::extractMetadataContext_missingFile()
+{
+    const QString meta = DocumentParser::extractMetadataContext(QStringLiteral("/nonexistent/x.jpg"));
+    QVERIFY(meta.trimmed().isEmpty());
 }
 
 QTEST_GUILESS_MAIN(TestDocumentParser)

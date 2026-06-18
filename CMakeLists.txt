@@ -121,15 +121,16 @@ add_executable(SmartFileOrganizer
     src/gui/GraphWidget.h
 )
 
+# sfo_ai PUBLIC-links sfo_core, so sfo_core is provided transitively (avoid
+# listing it twice, which produces a duplicate-library linker warning).
 target_link_libraries(SmartFileOrganizer PRIVATE
-    sfo_core
     sfo_ai
     Qt6::Widgets Qt6::Concurrent Qt6::Network
 )
 
 # --- Headless evaluation runner (quantitative accuracy / throughput report) ---
 add_executable(sfo_eval tools/EvalRunner.cpp)
-target_link_libraries(sfo_eval PRIVATE sfo_core sfo_ai)
+target_link_libraries(sfo_eval PRIVATE sfo_ai)
 
 if(WIN32)
     set_property(TARGET SmartFileOrganizer PROPERTY WIN32_EXECUTABLE ON)

@@ -19,6 +19,12 @@ public:
     static QString sanitizeTextForAi(const QString& text);
     static QString truncateForAi(const QString& text, int maxChars = kAiTextMaxChars);
 
+    /// Metadata-only descriptor for files whose content cannot be read (images,
+    /// binaries, unknown types): filename, extension, MIME type, size, modified
+    /// date and—for images—pixel dimensions. Used so EVERY analyzable file can be
+    /// classified, even without an extractable text layer.
+    static QString extractMetadataContext(const QString& filePath);
+
 private:
     static std::string parsDocx(const std::string& filePath);
     static std::string parseXlsx(const std::string& filePath);
